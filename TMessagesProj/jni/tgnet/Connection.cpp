@@ -693,10 +693,7 @@ void Connection::onDisconnectedInternal(int32_t reason, int32_t error) {
             isTryingNextPort = true;
             if (failedConnectionCount > willRetryConnectCount || switchToNextPort) {
                 currentDatacenter->nextAddressOrPort(currentAddressFlags);
-                if (currentDatacenter->isRepeatCheckingAddresses() && (ConnectionsManager::getInstance(currentDatacenter->instanceNum).getIpStratagy() == USE_IPV4_ONLY || ConnectionsManager::getInstance(currentDatacenter->instanceNum).getIpStratagy() == USE_IPV6_ONLY)) {
-                    if (LOGS_ENABLED) DEBUG_D("started retrying connection, set ipv4 ipv6 random strategy");
-                    ConnectionsManager::getInstance(currentDatacenter->instanceNum).setIpStrategy(USE_IPV4_IPV6_RANDOM);
-                }
+                // IPv6 fallback disabled: force IPv4-only to prevent traffic leak outside VPN tunnel
                 failedConnectionCount = 0;
             }
         }

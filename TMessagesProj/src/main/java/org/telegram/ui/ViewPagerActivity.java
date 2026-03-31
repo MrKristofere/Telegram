@@ -1,6 +1,7 @@
 package org.telegram.ui;
 
 import android.content.Context;
+import android.content.Intent;
 import android.util.SparseArray;
 import android.view.MotionEvent;
 import android.view.View;
@@ -242,6 +243,15 @@ public abstract class ViewPagerActivity extends BaseFragment {
     public boolean isLightStatusBar() {
         final BaseFragment fragment = getCurrentVisibleFragment();
         return fragment != null && fragment.fragmentView != null ? fragment.isLightStatusBar() : super.isLightStatusBar();
+    }
+
+    @Override
+    public void onActivityResultFragment(int requestCode, int resultCode, Intent data) {
+        super.onActivityResultFragment(requestCode, resultCode, data);
+        final BaseFragment fragment = getCurrentVisibleFragment();
+        if (fragment != null) {
+            fragment.onActivityResultFragment(requestCode, resultCode, data);
+        }
     }
 
     @Override

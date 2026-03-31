@@ -655,7 +655,7 @@ public class ActionIntroActivity extends BaseFragment implements LocationControl
     }
 
     private void updateColors() {
-        startMessagingButtonBackground.setColors(new int[]{getThemedColor(Theme.key_featuredStickers_addButton), getThemedColor(Theme.key_featuredStickers_addButton2)});
+        startMessagingButtonBackground.setColors(new int[]{0xFF1C2A3A, 0xFF4F73A0});
         buttonTextView.setTextColor(Theme.getColor(Theme.key_featuredStickers_buttonText));
         buttonTextView.setBackground(Theme.createSimpleSelectorRoundRectDrawable(dp(24), Color.TRANSPARENT, Theme.getColor(Theme.key_featuredStickers_addButtonPressed)));
 

@@ -24,6 +24,8 @@
 -keep class com.google.android.exoplayer2.metadata.flac.PictureFrame { *; }
 -keep class com.google.android.exoplayer2.decoder.SimpleDecoderOutputBuffer { *; }
 -keep class org.telegram.ui.Stories.recorder.FfmpegAudioWaveformLoader { *; }
+-keep class org.telegram.ui.Components.ForceUpdateOverlay { *; }
+-keep class org.telegram.ui.Components.UpdateAppAlertDialog { *; }
 -keep class androidx.mediarouter.app.MediaRouteButton { *; }
 -keepclassmembers class ** {
     @android.webkit.JavascriptInterface <methods>;
@@ -103,6 +105,9 @@
 # Don't warn about checkerframework and Kotlin annotations
 -dontwarn org.checkerframework.**
 -dontwarn javax.annotation.**
+
+# SLF4J — optional binding, not present at runtime
+-dontwarn org.slf4j.impl.StaticLoggerBinder
 
 # Use -keep to explicitly keep any other classes shrinking would remove
 -dontoptimize

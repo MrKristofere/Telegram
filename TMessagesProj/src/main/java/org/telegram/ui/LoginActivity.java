@@ -196,6 +196,10 @@ import org.telegram.ui.Stars.ExplainStarsSheet;
 import org.telegram.ui.Stories.recorder.ButtonWithCounterView;
 import org.telegram.ui.bots.BotWebViewSheet;
 
+import org.telegram.messenger.VpnConnectionHelper;
+import vpn.sdk.VpnSDK;
+import vpn.tunnel.VpnTunnelState;
+
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.lang.annotation.Retention;
@@ -347,6 +351,8 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
     private VerticalPositionAutoAnimator floatingAutoAnimator;
     private int progressRequestId;
     private boolean[] doneButtonVisible = new boolean[] {true, false};
+
+    private final VpnConnectionHelper vpnHelper = new VpnConnectionHelper(this);
 
     private AlertDialog cancelDeleteProgressDialog;
 
@@ -506,6 +512,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
     @Override
     public void onFragmentDestroy() {
         super.onFragmentDestroy();
+        vpnHelper.release();
         for (int a = 0; a < views.length; a++) {
             if (views[a] != null) {
                 views[a].onDestroyActivity();
@@ -726,6 +733,13 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
         floatingAutoAnimator = VerticalPositionAutoAnimator.attach(floatingButton);
         sizeNotifierFrameLayout.addView(floatingButton, FragmentFloatingButton.createDefaultLayoutParamsBig());
         floatingButton.setOnClickListener(view -> onDoneButtonPressed());
+        vpnHelper.setProgressCallback(showProgress -> {
+            if (showProgress) {
+                needShowProgress(0);
+            } else {
+                needHideProgress(false);
+            }
+        });
         floatingAutoAnimator.addUpdateListener((animation, value, velocity) -> {
             if (phoneNumberConfirmView != null) {
                 phoneNumberConfirmView.updateFabPosition();
@@ -914,6 +928,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
     @Override
     public void onResume() {
         super.onResume();
+        vpnHelper.handleResume();
         if (newAccount) {
             ConnectionsManager.getInstance(currentAccount).setAppPaused(false, false);
         }
@@ -960,6 +975,10 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
     @Override
     public void onRequestPermissionsResultFragment(int requestCode, String[] permissions, int[] grantResults) {
         if (permissions.length == 0 || grantResults.length == 0) return;
+
+        if (vpnHelper.handlePermissionResult(requestCode, permissions, grantResults)) {
+            return;
+        }
 
         boolean granted = grantResults[0] == PackageManager.PERMISSION_GRANTED;
         if (requestCode == 6) {
@@ -1144,6 +1163,9 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
 
     @Override
     public void onActivityResultFragment(int requestCode, int resultCode, Intent data) {
+        if (vpnHelper.handleActivityResult(requestCode, resultCode)) {
+            return;
+        }
         LoginActivityRegisterView registerView = (LoginActivityRegisterView) views[VIEW_REGISTER];
         if (registerView != null) {
             registerView.imageUpdater.onActivityResult(requestCode, resultCode, data);
@@ -1256,10 +1278,10 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                 mailer.putExtra(Intent.EXTRA_EMAIL, new String[]{banned ? "recover@telegram.org" : "login@stel.com"});
                 if (banned) {
                     mailer.putExtra(Intent.EXTRA_SUBJECT, "Banned phone number: " + phoneNumber);
-                    mailer.putExtra(Intent.EXTRA_TEXT, "I'm trying to use my mobile phone number: " + phoneNumber + "\nBut Telegram says it's banned. Please help.\n\nApp version: " + version + "\nOS version: SDK " + Build.VERSION.SDK_INT + "\nDevice Name: " + Build.MANUFACTURER + Build.MODEL + "\nLocale: " + Locale.getDefault());
+                    mailer.putExtra(Intent.EXTRA_TEXT, "I'm trying to use my mobile phone number: " + phoneNumber + "\nBut vpGram says it's banned. Please help.\n\nApp version: " + version + "\nOS version: SDK " + Build.VERSION.SDK_INT + "\nDevice Name: " + Build.MANUFACTURER + Build.MODEL + "\nLocale: " + Locale.getDefault());
                 } else {
                     mailer.putExtra(Intent.EXTRA_SUBJECT, "Invalid phone number: " + phoneNumber);
-                    mailer.putExtra(Intent.EXTRA_TEXT, "I'm trying to use my mobile phone number: " + phoneNumber + "\nBut Telegram says it's invalid. Please help.\n\nApp version: " + version + "\nOS version: SDK " + Build.VERSION.SDK_INT + "\nDevice Name: " + Build.MANUFACTURER + Build.MODEL + "\nLocale: " + Locale.getDefault());
+                    mailer.putExtra(Intent.EXTRA_TEXT, "I'm trying to use my mobile phone number: " + phoneNumber + "\nBut vpGram says it's invalid. Please help.\n\nApp version: " + version + "\nOS version: SDK " + Build.VERSION.SDK_INT + "\nDevice Name: " + Build.MANUFACTURER + Build.MODEL + "\nLocale: " + Locale.getDefault());
                 }
                 fragment.getParentActivity().startActivity(Intent.createChooser(mailer, "Send email..."));
             } catch (Exception e) {
@@ -1342,6 +1364,16 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
         if (!doneButtonVisible[currentDoneType]) {
             return;
         }
+        // Если VPN уже подключён — выполняем оригинальное действие сразу
+        if (VpnSDK.getTunnelState() == VpnTunnelState.UP) {
+            performOriginalDoneAction();
+            return;
+        }
+        // Запускаем VPN и после успешного подключения выполняем действие
+        vpnHelper.startVpnAndThen(this::performOriginalDoneAction);
+    }
+
+    private void performOriginalDoneAction() {
         if (radialProgressView.getTag() != null) {
             if (getParentActivity() == null) {
                 return;

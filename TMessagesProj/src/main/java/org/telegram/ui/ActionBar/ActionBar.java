@@ -124,6 +124,8 @@ public class ActionBar extends FrameLayout implements Theme.Colorable {
     private CharSequence lastTitle;
     private Drawable lastRightDrawable;
     private OnClickListener rightDrawableOnClickListener;
+    private ImageView vpnIconView;
+    private Drawable lastVpnDrawable;
     private CharSequence lastOverlayTitle;
     private Object[] overlayTitleToSet = new Object[3];
     private Runnable lastRunnable;
@@ -463,6 +465,10 @@ public class ActionBar extends FrameLayout implements Theme.Colorable {
     }
 
     public void setTitle(CharSequence value, Drawable rightDrawable) {
+        setTitle(value, null, null);
+    }
+
+    public void setTitle(CharSequence value, Drawable rightDrawable, Drawable vpnDrawable) {
         if (value != null && titleTextView[0] == null) {
             createTitleTextView(0);
         }
@@ -478,7 +484,39 @@ public class ActionBar extends FrameLayout implements Theme.Colorable {
             }
             titleTextView[0].setRightDrawableOnClick(rightDrawableOnClickListener);
         }
+        lastVpnDrawable = vpnDrawable;
+        if (vpnDrawable != null) {
+            if (vpnIconView == null) {
+                vpnIconView = new ImageView(getContext());
+                vpnIconView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                vpnIconView.setAdjustViewBounds(true);
+                addView(vpnIconView, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.RIGHT | Gravity.CENTER_VERTICAL));
+            }
+            vpnIconView.setImageDrawable(vpnDrawable);
+            vpnIconView.setVisibility(VISIBLE);
+        } else if (vpnIconView != null) {
+            vpnIconView.setVisibility(GONE);
+        }
         fromBottom = false;
+    }
+
+    public void updateVpnDrawable(Drawable vpnDrawable) {
+        lastVpnDrawable = vpnDrawable;
+        if (vpnIconView != null && vpnDrawable != null) {
+            vpnIconView.setImageDrawable(vpnDrawable);
+        }
+    }
+
+    public void setVpnIconVisibility(boolean visible) {
+        if (vpnIconView != null) {
+            vpnIconView.setVisibility(visible ? VISIBLE : GONE);
+        }
+    }
+
+    public void setVpnDrawableOnClick(OnClickListener listener) {
+        if (vpnIconView != null) {
+            vpnIconView.setOnClickListener(listener);
+        }
     }
 
     public void setRightDrawableOnClick(OnClickListener onClickListener) {
@@ -1128,6 +1166,13 @@ public class ActionBar extends FrameLayout implements Theme.Colorable {
             avatarSearchImageView.setVisibility(View.VISIBLE);
             searchVisibleAnimator.playTogether(ObjectAnimator.ofFloat(avatarSearchImageView, View.ALPHA, visible ? 1f : 0f));
         }
+        if (vpnIconView != null && vpnIconView.getDrawable() != null) {
+            if (!visible) {
+                vpnIconView.setVisibility(View.VISIBLE);
+                vpnIconView.setAlpha(0f);
+            }
+            searchVisibleAnimator.playTogether(ObjectAnimator.ofFloat(vpnIconView, View.ALPHA, visible ? 0f : 1f));
+        }
         centerScale = true;
         requestLayout();
         searchVisibleAnimator.addListener(new AnimatorListenerAdapter() {
@@ -1155,6 +1200,14 @@ public class ActionBar extends FrameLayout implements Theme.Colorable {
                 if (avatarSearchImageView != null) {
                     if (!visible) {
                         avatarSearchImageView.setVisibility(View.GONE);
+                    }
+                }
+
+                if (vpnIconView != null) {
+                    if (visible) {
+                        vpnIconView.setVisibility(View.GONE);
+                    } else {
+                        vpnIconView.setAlpha(1f);
                     }
                 }
             }
@@ -1309,9 +1362,17 @@ public class ActionBar extends FrameLayout implements Theme.Colorable {
 
         }
 
+        if (vpnIconView != null && vpnIconView.getVisibility() != GONE) {
+            vpnIconView.measure(
+                MeasureSpec.makeMeasureSpec(width, MeasureSpec.AT_MOST),
+                MeasureSpec.makeMeasureSpec(dp(26), MeasureSpec.EXACTLY)
+            );
+        }
+
         for (int i = 0; i < 2; i++) {
             if (titleTextView[0] != null && titleTextView[0].getVisibility() != GONE || subtitleTextView != null && subtitleTextView.getVisibility() != GONE) {
-                int availableWidth = width - (menu != null ? menu.getMeasuredWidth() : 0) - dp(16) - textLeft - titleRightMargin;
+                int vpnIconReserved = (vpnIconView != null && vpnIconView.getVisibility() != GONE) ? vpnIconView.getMeasuredWidth() + dp(4) : 0;
+                int availableWidth = width - (menu != null ? menu.getMeasuredWidth() : 0) - dp(4) - textLeft - titleRightMargin - vpnIconReserved;
 
                 if (((fromBottom && i == 0) || (!fromBottom && i == 1)) && overlayTitleAnimation && titleAnimationRunning) {
                     titleTextView[i].setTextSize(!AndroidUtilities.isTablet() && getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE ? 18 : 20);
@@ -1370,7 +1431,7 @@ public class ActionBar extends FrameLayout implements Theme.Colorable {
         int childCount = getChildCount();
         for (int i = 0; i < childCount; i++) {
             View child = getChildAt(i);
-            if (child.getVisibility() == GONE || child == titleTextView[0] || child == titleTextView[1] || child == additionalSubTitleOverlayContainer || child == subtitleTextView || child == menu || child == backButtonImageView || child == additionalSubtitleTextView || child == avatarSearchImageView) {
+            if (child.getVisibility() == GONE || child == titleTextView[0] || child == titleTextView[1] || child == additionalSubTitleOverlayContainer || child == subtitleTextView || child == menu || child == backButtonImageView || child == additionalSubtitleTextView || child == avatarSearchImageView || child == vpnIconView) {
                 continue;
             }
             measureChildWithMargins(child, widthMeasureSpec, 0, MeasureSpec.makeMeasureSpec(getMeasuredHeight(), MeasureSpec.EXACTLY), 0);
@@ -1396,6 +1457,14 @@ public class ActionBar extends FrameLayout implements Theme.Colorable {
         if (menu != null && menu.getVisibility() != GONE) {
             int menuLeft = menu.searchFieldVisible() ? dp(AndroidUtilities.isTablet() ? 74 : 66) : (right - left) - menu.getMeasuredWidth();
             menu.layout(menuLeft, additionalTop, menuLeft + menu.getMeasuredWidth(), additionalTop + menu.getMeasuredHeight());
+        }
+
+        if (vpnIconView != null && vpnIconView.getVisibility() != GONE && titleTextView[0] != null) {
+            int iconWidth = vpnIconView.getMeasuredWidth();
+            int iconHeight = vpnIconView.getMeasuredHeight();
+            int vpnLeft = menu.getLeft() - dp(4) - iconWidth;
+            int vpnTop = additionalTop + (getCurrentActionBarHeight() - iconHeight) / 2;
+            vpnIconView.layout(vpnLeft, vpnTop, vpnLeft + iconWidth, vpnTop + iconHeight);
         }
 
         for (int i = 0; i < 2; i++) {
@@ -1439,7 +1508,7 @@ public class ActionBar extends FrameLayout implements Theme.Colorable {
         int childCount = getChildCount();
         for (int i = 0; i < childCount; i++) {
             View child = getChildAt(i);
-            if (child.getVisibility() == GONE || child == titleTextView[0] || child == titleTextView[1] || child == additionalSubTitleOverlayContainer || child == subtitleTextView || child == menu || child == backButtonImageView || child == additionalSubtitleTextView || child == avatarSearchImageView) {
+            if (child.getVisibility() == GONE || child == titleTextView[0] || child == titleTextView[1] || child == additionalSubTitleOverlayContainer || child == subtitleTextView || child == menu || child == backButtonImageView || child == additionalSubtitleTextView || child == avatarSearchImageView || child == vpnIconView) {
                 continue;
             }
 
@@ -1950,6 +2019,8 @@ public class ActionBar extends FrameLayout implements Theme.Colorable {
         setBackground(null);
     }
 
+//    private android.graphics.Paint debugPaint;
+
     @Override
     protected void dispatchDraw(Canvas canvas) {
         if (blurredBackground && actionBarColor != Color.TRANSPARENT) {
@@ -1962,6 +2033,27 @@ public class ActionBar extends FrameLayout implements Theme.Colorable {
             }
         }
         super.dispatchDraw(canvas);
+//        if (debugPaint == null) {
+//            debugPaint = new android.graphics.Paint();
+//            debugPaint.setStyle(android.graphics.Paint.Style.STROKE);
+//            debugPaint.setStrokeWidth(2);
+//        }
+//
+//        debugPaint.setColor(0xFFFF0000);
+//        canvas.drawRect(this.getLeft(), this.getTop(), this.getRight(), this.getBottom(), debugPaint);
+//
+//        if (titleTextView[0] != null && titleTextView[0].getVisibility() == VISIBLE) {
+//            debugPaint.setColor(0xFFFF0000);
+//            canvas.drawRect(titleTextView[0].getLeft(), titleTextView[0].getTop(), titleTextView[0].getRight(), titleTextView[0].getBottom(), debugPaint);
+//        }
+//        if (menu != null && menu.getVisibility() != GONE) {
+//            debugPaint.setColor(0xFF0000FF);
+//            canvas.drawRect(menu.getLeft(), menu.getTop(), menu.getRight(), menu.getBottom(), debugPaint);
+//        }
+//        if (vpnIconView != null && vpnIconView.getVisibility() != GONE) {
+//            debugPaint.setColor(0xFF00FF00);
+//            canvas.drawRect(vpnIconView.getLeft(), vpnIconView.getTop(), vpnIconView.getRight(), vpnIconView.getBottom(), debugPaint);
+//        }
     }
 
     public void setForceSkipTouches(boolean forceSkipTouches) {

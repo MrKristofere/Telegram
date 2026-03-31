@@ -46,6 +46,7 @@ import java.io.FileInputStream;
 import java.io.FileWriter;
 import java.text.NumberFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collection;
 import java.util.Currency;
@@ -53,6 +54,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 import java.util.TimeZone;
 
 public class LocaleController {
@@ -1378,6 +1380,29 @@ public class LocaleController {
         return getStringInternal(key, null, 0, res);
     }
 
+    //эти ключи не меняем
+    private static final Set<String> KEEP_TELEGRAM_KEYS = new HashSet<>(Arrays.asList(
+            "TelegramPremium",
+            "TelegramStars",
+            "MenuTelegramStars",
+            "TelegramBusiness",
+            "SentAppCodeTitle",
+            "SentAppCode",
+            "SentAppCodeWithPhone"
+    ));
+
+    private static String rebrandString(String value) {
+        return rebrandString(value, null);
+    }
+
+    private static String rebrandString(String value, String key) {
+        if (value != null && (key == null || !KEEP_TELEGRAM_KEYS.contains(key))) {
+            value = value.replace("Telegram", "vpGram");
+            value = value.replace("TELEGRAM", "VPGRAM");
+        }
+        return value;
+    }
+
     private String getStringInternal(String key, String fallback, int fallbackRes, int res) {
         String value = BuildVars.USE_CLOUD_STRINGS ? localeValues.get(key) : null;
         if (value == null) {
@@ -1400,7 +1425,7 @@ public class LocaleController {
         if (value == null) {
             value = "LOC_ERR:" + key;
         }
-        return value;
+        return rebrandString(value, key);
     }
 
     public static String getServerString(String key) {
@@ -1411,7 +1436,7 @@ public class LocaleController {
                 value = ApplicationLoader.applicationContext.getString(resourceId);
             }
         }
-        return value;
+        return rebrandString(value, key);
     }
 
     public static String getString(@StringRes int res) {
@@ -1565,6 +1590,7 @@ public class LocaleController {
             }
             value = value.replace("%d", "%1$s");
             value = value.replace("%1$d", "%1$s");
+            value = rebrandString(value, key);
 
             Object[] a = new Object[(args == null ? 0 : args.length) + 1];
             for (int i = 0; i < a.length; ++i) {
@@ -1641,6 +1667,7 @@ public class LocaleController {
                 }
             }
 
+            value = rebrandString(value, key);
             if (getInstance().currentLocale != null) {
                 return String.format(getInstance().currentLocale, value, args);
             } else {
@@ -1690,6 +1717,7 @@ public class LocaleController {
                 }
             }
 
+            value = rebrandString(value, key);
             SpannableStringBuilder builder = new SpannableStringBuilder(value);
             for (int i = 0; i < args.length; i++) {
                 String formatter = "s";

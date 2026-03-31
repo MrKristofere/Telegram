@@ -48,8 +48,8 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
 
         coreLibraryDesugaringEnabled true
     }
@@ -72,6 +72,7 @@ android {
 
     buildTypes {
         HA_private {
+            matchingFallbacks = ['debug']
             debuggable false
             jniDebuggable false
             signingConfig signingConfigs.debug
@@ -82,6 +83,7 @@ android {
             ndk.debugSymbolLevel = 'FULL'
         }
         HA_public {
+            matchingFallbacks = ['debug']
             debuggable false
             jniDebuggable false
             signingConfig signingConfigs.debug
@@ -92,6 +94,7 @@ android {
             ndk.debugSymbolLevel = 'FULL'
         }
         HA_hardcore {
+            matchingFallbacks = ['debug']
             debuggable false
             jniDebuggable false
             signingConfig signingConfigs.debug
@@ -118,7 +121,7 @@ android {
     productFlavors {
         bundleAfat {
             ndk {
-                abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
+                abiFilters "arm64-v8a"
             }
             ext {
                 abiVersionCode = 1
@@ -126,7 +129,7 @@ android {
         }
         bundleAfat_SDK23 {
             ndk {
-                abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
+                abiFilters "arm64-v8a"
             }
             minSdkVersion 23
             ext {
@@ -135,7 +138,7 @@ android {
         }
         afat {
             ndk {
-                abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
+                abiFilters "arm64-v8a"
             }
             ext {
                 abiVersionCode = 9
@@ -163,7 +166,7 @@ android {
         minSdkVersion 21
         targetSdkVersion 35
         versionName APP_VERSION_NAME
-        ndkVersion "21.4.7075529"
+        ndkVersion "20.1.5948944"
 
         multiDexEnabled true
 

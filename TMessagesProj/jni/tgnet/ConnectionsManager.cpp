@@ -1808,7 +1808,7 @@ void ConnectionsManager::sendPing(Datacenter *datacenter, bool usePushConnection
 }
 
 uint8_t ConnectionsManager::getIpStratagy() {
-    return ipStrategy;
+    return USE_IPV4_ONLY;
 }
 
 void ConnectionsManager::initDatacenters() {
@@ -3858,10 +3858,7 @@ void ConnectionsManager::setNetworkAvailable(bool value, int32_t type, bool slow
 }
 
 void ConnectionsManager::setIpStrategy(uint8_t value) {
-    scheduleTask([&, value] {
-        lastProtocolUsefullData = false;
-        ipStrategy = value;
-    });
+    // noop: force IPv4-only to prevent IPv6 leak outside VPN tunnel
 }
 
 int64_t ConnectionsManager::checkProxy(std::string address, uint16_t port, std::string username, std::string password, std::string secret, onRequestTimeFunc requestTimeFunc, jobject ptr1) {

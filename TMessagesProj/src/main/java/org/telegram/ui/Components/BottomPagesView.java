@@ -60,11 +60,13 @@ public class BottomPagesView extends View {
         }
         int x;
         currentPage = viewPager.getCurrentItem();
+        float contentWidth = (pagesCount - 1) * AndroidUtilities.dp(11) + AndroidUtilities.dp(5);
+        float offsetX = (getWidth() - contentWidth) / 2f;
         for (int a = 0; a < pagesCount; a++) {
             if (a == currentPage) {
                 continue;
             }
-            x = a * AndroidUtilities.dp(11);
+            x = (int) (offsetX + a * AndroidUtilities.dp(11));
             rect.set(x, 0, x + AndroidUtilities.dp(5), AndroidUtilities.dp(5));
             canvas.drawRoundRect(rect, AndroidUtilities.dp(2.5f), AndroidUtilities.dp(2.5f), paint);
         }
@@ -73,7 +75,7 @@ public class BottomPagesView extends View {
         } else {
             paint.setColor(ThemeColors.TELEGRAM_COLOR);
         }
-        x = currentPage * AndroidUtilities.dp(11);
+        x = (int) (offsetX + currentPage * AndroidUtilities.dp(11));
         if (progress != 0) {
             if (scrollPosition >= currentPage) {
                 rect.set(x, 0, x + AndroidUtilities.dp(5) + AndroidUtilities.dp(11) * progress, AndroidUtilities.dp(5));

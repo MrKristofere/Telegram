@@ -17,6 +17,7 @@ configurations.all {
 }
 
 dependencies {
+    implementation 'vpn:sdk'
     implementation 'androidx.core:core:1.16.0'
     implementation 'androidx.palette:palette:1.0.0'
     implementation 'androidx.exifinterface:exifinterface:1.3.6'
@@ -75,7 +76,7 @@ def isWindows = String.valueOf(DefaultNativePlatform.currentOperatingSystem.toFa
 android {
     compileSdkVersion 35
     buildToolsVersion '35.0.0'
-    ndkVersion "21.4.7075529" // 26.3.11579264
+    ndkVersion "20.1.5948944" // 26.3.11579264
 
     sourceSets.main.jniLibs.srcDirs = ['./jni/']
 
@@ -92,8 +93,8 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
 
         coreLibraryDesugaringEnabled true
     }
@@ -104,6 +105,7 @@ android {
         targetSdkVersion 35
 
         vectorDrawables.generatedDensities = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi']
+        ndk.abiFilters = ['arm64-v8a'] // ['armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64']
 
         multiDexEnabled true
 
@@ -133,8 +135,9 @@ android {
         }
 
         HA_private {
+            matchingFallbacks = ['debug']
             jniDebuggable false
-            minifyEnabled true
+            minifyEnabled false
             multiDexEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
             ndk.debugSymbolLevel = 'FULL'
@@ -148,8 +151,9 @@ android {
         }
 
         HA_public {
+            matchingFallbacks = ['debug']
             jniDebuggable false
-            minifyEnabled true
+            minifyEnabled false
             multiDexEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
             ndk.debugSymbolLevel = 'FULL'
@@ -163,8 +167,9 @@ android {
         }
 
         HA_hardcore {
+            matchingFallbacks = ['debug']
             jniDebuggable false
-            minifyEnabled true
+            minifyEnabled false
             multiDexEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro', '../TMessagesProj/proguard-rules-beta.pro'
             ndk.debugSymbolLevel = 'FULL'
@@ -178,8 +183,9 @@ android {
         }
 
         standalone {
+            matchingFallbacks = ['release']
             jniDebuggable false
-            minifyEnabled true
+            minifyEnabled false
             multiDexEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro'
             ndk.debugSymbolLevel = 'FULL'
@@ -194,7 +200,7 @@ android {
 
         release {
             jniDebuggable false
-            minifyEnabled true
+            minifyEnabled false
             shrinkResources false
             multiDexEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro'
@@ -223,7 +229,8 @@ def getProps(String propName) {
         return "";
     }
 }
-apply plugin: 'com.google.gms.google-services'
+// Don't apply this plugin on library level since we use custom APP_PACKAGE
+//apply plugin: 'com.google.gms.google-services'
 
 task checkVisibility {
     doFirst {

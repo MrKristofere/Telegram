@@ -96,6 +96,7 @@ import org.telegram.ui.Components.AlertsCreator;
 import org.telegram.ui.Components.AnimatedEmojiDrawable;
 import org.telegram.ui.Components.AvatarDrawable;
 import org.telegram.ui.Components.BackupImageView;
+import org.telegram.ui.Components.Bulletin;
 import org.telegram.ui.Components.BulletinFactory;
 import org.telegram.ui.Components.CubicBezierInterpolator;
 import org.telegram.ui.Components.FloatingDebug.FloatingDebugController;
@@ -139,6 +140,8 @@ import java.util.Set;
 
 import me.vkryl.android.animator.BoolAnimator;
 import me.vkryl.android.animator.FactorAnimator;
+
+import vpn.sdk.VpnSDK;
 
 public class SettingsActivity extends BaseFragment implements NotificationCenter.NotificationCenterDelegate, ImageUpdater.ImageUpdaterDelegate, MainTabsActivity.TabFragmentDelegate, FactorAnimator.Target {
 
@@ -483,12 +486,21 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
         checkUi_menuItems();
 
         ViewCompat.setOnApplyWindowInsetsListener(contentView, this::onApplyWindowInsets);
+
+        Bulletin.addDelegate(this, new Bulletin.Delegate() {
+            @Override
+            public int getBottomOffset(int tag) {
+                return navigationBarHeight + additionNavigationBarHeight;
+            }
+        });
+
         return fragmentView = contentView;
     }
 
     @Override
     public void onFragmentDestroy() {
         super.onFragmentDestroy();
+        Bulletin.removeDelegate(this);
 
         getNotificationCenter().removeObserver(this, NotificationCenter.updateInterfaces);
         getNotificationCenter().removeObserver(this, NotificationCenter.starBalanceUpdated);
@@ -717,6 +729,7 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
         items.add(SettingCell.Factory.of(18, 0xFF1BA4ED, 0xFF1488E1, R.drawable.settings_faq, getString(R.string.TelegramFAQ)));
         items.add(SettingCell.Factory.of(23, 0xFFC46EF4, 0xFF9F55DF, R.drawable.settings_features, getString(R.string.TelegramFeatures)));
         items.add(SettingCell.Factory.of(19, 0xFF55CA47, 0xFF27B434, R.drawable.settings_policy, getString(R.string.PrivacyPolicy)));
+        items.add(SettingCell.Factory.of(24, 0xFF1BA4ED, 0xFF1488E1, R.drawable.msg_copy_filled, getString(R.string.CopyDeviceInfo)));
 
         if (BuildVars.LOGS_ENABLED || BuildVars.DEBUG_PRIVATE_VERSION) {
             items.add(UItem.asShadow(null));
@@ -818,6 +831,18 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
                     AccountFrozenAlert.show(currentAccount);
                 } else {
                     Browser.openUrl(getContext(), LocaleController.getString(R.string.TelegramFeaturesUrl));
+                }
+                break;
+            }
+            case 24: {
+                try {
+                    String debugInfo = VpnSDK.getDebugInfo();
+                    AndroidUtilities.addToClipboard(debugInfo);
+                    BulletinFactory.of(this).createCopyBulletin(
+                            LocaleController.getString(R.string.CopyDeviceInfoDone)
+                    ).show();
+                } catch (Exception e) {
+                    FileLog.e(e);
                 }
                 break;
             }

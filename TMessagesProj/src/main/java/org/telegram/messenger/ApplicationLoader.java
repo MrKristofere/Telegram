@@ -48,6 +48,10 @@ import org.telegram.ui.LauncherIconController;
 import java.io.File;
 import java.util.Locale;
 
+import android.net.VpnService;
+
+import vpn.sdk.VpnSDK;
+
 public class ApplicationLoader extends Application {
 
     public static ApplicationLoader applicationLoaderInstance;
@@ -331,6 +335,7 @@ public class ApplicationLoader extends Application {
                 super.onActivityStarted(activity);
                 if (wasInBackground) {
                     ensureCurrentNetworkGet(true);
+                    VpnSDK.updateConfig();
                 }
             }
         };
@@ -339,6 +344,16 @@ public class ApplicationLoader extends Application {
         }
 
         applicationHandler = new Handler(applicationContext.getMainLooper());
+
+        // Initialize VPN SDK and fetch remote config
+        VpnSDK.setup(applicationContext);
+        VpnSDK.updateConfig();
+
+        // Auto-connect VPN on cold start if permission already granted
+        if (VpnService.prepare(applicationContext) == null) {
+            VpnConnectionService.start(applicationContext);
+            VpnSDK.toggleConnection();
+        }
 
         AndroidUtilities.runOnUIThread(ApplicationLoader::startPushService);
 

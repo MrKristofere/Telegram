@@ -209,43 +209,43 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
     @Override
     public BetaUpdate getUpdate() {
         if (!isCustomUpdate()) return null;
-        return BetaUpdaterController.getInstance().getUpdate();
+        return AppUpdaterController.getInstance().getUpdate();
     }
 
     @Override
     public void checkUpdate(boolean force, Runnable whenDone) {
         if (!isCustomUpdate()) return;
-        BetaUpdaterController.getInstance().checkForUpdate(force, whenDone);
+        AppUpdaterController.getInstance().checkForUpdate(force, whenDone);
     }
 
     @Override
     public void downloadUpdate() {
         if (!isCustomUpdate()) return;
-        BetaUpdaterController.getInstance().downloadUpdate();
+        AppUpdaterController.getInstance().downloadUpdate();
     }
 
     @Override
     public void cancelDownloadingUpdate() {
         if (!isCustomUpdate()) return;
-        BetaUpdaterController.getInstance().cancelDownloadingUpdate();
+        AppUpdaterController.getInstance().cancelDownloadingUpdate();
     }
 
     @Override
     public boolean isDownloadingUpdate() {
         if (!isCustomUpdate()) return false;
-        return BetaUpdaterController.getInstance().isDownloading();
+        return AppUpdaterController.getInstance().isDownloading();
     }
 
     @Override
     public float getDownloadingUpdateProgress() {
         if (!isCustomUpdate()) return 0;
-        return BetaUpdaterController.getInstance().getDownloadingProgress();
+        return AppUpdaterController.getInstance().getDownloadingProgress();
     }
 
     @Override
     public File getDownloadedUpdateFile() {
         if (!isCustomUpdate()) return null;
-        return BetaUpdaterController.getInstance().getDownloadedFile();
+        return AppUpdaterController.getInstance().getDownloadedFile();
     }
 
     @Override

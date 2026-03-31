@@ -3429,7 +3429,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 			ArrayList<Long> reflectorIds = new ArrayList<>();
 			for (int i = 0; i < endpoints.length; i++) {
 				final TLRPC.PhoneConnection connection = privateCall.connections.get(i);
-				endpoints[i] = new Instance.Endpoint(connection instanceof TLRPC.TL_phoneConnectionWebrtc, connection.id, connection.ip, connection.ipv6, connection.port, endpointType, connection.peer_tag, connection.turn, connection.stun, connection.username, connection.password, connection.tcp);
+				endpoints[i] = new Instance.Endpoint(connection instanceof TLRPC.TL_phoneConnectionWebrtc, connection.id, connection.ip, "" /* IPv6 disabled: prevent traffic leak outside VPN */, connection.port, endpointType, connection.peer_tag, connection.turn, connection.stun, connection.username, connection.password, connection.tcp);
 				if (connection instanceof TLRPC.TL_phoneConnection) {
 					reflectorIds.add(((TLRPC.TL_phoneConnection) connection).id);
 				}

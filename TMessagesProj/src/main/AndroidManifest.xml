@@ -29,6 +29,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -84,7 +85,7 @@
 
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
-    <uses-sdk tools:overrideLibrary="com.google.mlkit.vision.segmentation.subject"/>
+    <uses-sdk tools:overrideLibrary="com.google.mlkit.vision.segmentation.subject,org.amnezia.awg.tunnel,org.amnezia.awg.hevtunnel" />
 
     <queries>
         <package android:name="com.google.android.apps.maps"/>
@@ -544,6 +545,15 @@ e            <intent-filter>
             <intent-filter>
                 <action android:name="android.telecom.ConnectionService" />
             </intent-filter>
+        </service>
+
+        <service
+            android:name=".VpnConnectionService"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn_connection_status" />
         </service>
 
 		<receiver android:name=".MusicPlayerReceiver" android:exported="false">

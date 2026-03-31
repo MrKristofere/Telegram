@@ -12,12 +12,12 @@ import org.telegram.ui.web.HttpGetTask;
 
 import java.io.File;
 
-public class BetaUpdaterController {
+public class AppUpdaterController {
 
-    private static BetaUpdaterController instance;
-    public static BetaUpdaterController getInstance() {
+    private static AppUpdaterController instance;
+    public static AppUpdaterController getInstance() {
         if (instance == null) {
-            instance = new BetaUpdaterController();
+            instance = new AppUpdaterController();
         }
         return instance;
     }
@@ -30,7 +30,7 @@ public class BetaUpdaterController {
 
     private String fileUrl;
 
-    public BetaUpdaterController() {
+    public AppUpdaterController() {
         load();
     }
 
@@ -47,12 +47,15 @@ public class BetaUpdaterController {
         path = prefs.getString("path", null);
         lastCheck = prefs.getLong("lastCheck", 0L);
 
-        if (getCurrentVersionCode() >= versionCode || !TextUtils.isEmpty(path) && !new File(path).exists()) {
+        if (getCurrentVersionCode() >= versionCode) {
             version = null;
             versionCode = 0;
             path = null;
             changelog = null;
             lastCheck = 0;
+            save();
+        } else if (!TextUtils.isEmpty(path) && !new File(path).exists()) {
+            path = null;
             save();
         }
     }
@@ -87,9 +90,9 @@ public class BetaUpdaterController {
         e.apply();
     }
 
-    private final static long CHECK_INTERVAL_PAUSED = 1000 * 60 * 60 * 24; // 1 day
-    private final static long CHECK_INTERVAL = 1000 * 60 * 20; // 20 minutes
-    private final static long CHECK_INTERVAL_PRIVATE = 1000 * 60 * 4; // 5 minutes
+    private static final long CHECK_INTERVAL_PAUSED = 1000 * 60 * 60 * 24; // 1 day
+    private static final long CHECK_INTERVAL = 1000 * 60 * 20; // 20 minutes
+    private static final long CHECK_INTERVAL_DEBUG = 1000 * 60 * 4; // 4 minutes
 
     private boolean firstCheck = true;
     private boolean checkingForUpdate;
@@ -100,7 +103,7 @@ public class BetaUpdaterController {
         if (firstCheck) {
             force = true;
         }
-        if (!force && System.currentTimeMillis() - lastCheck < (ApplicationLoader.mainInterfacePaused ? CHECK_INTERVAL_PAUSED : (BuildVars.DEBUG_PRIVATE_VERSION ? CHECK_INTERVAL_PRIVATE : CHECK_INTERVAL))) {
+        if (!force && System.currentTimeMillis() - lastCheck < (ApplicationLoader.mainInterfacePaused ? CHECK_INTERVAL_PAUSED : (BuildVars.DEBUG_PRIVATE_VERSION ? CHECK_INTERVAL_DEBUG : CHECK_INTERVAL))) {
             if (whenDone != null) {
                 whenDone.run();
             }
@@ -126,9 +129,8 @@ public class BetaUpdaterController {
                     SharedConfig.versionBiggerOrEqual(newVersion, getCurrentVersion()) && newVersionCode > getCurrentVersionCode()
                 ) { // received newer version
                     if (!TextUtils.isEmpty(path)) {
-                        final File file = new File(path);
                         try {
-                            file.delete();
+                            new File(path).delete();
                         } catch (Exception e) {
                             FileLog.e(e);
                         }
@@ -143,24 +145,22 @@ public class BetaUpdaterController {
                 ) { // received the same version
                     this.fileUrl = fileUrl;
                     this.changelog = changelog;
-                } else { // received lower version: remove update
+                } else { // received different version
                     if (!TextUtils.isEmpty(path)) {
-                        final File file = new File(path);
                         try {
-                            file.delete();
+                            new File(path).delete();
                         } catch (Exception e) {
                             FileLog.e(e);
                         }
                     }
                     path = null;
                     if (SharedConfig.versionBiggerOrEqual(getCurrentVersion(), newVersion) && getCurrentVersionCode() < newVersionCode) {
-                        // remote version is still newer than current installed, even though local downloaded was higher
+                        // remote version code is still newer than installed
                         version = newVersion;
                         versionCode = newVersionCode;
                         this.fileUrl = fileUrl;
                         this.changelog = changelog;
                     } else {
-                        // remove version is the same or less than current installed
                         version = null;
                         versionCode = 0;
                         this.fileUrl = null;
@@ -176,7 +176,7 @@ public class BetaUpdaterController {
                 }
 
                 AndroidUtilities.cancelRunOnUIThread(this.scheduledUpdateCheck);
-                AndroidUtilities.runOnUIThread(this.scheduledUpdateCheck, BuildVars.DEBUG_PRIVATE_VERSION ? CHECK_INTERVAL_PRIVATE : CHECK_INTERVAL);
+                AndroidUtilities.runOnUIThread(this.scheduledUpdateCheck, BuildVars.DEBUG_PRIVATE_VERSION ? CHECK_INTERVAL_DEBUG : CHECK_INTERVAL);
                 if (whenDone != null) {
                     whenDone.run();
                 } else if (this.versionCode != oldVersionCode && !ApplicationLoader.mainInterfacePaused) {
@@ -225,9 +225,8 @@ public class BetaUpdaterController {
             downloadedFile -> AndroidUtilities.runOnUIThread(() -> {
                 if (downloadedFile != null) {
                     if (!TextUtils.isEmpty(path)) {
-                        final File file = new File(path);
                         try {
-                            file.delete();
+                            new File(path).delete();
                         } catch (Exception e) {
                             FileLog.e(e);
                         }
@@ -295,5 +294,4 @@ public class BetaUpdaterController {
             return 0;
         }
     }
-
 }

@@ -65,6 +65,7 @@ import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.AuthTokensHelper;
 import org.telegram.messenger.BirthdayController;
+import org.telegram.messenger.BuildConfig;
 import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.ChatThemeController;
 import org.telegram.messenger.Emoji;
@@ -893,7 +894,11 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
                     }
                     break;
             }
-            return formatString(R.string.TelegramVersion, String.format(Locale.US, "v%s (%d)\n%s", pInfo.versionName, code, abi));
+            String commitSha = BuildConfig.COMMIT_SHA;
+            String commitSuffix = (commitSha == null || "dev".equals(commitSha) || commitSha.length() < 7)
+                    ? ""
+                    : "\n" + commitSha.substring(0, 7);
+            return formatString(R.string.TelegramVersion, String.format(Locale.US, "v%s (%d)\n%s%s", pInfo.versionName, code, abi, commitSuffix));
         } catch (Exception e) {
             FileLog.e(e);
         }

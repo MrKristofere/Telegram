@@ -13,3 +13,8 @@ TMessagesProj_App/afat/
 TMessagesProj_AppHockeyApp/afat/
 TMessagesProj_AppStandalone/afat/
 TMessagesProj_AppHuawei/afat/
+
+# Release signing material — never commit
+TMessagesProj/config/release.keystore
+*.jks
+*.keystore

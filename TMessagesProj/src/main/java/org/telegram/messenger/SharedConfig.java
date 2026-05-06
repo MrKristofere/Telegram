@@ -67,6 +67,18 @@ public class SharedConfig {
 
     public static boolean readOnlyStorageDirAlertShowed;
 
+    private static boolean demoMode;
+
+    public static boolean isDemoMode() {
+        return demoMode;
+    }
+
+    public static void setDemoMode(boolean enabled) {
+        demoMode = enabled;
+        SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("mainconfig", Context.MODE_PRIVATE);
+        preferences.edit().putBoolean("demo_mode", enabled).apply();
+    }
+
     public static void checkSdCard(File file) {
         if (file == null || SharedConfig.storageCacheDir == null || readOnlyStorageDirAlertShowed) {
             return;
@@ -510,6 +522,9 @@ public class SharedConfig {
             }
 
             BackgroundActivityPrefs.prefs = ApplicationLoader.applicationContext.getSharedPreferences("background_activity", Context.MODE_PRIVATE);
+
+            SharedPreferences mainPrefs = ApplicationLoader.applicationContext.getSharedPreferences("mainconfig", Context.MODE_PRIVATE);
+            demoMode = mainPrefs.getBoolean("demo_mode", false);
 
             SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("userconfing", Context.MODE_PRIVATE);
             saveIncomingPhotos = preferences.getBoolean("saveIncomingPhotos", false);

@@ -25,6 +25,10 @@ else()
     enable_language(ASM_NASM)
 endif()
 
+if (${ANDROID_ABI} STREQUAL "armeabi-v7a")
+    add_compile_options(-mfpu=neon)
+endif()
+
 add_library(avutil STATIC IMPORTED)
 set_target_properties(avutil PROPERTIES IMPORTED_LOCATION ${CMAKE_HOME_DIRECTORY}/ffmpeg/${ANDROID_ABI}/libavutil.a)
 

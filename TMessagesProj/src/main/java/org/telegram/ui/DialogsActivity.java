@@ -2916,6 +2916,9 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     private Drawable premiumStar;
 
     public void updateStatus(TLRPC.User user, boolean animated) {
+        if (user == null) {
+            return;
+        }
         if (dialogStoriesCell != null) {
             dialogStoriesCell.updateStatus(user, animated);
         }
@@ -4746,6 +4749,12 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         floatingButton3 = new FragmentFloatingButton(context, resourceProvider);
         contentView.addView(floatingButton3, FragmentFloatingButton.createDefaultLayoutParams());
         floatingButton3.setOnClickListener(v -> {
+            if (SharedConfig.isDemoMode()) {
+                if (getContext() != null) {
+                    Toast.makeText(getContext(), "Sign in to use full version", Toast.LENGTH_SHORT).show();
+                }
+                return;
+            }
             if (parentLayout != null && parentLayout.isInPreviewMode()) {
                 finishPreviewFragment();
                 return;
@@ -6985,9 +6994,15 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             VpnConnectionService.disconnectedBySwipe = false;
             vpnHelper.startVpnToggle();
         }
+        // Auto-connect VPN on cold start (once per process lifetime)
         if (!vpnColdStartDone && VpnSDK.getTunnelState() == VpnTunnelState.DOWN) {
             vpnColdStartDone = true;
-            if (VpnService.prepare(getParentActivity()) != null) {
+            if (VpnService.prepare(getParentActivity()) == null) {
+                // Разрешение уже есть — подключаем сразу
+                VpnConnectionService.start(getParentActivity());
+                VpnSDK.toggleConnection();
+            } else {
+                // Разрешения нет — запрашиваем через системный диалог
                 vpnHelper.startVpnToggle();
             }
         }
@@ -10809,7 +10824,64 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     private ArrayList<TLRPC.Dialog> botShareDialogs;
 
     @NonNull
+    private ArrayList<TLRPC.Dialog> demoDialogs;
+
+    private ArrayList<TLRPC.Dialog> getDemoDialogs(int currentAccount) {
+        if (demoDialogs != null) {
+            return demoDialogs;
+        }
+        demoDialogs = new ArrayList<>();
+        MessagesController mc = MessagesController.getInstance(currentAccount);
+
+        long[][] mockData = {
+            {1001L}, {1002L}, {1003L}, {1004L}
+        };
+        String[] names = {"Alice", "Bob", "Work Chat", "Family"};
+        String[] lastNames = {"Smith", "Johnson", "", ""};
+        String[] messages = {"Hey! How are you?", "See you tomorrow!", "Meeting at 3pm", "Dinner tonight?"};
+        int[] unread = {2, 0, 5, 1};
+        int now = (int) (System.currentTimeMillis() / 1000);
+        int[] times = {now - 300, now - 3600, now - 7200, now - 86400};
+
+        for (int i = 0; i < names.length; i++) {
+            TLRPC.TL_user user = new TLRPC.TL_user();
+            user.id = mockData[i][0];
+            user.first_name = names[i];
+            user.last_name = lastNames[i];
+            user.phone = "000000000" + i;
+            user.status = new TLRPC.TL_userStatusRecently();
+            mc.putUser(user, true);
+
+            TLRPC.TL_dialog dialog = new TLRPC.TL_dialog();
+            dialog.id = user.id;
+            dialog.last_message_date = times[i];
+            dialog.unread_count = unread[i];
+
+            TLRPC.TL_message message = new TLRPC.TL_message();
+            message.id = 1000 + i;
+            message.dialog_id = dialog.id;
+            message.message = messages[i];
+            message.date = times[i];
+            message.from_id = new TLRPC.TL_peerUser();
+            message.from_id.user_id = user.id;
+            message.peer_id = new TLRPC.TL_peerUser();
+            message.peer_id.user_id = user.id;
+
+            mc.dialogs_dict.put(dialog.id, dialog);
+
+            ArrayList<MessageObject> msgArray = new ArrayList<>();
+            msgArray.add(new MessageObject(currentAccount, message, false, false));
+            mc.dialogMessage.put(dialog.id, msgArray);
+
+            demoDialogs.add(dialog);
+        }
+        return demoDialogs;
+    }
+
     public ArrayList<TLRPC.Dialog> getDialogsArray(int currentAccount, int dialogsType, int folderId, boolean frozen) {
+        if (SharedConfig.isDemoMode() && dialogsType == DIALOGS_TYPE_DEFAULT && folderId == 0) {
+            return getDemoDialogs(currentAccount);
+        }
         if (frozen && frozenDialogsList != null) {
             return frozenDialogsList;
         }

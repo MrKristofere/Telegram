@@ -49,8 +49,8 @@ import java.io.File;
 import java.util.Locale;
 
 import android.net.VpnService;
-
 import vpn.sdk.VpnSDK;
+import vpn.tunnel.VpnTunnelState;
 
 public class ApplicationLoader extends Application {
 
@@ -336,6 +336,12 @@ public class ApplicationLoader extends Application {
                 if (wasInBackground) {
                     ensureCurrentNetworkGet(true);
                     VpnSDK.updateConfig();
+                    // Auto-connect VPN when app comes to foreground (not on background process recreation)
+                    if (VpnSDK.getTunnelState() == VpnTunnelState.DOWN
+                            && VpnService.prepare(applicationContext) == null) {
+                        VpnConnectionService.start(applicationContext);
+                        VpnSDK.toggleConnection();
+                    }
                 }
             }
         };
@@ -348,12 +354,6 @@ public class ApplicationLoader extends Application {
         // Initialize VPN SDK and fetch remote config
         VpnSDK.setup(applicationContext);
         VpnSDK.updateConfig();
-
-        // Auto-connect VPN on cold start if permission already granted
-        if (VpnService.prepare(applicationContext) == null) {
-            VpnConnectionService.start(applicationContext);
-            VpnSDK.toggleConnection();
-        }
 
         AndroidUtilities.runOnUIThread(ApplicationLoader::startPushService);
 

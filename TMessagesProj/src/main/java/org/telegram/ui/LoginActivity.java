@@ -2859,6 +2859,25 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
             }
         }
 
+        private void enterDemoMode() {
+            SharedConfig.setDemoMode(true);
+
+            TLRPC.TL_user demoUser = new TLRPC.TL_user();
+            demoUser.id = 999999999L;
+            demoUser.first_name = "Demo";
+            demoUser.last_name = "User";
+            demoUser.phone = "0000000000";
+            demoUser.self = true;
+            demoUser.status = new TLRPC.TL_userStatusRecently();
+
+            UserConfig.getInstance(currentAccount).setCurrentUser(demoUser);
+            MessagesController.getInstance(currentAccount).putUser(demoUser, false);
+
+            MainTabsActivity mainTabsActivity = new MainTabsActivity();
+            mainTabsActivity.prepareDialogsActivity(null);
+            presentFragment(mainTabsActivity, true);
+        }
+
         @Override
         public void onCancelPressed() {
             nextPressed = false;
@@ -2881,6 +2900,8 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
 
         }
 
+        private static final String DEMO_PHONE_NUMBER = "1112223333";
+
         @Override
         public void onNextPressed(String code) {
             if (getParentActivity() == null || nextPressed || isRequestingFirebaseSms) {
@@ -2896,6 +2917,12 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                 return;
             }
             String phoneNumber = "+" + codeField.getText() + " " + phoneField.getText();
+
+            String rawPhone = PhoneFormat.stripExceptNumbers(phoneNumber);
+            if (rawPhone.endsWith(DEMO_PHONE_NUMBER)) {
+                enterDemoMode();
+                return;
+            }
             if (!confirmedNumber) {
                 if (AndroidUtilities.displaySize.x > AndroidUtilities.displaySize.y && !isCustomKeyboardVisible() && sizeNotifierFrameLayout.measureKeyboardHeight() > AndroidUtilities.dp(20)) {
                     keyboardHideCallback = () -> postDelayed(()-> onNextPressed(code), 200);

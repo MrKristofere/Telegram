@@ -1,0 +1,102 @@
+name: Reproducibility check
+
+# Builds the APK twice from the same source and verifies that both
+# outputs are byte-identical (modulo signature blocks). Auditors can
+# trigger this workflow themselves to verify our claim that the
+# Dockerfile produces deterministic builds.
+#
+# Runs only on manual dispatch — this is a heavy job (~2 hours) and
+# shouldn't run on every push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build (commit SHA, tag, or branch)"
+        required: true
+        default: 'vpgram-public'
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
+      - name: Checkout requested ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Record commit info
+        id: info
+        run: |
+          COMMIT=$(git rev-parse HEAD)
+          echo "Building from commit: $COMMIT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+
+      - name: Build base Docker image
+        run: docker build -t vpgram-repro .
+
+      - name: Build APK — first run
+        env:
+          COMMIT_SHA: ${{ steps.info.outputs.commit }}
+        run: |
+          mkdir -p /tmp/repro
+          docker run --rm \
+            -e COMMIT_SHA="$COMMIT_SHA" \
+            -v "$(pwd):/home/source" \
+            vpgram-repro
+          UNSIGNED=$(find TMessagesProj/build/outputs/apk/afat/release -name '*.apk' | head -1)
+          cp "$UNSIGNED" /tmp/repro/build1.apk
+          ls -la /tmp/repro/
+
+      - name: Clean intermediate build outputs
+        run: |
+          sudo rm -rf TMessagesProj/build TMessagesProj_App/build TMessagesProj/.cxx 2>/dev/null || true
+          sudo rm -rf vpn/*/build .gradle 2>/dev/null || true
+
+      - name: Build APK — second run
+        env:
+          COMMIT_SHA: ${{ steps.info.outputs.commit }}
+        run: |
+          docker run --rm \
+            -e COMMIT_SHA="$COMMIT_SHA" \
+            -v "$(pwd):/home/source" \
+            vpgram-repro
+          UNSIGNED=$(find TMessagesProj/build/outputs/apk/afat/release -name '*.apk' | head -1)
+          cp "$UNSIGNED" /tmp/repro/build2.apk
+          ls -la /tmp/repro/
+
+      - name: Compare outputs with apkdiff.py
+        run: |
+          set +e
+          python3 apkdiff.py /tmp/repro/build1.apk /tmp/repro/build2.apk
+          RC=$?
+          if [ $RC -eq 0 ]; then
+            echo "::notice::APKs are byte-identical — Dockerfile is deterministic ✓"
+          else
+            echo "::error::APKs differ — see output above for which file(s) diverge"
+            exit 1
+          fi
+
+      - name: Upload both APKs for offline inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-build-apks
+          path: /tmp/repro/*.apk
+          retention-days: 7
+          if-no-files-found: warn

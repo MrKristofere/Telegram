@@ -9,6 +9,7 @@
 #include <cassert>
 #include <unistd.h>
 #include <fcntl.h>
+#include <time.h>
 #include <cerrno>
 #include <sys/socket.h>
 #include <memory.h>
@@ -31,6 +32,10 @@
 #include "BuffersStorage.h"
 #include "Connection.h"
 #include <random>
+#include <pthread.h>
+
+static pthread_mutex_t proxyJitterMutex = PTHREAD_MUTEX_INITIALIZER;
+static int64_t lastProxyConnectTime = 0;
 
 #ifndef EPOLLRDHUP
 #define EPOLLRDHUP 0x2000
@@ -250,6 +255,72 @@ public:
         }
 
     };
+
+    static const TlsHello &getFirefoxDefault() {
+        static TlsHello result = [] {
+            TlsHello res;
+            res.ops = {
+                Op::string("\x16\x03\x01", 3),
+                Op::begin_scope(),
+                Op::string("\x01\x00", 2),
+                Op::begin_scope(),
+                Op::string("\x03\x03", 2),
+                Op::zero(32),
+                Op::string("\x20", 1),
+                Op::random(32),
+                Op::string("\x00\x22", 2),
+                Op::grease(0),
+                Op::string("\x13\x01\x13\x03\x13\x02\xc0\x2b\xc0\x2f\xcc\xa9\xcc\xa8\xc0\x2c\xc0\x30\xc0\x0a\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35", 32),
+                Op::string("\x01\x00", 2),
+                Op::begin_scope(),
+                Op::string("\x00\x00", 2),
+                Op::begin_scope(),
+                Op::begin_scope(),
+                Op::string("\x00", 1),
+                Op::begin_scope(),
+                Op::domain(),
+                Op::end_scope(),
+                Op::end_scope(),
+                Op::end_scope(),
+                Op::string("\x00\x17\x00\x00", 4),
+                Op::string("\xff\x01\x00\x01\x00", 5),
+                Op::string("\x00\x0a\x00\x10\x00\x0e", 6),
+                Op::grease(2),
+                Op::string("\x00\x1d\x00\x17\x00\x18\x00\x19\x01\x00\x01\x01", 12),
+                Op::string("\x00\x0b\x00\x02\x01\x00", 6),
+                Op::string("\x00\x23\x00\x00", 4),
+                Op::string("\x00\x10\x00\x0e\x00\x0c\x02\x68\x32\x08\x68\x74\x74\x70\x2f\x31\x2e\x31", 18),
+                Op::string("\x00\x05\x00\x05\x01\x00\x00\x00\x00", 9),
+                Op::string("\x00\x22\x00\x0a\x00\x08\x04\x03\x05\x03\x06\x03\x02\x03", 14),
+                Op::string("\x00\x33\x05\x2f\x05\x2d", 6),
+                Op::string("\x11\xec\x04\xc0", 4),
+                Op::random(1216),
+                Op::string("\x00\x1d\x00\x20", 4),
+                Op::K(),
+                Op::string("\x00\x17\x00\x41", 4),
+                Op::random(65),
+                Op::string("\x00\x2b\x00\x07\x06", 5),
+                Op::grease(4),
+                Op::string("\x03\x04\x03\x03", 4),
+                Op::string("\x00\x0d\x00\x18\x00\x16\x04\x03\x05\x03\x06\x03\x08\x04\x08\x05\x08\x06\x04\x01\x05\x01\x06\x01\x02\x03\x02\x01", 28),
+                Op::string("\x00\x2d\x00\x02\x01\x01", 6),
+                Op::string("\x00\x1c\x00\x02\x40\x01", 6),
+                Op::string("\x00\x1b\x00\x07\x06\x00\x01\x00\x02\x00\x03", 11),
+                Op::string("\xfe\x0d\x01\x19", 4),
+                Op::string("\x00\x00\x01\x00\x01", 5),
+                Op::random(1),
+                Op::string("\x00\x20", 2),
+                Op::random(32),
+                Op::string("\x00\xef", 2),
+                Op::random(239),
+                Op::end_scope(),
+                Op::end_scope(),
+                Op::end_scope()
+            };
+            return res;
+        }();
+        return result;
+    }
 
     static const TlsHello &getDefault() {
         static TlsHello result = [] {
@@ -613,6 +684,24 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
 }
 
 void ConnectionSocket::openConnectionInternal(bool ipv6) {
+    if (proxyAuthState >= 10) {
+        pthread_mutex_lock(&proxyJitterMutex);
+        int64_t now = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
+        int64_t elapsed = now - lastProxyConnectTime;
+        if (elapsed < 1200) {
+            int delay = 500 + (rand() % 501);
+            if (LOGS_ENABLED) DEBUG_D("connection(%p) jitter: elapsed=%ld, delay=%d", this, (long) elapsed, delay);
+            lastProxyConnectTime = now + delay;
+            struct timespec ts;
+            ts.tv_sec = delay / 1000;
+            ts.tv_nsec = (delay % 1000) * 1000000L;
+            nanosleep(&ts, nullptr);
+        } else {
+            if (LOGS_ENABLED) DEBUG_D("connection(%p) jitter: elapsed=%ld, no delay", this, (long) elapsed);
+            lastProxyConnectTime = now;
+        }
+        pthread_mutex_unlock(&proxyJitterMutex);
+    }
     int epolFd = ConnectionsManager::getInstance(instanceNum).epolFd;
     int yes = 1;
     if (setsockopt(socketFd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(int))) {
@@ -920,7 +1009,7 @@ void ConnectionSocket::onEvent(uint32_t events) {
                         lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
                         tlsHashMismatch = false;
                         proxyAuthState = 11;
-                        TlsHello hello = TlsHello::getDefault();
+                        TlsHello hello = TlsHello::getFirefoxDefault();
                         hello.setDomain(currentSecretDomain);
                         uint32_t size = hello.writeToBuffer(tempBuffer->bytes);
                         uint32_t outLength;

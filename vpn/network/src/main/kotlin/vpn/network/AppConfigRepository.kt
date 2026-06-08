@@ -59,6 +59,10 @@ class AppConfigRepository(
 
     fun getAnonymousKeyUrl(): String = getBaseUrl() + getAnonymousKeyPath()
 
+    fun getRegisterPath(): String = getConfig().registerPath
+
+    fun getRegisterBaseUrl(): String = getConfig().registerBaseUrl
+
     private fun saveToStorage(config: AppConfig) {
         try {
             val serialized = json.encodeToString(AppConfig.serializer(), config)

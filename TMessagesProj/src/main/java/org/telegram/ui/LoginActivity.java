@@ -196,7 +196,6 @@ import org.telegram.ui.Stars.ExplainStarsSheet;
 import org.telegram.ui.Stories.recorder.ButtonWithCounterView;
 import org.telegram.ui.bots.BotWebViewSheet;
 
-import org.telegram.messenger.VpnConnectionHelper;
 import vpn.sdk.VpnSDK;
 import vpn.tunnel.VpnTunnelState;
 
@@ -352,7 +351,6 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
     private int progressRequestId;
     private boolean[] doneButtonVisible = new boolean[] {true, false};
 
-    private final VpnConnectionHelper vpnHelper = new VpnConnectionHelper(this);
 
     private AlertDialog cancelDeleteProgressDialog;
 
@@ -512,7 +510,6 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
     @Override
     public void onFragmentDestroy() {
         super.onFragmentDestroy();
-        vpnHelper.release();
         for (int a = 0; a < views.length; a++) {
             if (views[a] != null) {
                 views[a].onDestroyActivity();
@@ -733,13 +730,6 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
         floatingAutoAnimator = VerticalPositionAutoAnimator.attach(floatingButton);
         sizeNotifierFrameLayout.addView(floatingButton, FragmentFloatingButton.createDefaultLayoutParamsBig());
         floatingButton.setOnClickListener(view -> onDoneButtonPressed());
-        vpnHelper.setProgressCallback(showProgress -> {
-            if (showProgress) {
-                needShowProgress(0);
-            } else {
-                needHideProgress(false);
-            }
-        });
         floatingAutoAnimator.addUpdateListener((animation, value, velocity) -> {
             if (phoneNumberConfirmView != null) {
                 phoneNumberConfirmView.updateFabPosition();
@@ -928,7 +918,6 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
     @Override
     public void onResume() {
         super.onResume();
-        vpnHelper.handleResume();
         if (newAccount) {
             ConnectionsManager.getInstance(currentAccount).setAppPaused(false, false);
         }
@@ -975,10 +964,6 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
     @Override
     public void onRequestPermissionsResultFragment(int requestCode, String[] permissions, int[] grantResults) {
         if (permissions.length == 0 || grantResults.length == 0) return;
-
-        if (vpnHelper.handlePermissionResult(requestCode, permissions, grantResults)) {
-            return;
-        }
 
         boolean granted = grantResults[0] == PackageManager.PERMISSION_GRANTED;
         if (requestCode == 6) {
@@ -1163,9 +1148,6 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
 
     @Override
     public void onActivityResultFragment(int requestCode, int resultCode, Intent data) {
-        if (vpnHelper.handleActivityResult(requestCode, resultCode)) {
-            return;
-        }
         LoginActivityRegisterView registerView = (LoginActivityRegisterView) views[VIEW_REGISTER];
         if (registerView != null) {
             registerView.imageUpdater.onActivityResult(requestCode, resultCode, data);
@@ -1364,13 +1346,36 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
         if (!doneButtonVisible[currentDoneType]) {
             return;
         }
-        // Если VPN уже подключён — выполняем оригинальное действие сразу
-        if (VpnSDK.getTunnelState() == VpnTunnelState.UP) {
-            performOriginalDoneAction();
+        // Gate the phone-number step until xray has a server-issued config.
+        // Normally the background register kicked off in ApplicationLoader
+        // already filled the cache by now; this branch only triggers when that
+        // attempt failed (no network at app start, backend down, etc.) so the
+        // user has a way to retry without restarting the app.
+        //
+        // maxAttempts=2 keeps the worst-case spinner duration under ~45s; the
+        // user can tap again to start a fresh cycle. Concurrent taps are
+        // serialised inside VpnSDK by an internal mutex (the second tap's
+        // VpnSDK call returns silently — its callback never fires — and the
+        // first tap's callback resets the button when its cycle completes).
+        if (currentViewNum == VIEW_PHONE_INPUT && !VpnSDK.hasCachedXrayConfig()) {
+            showEditDoneProgress(true, true);
+            VpnSDK.registerOrAuth(2, success -> {
+                // Fragment / activity may have been torn down during the wait.
+                if (getParentActivity() == null) {
+                    return;
+                }
+                showEditDoneProgress(false, true);
+                if (success) {
+                    ApplicationLoader.applyXrayProxyToConnectionsManager();
+                    performOriginalDoneAction();
+                }
+                // On failure: leave the user on the phone screen with the
+                // button reset to its normal state. They can tap again to
+                // retry the whole cycle.
+            });
             return;
         }
-        // Запускаем VPN и после успешного подключения выполняем действие
-        vpnHelper.startVpnAndThen(this::performOriginalDoneAction);
+        performOriginalDoneAction();
     }
 
     private void performOriginalDoneAction() {
@@ -8819,6 +8824,11 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
 
     private void updateProxyButton(boolean animated, boolean force) {
         if (proxyDrawable == null) {
+            return;
+        }
+        // Vepegram: иконка прокси на экране логина скрыта
+        showProxyButton(false, animated);
+        if (true) {
             return;
         }
         int state = getConnectionsManager().getConnectionState();

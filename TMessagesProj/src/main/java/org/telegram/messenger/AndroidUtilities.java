@@ -4562,6 +4562,10 @@ public class AndroidUtilities {
     }
 
     public static boolean handleProxyIntent(Activity activity, Intent intent, boolean invoked) {
+        // Vepegram: добавление прокси из внешних ссылок (tg:proxy / t.me/proxy) отключено
+        if (true) {
+            return false;
+        }
         if (intent == null) {
             return false;
         }

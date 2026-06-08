@@ -11,15 +11,20 @@
 #ifndef RTC_BASE_SOCKET_ADAPTERS_H_
 #define RTC_BASE_SOCKET_ADAPTERS_H_
 
+#include <memory>
 #include <string>
 
 #include "absl/strings/string_view.h"
 #include "api/array_view.h"
+#include "rtc_base/async_packet_socket.h"
 #include "rtc_base/async_socket.h"
 #include "rtc_base/crypt_string.h"
+#include "rtc_base/network/received_packet.h"
+#include "rtc_base/socket_factory.h"
 
 namespace rtc {
 
+class AsyncUDPSocket;
 struct HttpAuthContext;
 class ByteBufferReader;
 class ByteBufferWriter;
@@ -135,6 +140,83 @@ class AsyncHttpsProxySocket : public BufferedReadAdapter {
   } state_;
   HttpAuthContext* context_;
   std::string unknown_mechanisms_;
+};
+
+///////////////////////////////////////////////////////////////////////////////
+
+// SOCKS5 UDP ASSOCIATE client wrapper.
+//
+// Bridges WebRTC's AsyncPacketSocket API to a SOCKS5 proxy that supports
+// UDP relaying (RFC 1928 §7). Intended for routing TURN/STUN/reflector UDP
+// traffic through xray's SOCKS5 inbound with `"udp": true`.
+//
+// Lifetime:
+//   1. Opens a TCP control connection to the SOCKS5 server.
+//   2. Performs no-auth handshake (`05 01 00` → `05 00`).
+//   3. Sends UDP ASSOCIATE (`05 03 00 01 0.0.0.0:0`). Server replies with
+//      the UDP relay endpoint (BND.ADDR:BND.PORT).
+//   4. Relay is ready: SendTo() wraps each datagram with a SOCKS5 UDP
+//      header and sends it to the relay. Incoming datagrams from the relay
+//      have their header stripped and are surfaced with the true source
+//      address.
+//   5. If the control channel closes, the UDP relay is invalidated.
+//
+// All traffic sent before the relay is ready is dropped (EWOULDBLOCK).
+class AsyncSocksProxyUdpSocket : public AsyncPacketSocket {
+ public:
+  AsyncSocksProxyUdpSocket(SocketFactory* socket_factory,
+                           const SocketAddress& local_bind,
+                           const SocketAddress& socks_server);
+  ~AsyncSocksProxyUdpSocket() override;
+
+  AsyncSocksProxyUdpSocket(const AsyncSocksProxyUdpSocket&) = delete;
+  AsyncSocksProxyUdpSocket& operator=(const AsyncSocksProxyUdpSocket&) = delete;
+
+  // True if the local UDP socket was bound successfully. If this returns
+  // false, the object should be deleted immediately by the caller.
+  bool IsBound() const;
+
+  SocketAddress GetLocalAddress() const override;
+  SocketAddress GetRemoteAddress() const override;
+  int Send(const void* pv, size_t cb, const PacketOptions& options) override;
+  int SendTo(const void* pv,
+             size_t cb,
+             const SocketAddress& addr,
+             const PacketOptions& options) override;
+  int Close() override;
+  State GetState() const override;
+  int GetOption(Socket::Option opt, int* value) override;
+  int SetOption(Socket::Option opt, int value) override;
+  int GetError() const override;
+  void SetError(int error) override;
+
+ private:
+  enum Stage {
+    ST_INIT,
+    ST_HELLO,
+    ST_ASSOCIATE,
+    ST_READY,
+    ST_ERROR,
+  };
+
+  void OnControlConnect(Socket* s);
+  void OnControlRead(Socket* s);
+  void OnControlClose(Socket* s, int err);
+  void OnUdpPacket(AsyncPacketSocket* s, const ReceivedPacket& packet);
+  void SendGreeting();
+  void SendAssociate();
+  bool HandleHelloReply();
+  bool HandleAssociateReply();
+  void Fail(int error);
+
+  std::unique_ptr<Socket> control_;
+  std::unique_ptr<AsyncUDPSocket> udp_;
+  SocketAddress socks_server_;
+  SocketAddress udp_relay_;
+  uint8_t ctrl_buf_[512];
+  size_t ctrl_len_ = 0;
+  Stage stage_ = ST_INIT;
+  int error_ = 0;
 };
 
 }  // namespace rtc

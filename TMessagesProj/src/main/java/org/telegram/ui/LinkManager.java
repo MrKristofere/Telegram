@@ -995,16 +995,8 @@ public class LinkManager {
                 return true;
             }
 
-            if (!TextUtils.isEmpty(third) && "proxy".equalsIgnoreCase(second)) {
-                presentFragment(new ProxyListActivity());
-
-                if ("use-proxy".equalsIgnoreCase(third))
-                    scrollTo("useProxyRow");
-                if ("add-proxy".equalsIgnoreCase(third))
-                    scrollTo("proxyAddRow");
-                if ("use-for-calls".equalsIgnoreCase(third))
-                    scrollTo("callsRow");
-
+            // Vepegram: deep-link на настройки прокси отключён
+            if ("proxy".equalsIgnoreCase(second)) {
                 return true;
             }
 

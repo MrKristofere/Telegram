@@ -18,10 +18,13 @@
 
 #include "absl/strings/match.h"
 #include "absl/strings/string_view.h"
+#include "rtc_base/async_udp_socket.h"
 #include "rtc_base/buffer.h"
 #include "rtc_base/byte_buffer.h"
+#include "rtc_base/byte_order.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/http_common.h"
+#include "rtc_base/ip_address.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/strings/string_builder.h"
 #include "rtc_base/zero_memory.h"
@@ -467,6 +470,406 @@ void AsyncHttpsProxySocket::Error(int error) {
   Close();
   SetError(error);
   SignalCloseEvent(this, error);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+namespace {
+
+// Encodes SOCKS5 UDP header into `out` for a datagram destined to `dst`.
+// Layout: RSV(2) FRAG(1) ATYP(1) DST.ADDR DST.PORT
+// Returns number of bytes written, or 0 if `dst` has an unsupported family.
+size_t WriteSocksUdpHeader(const SocketAddress& dst, uint8_t* out) {
+  size_t n = 0;
+  out[n++] = 0x00;  // RSV
+  out[n++] = 0x00;  // RSV
+  out[n++] = 0x00;  // FRAG (no fragmentation)
+
+  const IPAddress& ip = dst.ipaddr();
+  if (ip.family() == AF_INET) {
+    out[n++] = 0x01;  // ATYP = IPv4
+    in_addr v4 = ip.ipv4_address();
+    memcpy(out + n, &v4.s_addr, 4);
+    n += 4;
+  } else if (ip.family() == AF_INET6) {
+    out[n++] = 0x04;  // ATYP = IPv6
+    in6_addr v6 = ip.ipv6_address();
+    memcpy(out + n, &v6.s6_addr, 16);
+    n += 16;
+  } else {
+    return 0;
+  }
+
+  uint16_t port_be = HostToNetwork16(dst.port());
+  memcpy(out + n, &port_be, 2);
+  n += 2;
+  return n;
+}
+
+// Parses SOCKS5 UDP header from `data[0..len]`. On success sets `*src` and
+// `*header_len` and returns true. Does not validate FRAG != 0 (dropped).
+bool ParseSocksUdpHeader(const uint8_t* data, size_t len, SocketAddress* src,
+                         size_t* header_len) {
+  if (len < 4) return false;
+  if (data[2] != 0x00) return false;  // reject fragmented datagrams
+  uint8_t atyp = data[3];
+  size_t addr_off = 4;
+  size_t addr_len;
+  IPAddress ip;
+  switch (atyp) {
+    case 0x01: {
+      addr_len = 4;
+      if (len < addr_off + addr_len + 2) return false;
+      in_addr v4;
+      memcpy(&v4.s_addr, data + addr_off, 4);
+      ip = IPAddress(v4);
+      break;
+    }
+    case 0x04: {
+      addr_len = 16;
+      if (len < addr_off + addr_len + 2) return false;
+      in6_addr v6;
+      memcpy(&v6.s6_addr, data + addr_off, 16);
+      ip = IPAddress(v6);
+      break;
+    }
+    case 0x03: {
+      if (len < addr_off + 1) return false;
+      addr_len = 1 + static_cast<size_t>(data[addr_off]);
+      if (len < addr_off + addr_len + 2) return false;
+      // Domain in a SOCKS UDP reply is unusual for us; reject.
+      return false;
+    }
+    default:
+      return false;
+  }
+  uint16_t port_be;
+  memcpy(&port_be, data + addr_off + addr_len, 2);
+  uint16_t port = NetworkToHost16(port_be);
+  *src = SocketAddress(ip, port);
+  *header_len = addr_off + addr_len + 2;
+  return true;
+}
+
+}  // namespace
+
+AsyncSocksProxyUdpSocket::AsyncSocksProxyUdpSocket(
+    SocketFactory* socket_factory, const SocketAddress& local_bind,
+    const SocketAddress& socks_server)
+    : socks_server_(socks_server) {
+  // Create and bind the data-path UDP socket. If bind fails, udp_ stays null
+  // and IsBound() will return false — caller should delete us.
+  Socket* raw_udp = socket_factory->CreateSocket(local_bind.family(), SOCK_DGRAM);
+  if (!raw_udp) {
+    error_ = EIO;
+    stage_ = ST_ERROR;
+    return;
+  }
+  udp_.reset(AsyncUDPSocket::Create(raw_udp, local_bind));
+  if (!udp_) {
+    error_ = EIO;
+    stage_ = ST_ERROR;
+    return;
+  }
+  udp_->RegisterReceivedPacketCallback(
+      [this](AsyncPacketSocket* s, const ReceivedPacket& pkt) {
+        OnUdpPacket(s, pkt);
+      });
+
+  // Open the TCP control connection to the SOCKS server.
+  control_.reset(socket_factory->CreateSocket(socks_server_.family(), SOCK_STREAM));
+  if (!control_) {
+    error_ = EIO;
+    stage_ = ST_ERROR;
+    return;
+  }
+  control_->SignalConnectEvent.connect(this, &AsyncSocksProxyUdpSocket::OnControlConnect);
+  control_->SignalReadEvent.connect(this, &AsyncSocksProxyUdpSocket::OnControlRead);
+  control_->SignalCloseEvent.connect(this, &AsyncSocksProxyUdpSocket::OnControlClose);
+
+  int r = control_->Connect(socks_server_);
+  if (r < 0 && control_->GetError() != EINPROGRESS && control_->GetError() != 0) {
+    RTC_LOG(LS_ERROR) << "AsyncSocksProxyUdpSocket: control Connect failed: "
+                      << control_->GetError();
+    error_ = control_->GetError();
+    stage_ = ST_ERROR;
+    return;
+  }
+}
+
+AsyncSocksProxyUdpSocket::~AsyncSocksProxyUdpSocket() = default;
+
+bool AsyncSocksProxyUdpSocket::IsBound() const {
+  return udp_ != nullptr;
+}
+
+SocketAddress AsyncSocksProxyUdpSocket::GetLocalAddress() const {
+  return udp_ ? udp_->GetLocalAddress() : SocketAddress();
+}
+
+SocketAddress AsyncSocksProxyUdpSocket::GetRemoteAddress() const {
+  return SocketAddress();
+}
+
+int AsyncSocksProxyUdpSocket::Send(const void* /*pv*/, size_t /*cb*/,
+                                   const PacketOptions& /*options*/) {
+  // UDP sockets don't support connected Send without a destination.
+  SetError(ENOTCONN);
+  return -1;
+}
+
+int AsyncSocksProxyUdpSocket::SendTo(const void* pv, size_t cb,
+                                     const SocketAddress& addr,
+                                     const PacketOptions& options) {
+  if (stage_ != ST_READY) {
+    SetError(EWOULDBLOCK);
+    return -1;
+  }
+  if (!udp_) {
+    SetError(ENOTCONN);
+    return -1;
+  }
+  // Max SOCKS UDP header: 3 + 1 + 16 + 2 = 22 bytes.
+  // Use a stack buffer large enough for typical RTP/STUN payloads.
+  constexpr size_t kHeaderMax = 22;
+  constexpr size_t kMaxPayload = 64 * 1024;
+  if (cb > kMaxPayload) {
+    SetError(EMSGSIZE);
+    return -1;
+  }
+  uint8_t stackbuf[kHeaderMax + 2048];
+  std::unique_ptr<uint8_t[]> heapbuf;
+  uint8_t* buf = stackbuf;
+  if (cb + kHeaderMax > sizeof(stackbuf)) {
+    heapbuf.reset(new uint8_t[cb + kHeaderMax]);
+    buf = heapbuf.get();
+  }
+  size_t hdr_len = WriteSocksUdpHeader(addr, buf);
+  if (hdr_len == 0) {
+    SetError(EAFNOSUPPORT);
+    return -1;
+  }
+  memcpy(buf + hdr_len, pv, cb);
+  int sent = udp_->SendTo(buf, hdr_len + cb, udp_relay_, options);
+  if (sent < 0) return sent;
+  // Report back the payload size (not including our header).
+  return sent > static_cast<int>(hdr_len) ? sent - static_cast<int>(hdr_len)
+                                          : 0;
+}
+
+int AsyncSocksProxyUdpSocket::Close() {
+  if (control_) control_->Close();
+  int r = udp_ ? udp_->Close() : 0;
+  stage_ = ST_ERROR;
+  return r;
+}
+
+AsyncPacketSocket::State AsyncSocksProxyUdpSocket::GetState() const {
+  if (!udp_) return STATE_CLOSED;
+  return STATE_BOUND;
+}
+
+int AsyncSocksProxyUdpSocket::GetOption(Socket::Option opt, int* value) {
+  return udp_ ? udp_->GetOption(opt, value) : -1;
+}
+
+int AsyncSocksProxyUdpSocket::SetOption(Socket::Option opt, int value) {
+  return udp_ ? udp_->SetOption(opt, value) : -1;
+}
+
+int AsyncSocksProxyUdpSocket::GetError() const {
+  return error_;
+}
+
+void AsyncSocksProxyUdpSocket::SetError(int error) {
+  error_ = error;
+}
+
+void AsyncSocksProxyUdpSocket::OnControlConnect(Socket* /*s*/) {
+  SendGreeting();
+}
+
+void AsyncSocksProxyUdpSocket::SendGreeting() {
+  const uint8_t buf[3] = {0x05, 0x01, 0x00};
+  int r = control_->Send(buf, sizeof(buf));
+  if (r != static_cast<int>(sizeof(buf))) {
+    Fail(control_->GetError());
+    return;
+  }
+  stage_ = ST_HELLO;
+}
+
+void AsyncSocksProxyUdpSocket::SendAssociate() {
+  // VER CMD RSV ATYP DST.ADDR DST.PORT — ask for UDP ASSOCIATE with
+  // DST=0.0.0.0:0 (we don't yet know our own source port, let the server
+  // accept packets from any port we use).
+  const uint8_t req[10] = {
+      0x05, 0x03, 0x00, 0x01,
+      0x00, 0x00, 0x00, 0x00,  // 0.0.0.0
+      0x00, 0x00                // port 0
+  };
+  int r = control_->Send(req, sizeof(req));
+  if (r != static_cast<int>(sizeof(req))) {
+    Fail(control_->GetError());
+    return;
+  }
+  stage_ = ST_ASSOCIATE;
+}
+
+void AsyncSocksProxyUdpSocket::OnControlRead(Socket* /*s*/) {
+  while (true) {
+    if (ctrl_len_ >= sizeof(ctrl_buf_)) {
+      Fail(EOVERFLOW);
+      return;
+    }
+    int r = control_->Recv(ctrl_buf_ + ctrl_len_,
+                           sizeof(ctrl_buf_) - ctrl_len_, nullptr);
+    if (r <= 0) {
+      // -1 with EWOULDBLOCK: no more data right now
+      break;
+    }
+    ctrl_len_ += static_cast<size_t>(r);
+  }
+
+  bool keep_parsing = true;
+  while (keep_parsing) {
+    if (stage_ == ST_HELLO) {
+      keep_parsing = HandleHelloReply();
+    } else if (stage_ == ST_ASSOCIATE) {
+      keep_parsing = HandleAssociateReply();
+    } else {
+      keep_parsing = false;
+    }
+  }
+}
+
+bool AsyncSocksProxyUdpSocket::HandleHelloReply() {
+  if (ctrl_len_ < 2) return false;
+  if (ctrl_buf_[0] != 0x05 || ctrl_buf_[1] != 0x00) {
+    RTC_LOG(LS_WARNING)
+        << "AsyncSocksProxyUdpSocket: bad hello reply ver="
+        << static_cast<int>(ctrl_buf_[0])
+        << " method=" << static_cast<int>(ctrl_buf_[1]);
+    Fail(EPROTO);
+    return false;
+  }
+  // consume 2 bytes
+  ctrl_len_ -= 2;
+  if (ctrl_len_ > 0) memmove(ctrl_buf_, ctrl_buf_ + 2, ctrl_len_);
+  SendAssociate();
+  return stage_ == ST_ASSOCIATE;  // continue parsing if more bytes arrived
+}
+
+bool AsyncSocksProxyUdpSocket::HandleAssociateReply() {
+  if (ctrl_len_ < 5) return false;
+  if (ctrl_buf_[0] != 0x05 || ctrl_buf_[2] != 0x00) {
+    RTC_LOG(LS_WARNING) << "AsyncSocksProxyUdpSocket: malformed ASSOCIATE reply";
+    Fail(EPROTO);
+    return false;
+  }
+  if (ctrl_buf_[1] != 0x00) {
+    RTC_LOG(LS_WARNING) << "AsyncSocksProxyUdpSocket: ASSOCIATE rejected, REP="
+                        << static_cast<int>(ctrl_buf_[1]);
+    Fail(EHOSTUNREACH);
+    return false;
+  }
+  uint8_t atyp = ctrl_buf_[3];
+  size_t addr_off = 4;
+  size_t addr_len;
+  IPAddress ip;
+  switch (atyp) {
+    case 0x01:
+      addr_len = 4;
+      if (ctrl_len_ < addr_off + addr_len + 2) return false;
+      {
+        in_addr v4;
+        memcpy(&v4.s_addr, ctrl_buf_ + addr_off, 4);
+        ip = IPAddress(v4);
+      }
+      break;
+    case 0x04:
+      addr_len = 16;
+      if (ctrl_len_ < addr_off + addr_len + 2) return false;
+      {
+        in6_addr v6;
+        memcpy(&v6.s6_addr, ctrl_buf_ + addr_off, 16);
+        ip = IPAddress(v6);
+      }
+      break;
+    default:
+      RTC_LOG(LS_WARNING)
+          << "AsyncSocksProxyUdpSocket: unexpected ATYP in ASSOCIATE reply: "
+          << static_cast<int>(atyp);
+      Fail(EPROTO);
+      return false;
+  }
+  uint16_t port_be;
+  memcpy(&port_be, ctrl_buf_ + addr_off + addr_len, 2);
+  uint16_t port = NetworkToHost16(port_be);
+
+  // Per RFC 1928 the server may reply with 0.0.0.0 — it means "the same host
+  // the TCP control is connected to." xray behaves this way.
+  if (ip.IsNil() || (atyp == 0x01 && ip.ToString() == "0.0.0.0")) {
+    udp_relay_ = SocketAddress(socks_server_.ipaddr(), port);
+  } else {
+    udp_relay_ = SocketAddress(ip, port);
+  }
+
+  size_t consumed = addr_off + addr_len + 2;
+  ctrl_len_ -= consumed;
+  if (ctrl_len_ > 0) memmove(ctrl_buf_, ctrl_buf_ + consumed, ctrl_len_);
+
+  stage_ = ST_READY;
+  RTC_LOG(LS_INFO) << "AsyncSocksProxyUdpSocket: relay ready at "
+                   << udp_relay_.ToSensitiveString();
+  // Notify upper layer that the local address (UDP port) is now usable.
+  // AsyncUDPSocket already returns BOUND after bind, so ICE will pick it up
+  // on its next tick.
+  SignalAddressReady(this, GetLocalAddress());
+  return false;
+}
+
+void AsyncSocksProxyUdpSocket::OnControlClose(Socket* /*s*/, int err) {
+  if (stage_ != ST_READY) {
+    RTC_LOG(LS_WARNING)
+        << "AsyncSocksProxyUdpSocket: control closed during handshake, err="
+        << err;
+  } else {
+    RTC_LOG(LS_INFO) << "AsyncSocksProxyUdpSocket: control closed, relay lost";
+  }
+  stage_ = ST_ERROR;
+  error_ = err ? err : ECONNRESET;
+  NotifyClosed(error_);
+}
+
+void AsyncSocksProxyUdpSocket::OnUdpPacket(AsyncPacketSocket* /*s*/,
+                                           const ReceivedPacket& packet) {
+  if (stage_ != ST_READY) return;
+  // Only accept datagrams from the SOCKS relay endpoint.
+  if (packet.source_address() != udp_relay_) {
+    RTC_LOG(LS_VERBOSE)
+        << "AsyncSocksProxyUdpSocket: ignoring packet from "
+        << packet.source_address().ToSensitiveString();
+    return;
+  }
+  SocketAddress real_src;
+  size_t hdr_len = 0;
+  if (!ParseSocksUdpHeader(packet.payload().data(), packet.payload().size(),
+                           &real_src, &hdr_len)) {
+    RTC_LOG(LS_VERBOSE) << "AsyncSocksProxyUdpSocket: drop invalid UDP header";
+    return;
+  }
+  auto payload = packet.payload().subview(hdr_len);
+  ReceivedPacket forwarded(payload, real_src, packet.arrival_time());
+  NotifyPacketReceived(forwarded);
+}
+
+void AsyncSocksProxyUdpSocket::Fail(int error) {
+  if (stage_ == ST_ERROR) return;
+  stage_ = ST_ERROR;
+  error_ = error ? error : EPROTO;
+  if (control_) control_->Close();
+  NotifyClosed(error_);
 }
 
 }  // namespace rtc

@@ -8,6 +8,7 @@ TMessagesProj/.cxx/
 TMessagesProj/jniLibs/
 TMessagesProj/jniRes/
 **/.DS_Store
+.claude/
 TMessagesProj/afat/
 TMessagesProj_App/afat/
 TMessagesProj_AppHockeyApp/afat/

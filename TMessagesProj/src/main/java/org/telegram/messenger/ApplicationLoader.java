@@ -264,6 +264,22 @@ public class ApplicationLoader extends Application {
             }
         }
 
+        // Enforce xray proxy on all accounts after ConnectionsManager instances are initialized.
+        // ConnectionsManager.init() reads SharedPreferences on creation, but we call this
+        // explicitly to guarantee the native layer has the correct proxy settings.
+        if (VpnSDK.isProxyRunning()) {
+            org.telegram.tgnet.ConnectionsManager.setProxySettings(
+                    true,
+                    VpnSDK.getProxySocksHost(),
+                    VpnSDK.getProxySocksPort(),
+                    "", "", ""
+            );
+            FileLog.d("xray proxy enforced on ConnectionsManager: " +
+                    VpnSDK.getProxySocksHost() + ":" + VpnSDK.getProxySocksPort());
+        } else {
+            FileLog.e("xray proxy not running at postInit — no proxy set. error: " + VpnSDK.getProxyLastError());
+        }
+
         ApplicationLoader app = (ApplicationLoader) ApplicationLoader.applicationContext;
         app.initPushServices();
         if (BuildVars.LOGS_ENABLED) {
@@ -336,12 +352,7 @@ public class ApplicationLoader extends Application {
                 if (wasInBackground) {
                     ensureCurrentNetworkGet(true);
                     VpnSDK.updateConfig();
-                    // Auto-connect VPN when app comes to foreground (not on background process recreation)
-                    if (VpnSDK.getTunnelState() == VpnTunnelState.DOWN
-                            && VpnService.prepare(applicationContext) == null) {
-                        VpnConnectionService.start(applicationContext);
-                        VpnSDK.toggleConnection();
-                    }
+                    refreshXrayConfigIfActivated();
                 }
             }
         };
@@ -355,10 +366,114 @@ public class ApplicationLoader extends Application {
         VpnSDK.setup(applicationContext);
         VpnSDK.updateConfig();
 
+        // Bring xray up from cache (returning users) before ConnectionsManager.init()
+        // reads mainconfig. On cache miss — first install or after the cached config
+        // was invalidated — leave the proxy off and trigger a background register;
+        // its callback hot-reloads ConnectionsManager once a fresh config arrives.
+        boolean xrayStarted = VpnSDK.startProxy();
+        if (xrayStarted) {
+            persistXrayProxyToMainConfig(true);
+            FileLog.d("xray proxy started from cache on " + VpnSDK.getProxySocksHost() + ":" + VpnSDK.getProxySocksPort());
+        } else {
+            // Make sure stale proxy_enabled=true from a previous launch doesn't
+            // direct MTProto at a non-listening 127.0.0.1 port now that we have
+            // no cache.
+            persistXrayProxyToMainConfig(false);
+            FileLog.d("no cached xray config; registering in background");
+            VpnSDK.registerOrAuth(3, success -> {
+                if (success) {
+                    applyXrayProxyToConnectionsManager();
+                    FileLog.d("xray initial register succeeded; ConnectionsManager updated");
+                } else {
+                    FileLog.e("xray initial register failed: " + VpnSDK.getProxyLastError()
+                            + " — will retry on user 'Continue' tap");
+                }
+            });
+        }
+
+        // Refresh xray config in background for already-authenticated users.
+        // First-install users get their config when they tap "Continue" on the
+        // phone-number screen (see LoginActivity).
+        refreshXrayConfigIfActivated();
+
+
         AndroidUtilities.runOnUIThread(ApplicationLoader::startPushService);
 
         LauncherIconController.tryFixLauncherIconIfNeeded();
         ProxyRotationController.init();
+    }
+
+    /** Refresh no more often than once per 5 minutes per process. */
+    private static final long XRAY_REFRESH_MIN_INTERVAL_MS = 5L * 60L * 1000L;
+    private static volatile long lastXrayRefreshAtMs = 0L;
+
+    /**
+     * Pushes the current xray SOCKS5 address into the native ConnectionsManager
+     * so all accounts switch over at runtime, AND persists it to mainconfig so
+     * the next cold start picks it up before ConnectionsManager.init() runs.
+     * Safe to call repeatedly with the same value — the native side reapplies.
+     */
+    public static void applyXrayProxyToConnectionsManager() {
+        persistXrayProxyToMainConfig(true);
+        ConnectionsManager.setProxySettings(
+                true,
+                VpnSDK.getProxySocksHost(),
+                VpnSDK.getProxySocksPort(),
+                "", "", ""
+        );
+    }
+
+    private static void persistXrayProxyToMainConfig(boolean enabled) {
+        android.content.SharedPreferences.Editor proxyPrefs =
+                applicationContext.getSharedPreferences("mainconfig", android.content.Context.MODE_PRIVATE).edit();
+        if (enabled) {
+            proxyPrefs.putString("proxy_ip", VpnSDK.getProxySocksHost());
+            proxyPrefs.putInt("proxy_port", VpnSDK.getProxySocksPort());
+            proxyPrefs.putString("proxy_user", "");
+            proxyPrefs.putString("proxy_pass", "");
+            proxyPrefs.putString("proxy_secret", "");
+            proxyPrefs.putBoolean("proxy_enabled", true);
+            proxyPrefs.putBoolean("proxy_enabled_calls", true);
+        } else {
+            proxyPrefs.putBoolean("proxy_enabled", false);
+            proxyPrefs.putBoolean("proxy_enabled_calls", false);
+        }
+        proxyPrefs.commit(); // synchronous — must land before ConnectionsManager.init() reads
+    }
+
+    /**
+     * Triggers a background /auth/register call when at least one Telegram
+     * account is already authenticated. On success the local xray proxy is
+     * restarted with the fresh config and ConnectionsManager is told to apply
+     * the new proxy address to all accounts at runtime. On failure (after the
+     * SDK's internal retries) the existing cached / fallback config keeps
+     * serving traffic; we'll try again on the next foreground transition.
+     *
+     * Debounced to {@link #XRAY_REFRESH_MIN_INTERVAL_MS} to avoid hammering
+     * the backend (and tearing down live MTProto sockets) when the user
+     * rapidly toggles the app between foreground and background.
+     */
+    private static void refreshXrayConfigIfActivated() {
+        if (UserConfig.getActivatedAccountsCount() <= 0) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        long since = now - lastXrayRefreshAtMs;
+        if (since < XRAY_REFRESH_MIN_INTERVAL_MS) {
+            FileLog.d("xray refresh skipped: " + since + "ms since last refresh");
+            return;
+        }
+        lastXrayRefreshAtMs = now;
+        VpnSDK.registerOrAuth(3, success -> {
+            if (success) {
+                applyXrayProxyToConnectionsManager();
+                FileLog.d("xray refreshed via /auth/register, ConnectionsManager updated");
+            } else {
+                // Allow the next foreground transition to retry sooner.
+                lastXrayRefreshAtMs = 0L;
+                FileLog.e("xray /auth/register failed after retries; keeping current config");
+            }
+        });
     }
 
     public static void startPushService() {

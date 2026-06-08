@@ -267,12 +267,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import me.vkryl.android.animator.BoolAnimator;
 import me.vkryl.android.animator.FactorAnimator;
 
-import android.net.VpnService;
-
-import vpn.sdk.VpnSDK;
-import vpn.tunnel.VpnTunnelState;
-import org.telegram.messenger.VpnConnectionHelper;
-import org.telegram.messenger.VpnConnectionService;
 
 public class DialogsActivity extends BaseFragment implements NotificationCenter.NotificationCenterDelegate, FloatingDebugProvider, FactorAnimator.Target, MainTabsActivity.TabFragmentDelegate {
     private final int ADDITIONAL_LIST_HEIGHT_DP = Build.VERSION.SDK_INT >= 31 ? 48 : 0;
@@ -344,9 +338,6 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     private boolean storiesOverscrollCalled;
     private boolean wasDrawn;
     public boolean hasMainTabs;
-
-    private VpnSDK.StateListener vpnStateListener;
-    private final VpnConnectionHelper vpnHelper = new VpnConnectionHelper(this);
 
     public MessagesStorage.TopicKey getOpenedDialogId() {
         return openedDialogId;
@@ -2984,11 +2975,6 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     @Override
     public void onFragmentDestroy() {
         super.onFragmentDestroy();
-        if (vpnIntroOverlay != null && vpnIntroOverlay.getParent() instanceof ViewGroup) {
-            ((ViewGroup) vpnIntroOverlay.getParent()).removeView(vpnIntroOverlay);
-            vpnIntroOverlay = null;
-            vpnIntroShowing = false;
-        }
         if (searchString == null) {
             getNotificationCenter().removeObserver(this, NotificationCenter.dialogsNeedReload);
             NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.emojiLoaded);
@@ -3050,27 +3036,11 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         if (undoView[0] != null) {
             undoView[0].hide(true, 0);
         }
-        if (vpnStateListener != null) {
-            VpnSDK.removeStateListener(vpnStateListener);
-            vpnStateListener = null;
-        }
-        vpnHelper.release();
         notificationsLocker.unlock();
         delegate = null;
         SuggestClearDatabaseBottomSheet.dismissDialog();
     }
 
-    private Drawable getVpnDrawableForState(Context ctx, VpnTunnelState state) {
-        boolean isDark = Theme.isCurrentThemeDark();
-        int drawableRes = switch (state) {
-            case UP -> isDark ? R.drawable.vpn_connected : R.drawable.vpn_connected_dark;
-            case CONNECTING -> isDark ? R.drawable.vpn_loading : R.drawable.vpn_loading_dark;
-            default -> isDark ? R.drawable.vpn_disconnected : R.drawable.vpn_disconnected_dark;
-        };
-        Drawable drawable = ResourcesCompat.getDrawable(ctx.getResources(), drawableRes, null);
-        return drawable.mutate();
-    }
-    
     @Override
     public boolean dismissDialogOnPause(Dialog dialog) {
         return !(dialog instanceof BotWebViewSheet) && super.dismissDialogOnPause(dialog);
@@ -3296,7 +3266,6 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 if (switchItem != null) {
                     switchItem.setVisibility(View.GONE);
                 }
-                actionBar.setVpnIconVisibility(false);
                 createSearchViewPager();
                 if (viewPages[0] != null) {
                     if (searchString != null) {
@@ -3368,7 +3337,6 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 updateFloatingButtonVisibility(true);
                 checkUi_mainTabsVisible();
                 blur3_InvalidateBlur();
-                actionBar.setVpnIconVisibility(true);
             }
 
             @Override
@@ -3481,38 +3449,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 SpannableStringBuilder ssb = new SpannableStringBuilder(getString(R.string.AppName));
                 ssb.setSpan(new ImageSpan(logoDrawable), 0, ssb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
 
-                // TODO: ActionBar Сейчас мы не можем применить themed color filter, который применит tint с учетом dark theme
-                // потому, что картинка состоит из 2 визуальных частей [[logo]-[switcher]]
-                // и по идее logo хотим filter, а switcher нет (хотим там оригинальное начертание)
-                // Для статусов доступны: vpn_connected, vpn_disconnected, vpn_loading.
-
-                // чтобы срезать угол я рекомендую не переделывать layout внутри ActionBar, а просто тут собрать
-                // LayerDrawable типа такого
-                // new LayerDrawable(new Drawable[])
-                // и к одному слою (иконке слева) применить:
-                // vpnLogoDrawable.setColorFilter(getThemedColor(Theme.key_telegram_color_dialogsLogo), PorterDuff.Mode.MULTIPLY);
-                // А свитчер оставить не тронутым. Он в обводке и он нормально смотрится и в dark и в light теме.
-                // Если это будешь делать, то надо перевыгрузить из фигмы иначе, не вместе, а отдельно.
-                // НО при таком подходе frame полностью должен совпадать у 2 картинок, просто на одной не видно свитчер, а на другой лого.
-                //
-                // Вероятно этот файл это то место, когда надо подписаться и слушать статус VpnSDK и обновлять ActionBar.
-                // Но только ActionBar используется примерно в 70% экранов, просто в рахных контекстах.
-                // Важно кроме чтобы это происходило как бы только в этой ветке условия, где сейчас этот коммент
-                Drawable vpnLogoDrawable = getVpnDrawableForState(context, VpnSDK.getTunnelState());
-                actionBar.setTitle(ssb, statusDrawable, vpnLogoDrawable);
-
-                // При попытке подключиться стандартный флоу проверок как в awg
-                actionBar.setVpnDrawableOnClick(v -> {
-                    vpnHelper.startVpnToggle();
-                });
-
-                vpnStateListener = state -> {
-                    if (actionBar != null && getContext() != null) {
-                        Drawable newDrawable = getVpnDrawableForState(getContext(), state);
-                        actionBar.updateVpnDrawable(newDrawable);
-                    }
-                };
-                VpnSDK.addStateListener(vpnStateListener);
+                actionBar.setTitle(ssb, statusDrawable);
                 updateStatus(UserConfig.getInstance(currentAccount).getCurrentUser(), false);
             }
             if (folderId == 0) {
@@ -6934,81 +6871,12 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         }
     }
 
-    private boolean vpnIntroShowing;
-    private VpnIntroOverlay vpnIntroOverlay;
     private boolean wasPausedInBackground = true;
-    // Флаг холодного старта: static сбрасывается при убийстве процесса,
-    // поэтому автозапуск VPN сработает только один раз за жизнь процесса.
-    private static boolean vpnColdStartDone = false;
-
-    private void showVpnIntroIfNeeded() {
-        if (onlySelect || vpnIntroShowing || fragmentView == null) return;
-        if (MessagesController.getGlobalMainSettings().getBoolean("vpn_intro_shown", false)) return;
-
-        vpnIntroShowing = true;
-        fragmentView.post(() -> {
-            if (fragmentView == null || fragmentView.getWidth() == 0) {
-                vpnIntroShowing = false;
-                return;
-            }
-
-            List<VpnIntroOverlay.Item> items = List.of(
-                    new VpnIntroOverlay.Item(R.drawable.ic_toggle_off_intro,
-                            LocaleController.getString(R.string.VpnIntroTurnOffHeader),
-                            LocaleController.getString(R.string.VpnIntroTurnOffSubHeader)),
-                    new VpnIntroOverlay.Item(R.drawable.ic_thumb_up_intro,
-                            LocaleController.getString(R.string.VpnIntroConflictHeader),
-                            LocaleController.getString(R.string.VpnIntroConflictSubHeader)),
-                    new VpnIntroOverlay.Item(R.drawable.ic_toggle_on_intro,
-                            LocaleController.getString(R.string.VpnIntroAutoOnHeader),
-                            LocaleController.getString(R.string.VpnIntroAutoOnSubHeader))
-            );
-
-            VpnIntroOverlay overlay = new VpnIntroOverlay(
-                    getContext(), fragmentView,
-                    LocaleController.getString(R.string.VpnIntroHeader),
-                    LocaleController.getString(R.string.VpnIntroSubHeader),
-                    items,
-                    LocaleController.getString(R.string.VpnIntroDismiss)
-            );
-            vpnIntroOverlay = overlay;
-            ViewGroup rootView = (ViewGroup) fragmentView.getRootView().findViewById(android.R.id.content);
-            rootView.addView(overlay, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-            overlay.setOnClickListener(v -> {
-                vpnIntroShowing = false;
-                vpnIntroOverlay = null;
-                MessagesController.getGlobalMainSettings().edit()
-                    .putBoolean("vpn_intro_shown", true).apply();
-                overlay.dismiss();
-            });
-        });
-    }
 
     @Override
     public void onResume() {
         super.onResume();
-        vpnHelper.handleResume();
-
-        // Переподключение VPN после смахивания
-        if (VpnConnectionService.disconnectedBySwipe && VpnSDK.getTunnelState() == VpnTunnelState.DOWN) {
-            VpnConnectionService.disconnectedBySwipe = false;
-            vpnHelper.startVpnToggle();
-        }
-        // Auto-connect VPN on cold start (once per process lifetime)
-        if (!vpnColdStartDone && VpnSDK.getTunnelState() == VpnTunnelState.DOWN) {
-            vpnColdStartDone = true;
-            if (VpnService.prepare(getParentActivity()) == null) {
-                // Разрешение уже есть — подключаем сразу
-                VpnConnectionService.start(getParentActivity());
-                VpnSDK.toggleConnection();
-            } else {
-                // Разрешения нет — запрашиваем через системный диалог
-                vpnHelper.startVpnToggle();
-            }
-        }
         wasPausedInBackground = false;
-
-        showVpnIntroIfNeeded();
 
         if (dialogStoriesCell != null) {
             dialogStoriesCell.onResume();
@@ -10280,16 +10148,10 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
 
     @Override
     public void onActivityResultFragment(int requestCode, int resultCode, Intent data) {
-        if (vpnHelper.handleActivityResult(requestCode, resultCode)) {
-            return;
-        }
     }
 
     @Override
     public void onRequestPermissionsResultFragment(int requestCode, String[] permissions, int[] grantResults) {
-        if (vpnHelper.handlePermissionResult(requestCode, permissions, grantResults)) {
-            return;
-        }
         if (requestCode == 1) {
             for (int a = 0; a < permissions.length; a++) {
                 if (grantResults.length <= a) {
@@ -11771,10 +11633,6 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             }
             if (logoDrawable != null) {
                 logoDrawable.setColorFilter(getThemedColor(Theme.key_telegram_color_dialogsLogo), PorterDuff.Mode.MULTIPLY);
-            }
-            if (actionBar != null && getContext() != null) {
-                Drawable newVpnDrawable = getVpnDrawableForState(getContext(), VpnSDK.getTunnelState());
-                actionBar.updateVpnDrawable(newVpnDrawable);
             }
             if (actionModeCloseView != null) {
                 actionModeCloseView.setColorFilter(new PorterDuffColorFilter(getThemedColor(Theme.key_actionBarActionModeDefaultIcon), PorterDuff.Mode.MULTIPLY));
@@ -13407,8 +13265,8 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
 
                 final String proxyAddress = preferences.getString("proxy_ip", "");
                 final boolean proxyEnabled = preferences.getBoolean("proxy_enabled", false);
-                final boolean proxyVisible = proxyEnabled && !TextUtils.isEmpty(proxyAddress)
-                        || getMessagesController().blockedCountry && !SharedConfig.proxyList.isEmpty();
+                // Vepegram: пункт «Прокси» скрыт из бокового меню
+                final boolean proxyVisible = false;
 
                 if (proxyVisible) {
                     io.addGap();

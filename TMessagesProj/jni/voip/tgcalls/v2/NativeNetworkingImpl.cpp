@@ -14,6 +14,7 @@
 #include "pc/dtls_transport.h"
 #include "pc/jsep_transport_controller.h"
 #include "api/async_dns_resolver.h"
+#include "rtc_base/socket_adapters.h"
 
 #include "TurnCustomizerImpl.h"
 #include "ReflectorRelayPortFactory.h"
@@ -173,8 +174,13 @@ private:
 
 class WrappedBasicPacketSocketFactory : public rtc::PacketSocketFactory {
 public:
-    WrappedBasicPacketSocketFactory(std::unique_ptr<rtc::BasicPacketSocketFactory> &&impl, bool standaloneReflectorMode) :
+    WrappedBasicPacketSocketFactory(std::unique_ptr<rtc::BasicPacketSocketFactory> &&impl,
+                                    rtc::SocketFactory* underlying,
+                                    absl::optional<rtc::SocketAddress> socksProxy,
+                                    bool standaloneReflectorMode) :
     _impl(std::move(impl)),
+    _underlying(underlying),
+    _socksProxy(std::move(socksProxy)),
     _standaloneReflectorMode(standaloneReflectorMode) {
     }
 
@@ -187,15 +193,23 @@ public:
         rtc::IPAddress ipAddress(v4addr);
         if (_standaloneReflectorMode && address.ipaddr() == ipAddress && address.port() != 12345) {
             return nullptr;
-        } else {
-            rtc::SocketAddress updatedAddress = address;
-            if (updatedAddress.port() == 12345) {
-                updatedAddress.SetPort(0);
-            }
-            return _impl->CreateUdpSocket(updatedAddress, min_port, max_port);
         }
+        rtc::SocketAddress updatedAddress = address;
+        if (updatedAddress.port() == 12345) {
+            updatedAddress.SetPort(0);
+        }
+        if (_socksProxy && _underlying) {
+            // Route UDP through xray via SOCKS5 UDP ASSOCIATE.
+            auto* sock = new rtc::AsyncSocksProxyUdpSocket(_underlying, updatedAddress, *_socksProxy);
+            if (!sock->IsBound()) {
+                delete sock;
+                return nullptr;
+            }
+            return sock;
+        }
+        return _impl->CreateUdpSocket(updatedAddress, min_port, max_port);
     }
-    
+
     virtual rtc::AsyncListenSocket *CreateServerTcpSocket(const rtc::SocketAddress &local_address, uint16_t min_port, uint16_t max_port, int opts) override {
         in_addr v4addr;
         inet_pton(AF_INET, "0.1.2.3", &v4addr);
@@ -223,6 +237,8 @@ public:
     }
 private:
     std::unique_ptr<rtc::BasicPacketSocketFactory> _impl;
+    rtc::SocketFactory* _underlying = nullptr;
+    absl::optional<rtc::SocketAddress> _socksProxy;
     bool _standaloneReflectorMode = false;
 };
 
@@ -519,11 +535,19 @@ _dataChannelMessageReceived(configuration.dataChannelMessageReceived) {
     _underlyingSocketFactory = _threads->getNetworkThread()->socketserver();
     
     _networkMonitorFactory = PlatformInterface::SharedInstance()->createNetworkMonitorFactory();
-    if (getCustomParameterBool(_customParameters, "network_standalone_reflectors")) {
-        _socketFactory = std::make_unique<WrappedBasicPacketSocketFactory>(std::make_unique<rtc::BasicPacketSocketFactory>(_threads->getNetworkThread()->socketserver()), true);
+    bool standalone = getCustomParameterBool(_customParameters, "network_standalone_reflectors");
+    absl::optional<rtc::SocketAddress> socksProxy;
+    if (_proxy) {
+        socksProxy = rtc::SocketAddress(_proxy->host, _proxy->port);
+    }
+    _socketFactory = std::make_unique<WrappedBasicPacketSocketFactory>(
+        std::make_unique<rtc::BasicPacketSocketFactory>(_threads->getNetworkThread()->socketserver()),
+        _threads->getNetworkThread()->socketserver(),
+        socksProxy,
+        standalone);
+    if (standalone) {
         _networkManager = std::make_unique<WrappedNetworkManager>(_networkMonitorFactory.get(), _threads->getNetworkThread()->socketserver());
     } else {
-        _socketFactory = std::make_unique<rtc::BasicPacketSocketFactory>(_threads->getNetworkThread()->socketserver());
         _networkManager = std::make_unique<rtc::BasicNetworkManager>(_networkMonitorFactory.get(), _threads->getNetworkThread()->socketserver());
     }
     
@@ -601,14 +625,14 @@ void NativeNetworkingImpl::resetDtlsSrtpTransport() {
         flags |= cricket::PORTALLOCATOR_DISABLE_TCP;
     }
     
-    if (_proxy || !_enableP2P) {
+    if (!_enableP2P) {
         flags |= cricket::PORTALLOCATOR_DISABLE_UDP;
         flags |= cricket::PORTALLOCATOR_DISABLE_STUN;
         uint32_t candidateFilter = _portAllocator->candidate_filter();
         candidateFilter &= ~(cricket::CF_REFLEXIVE);
         _portAllocator->SetCandidateFilter(candidateFilter);
     }
-    
+
     _portAllocator->set_step_delay(cricket::kMinimumStepDelay);
 
     _portAllocator->set_flags(flags);

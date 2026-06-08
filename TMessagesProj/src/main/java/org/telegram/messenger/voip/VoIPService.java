@@ -3450,9 +3450,19 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 
 			// proxy
 			Instance.Proxy proxy = null;
-			if (preferences.getBoolean("proxy_enabled", false) && preferences.getBoolean("proxy_enabled_calls", false)) {
+			// Ensure xray proxy is running — VoIPService may be started via push without ApplicationLoader hitting startProxy()
+			if (!vpn.sdk.VpnSDK.isProxyRunning()) {
+				boolean started = vpn.sdk.VpnSDK.startProxy();
+				FileLog.d("VoIP: xray proxy start attempt — " + (started ? "ok" : "failed: " + vpn.sdk.VpnSDK.getProxyLastError()));
+			}
+			if (vpn.sdk.VpnSDK.isProxyRunning()) {
+				// Route calls through local xray SOCKS5 proxy (VLESS+XTLS-Vision)
+				proxy = new Instance.Proxy(vpn.sdk.VpnSDK.getProxySocksHost(), vpn.sdk.VpnSDK.getProxySocksPort(), "", "");
+				FileLog.d("VoIP: using xray SOCKS proxy at " + proxy.host + ":" + proxy.port + ", forceTcp=" + forceTcp);
+			} else if (preferences.getBoolean("proxy_enabled", false) && preferences.getBoolean("proxy_enabled_calls", false)) {
 				final String server = preferences.getString("proxy_ip", null);
 				final String secret = preferences.getString("proxy_secret", null);
+				// Only plain SOCKS5 (no secret) can proxy WebRTC — MTProto proxy is TCP-only
 				if (!TextUtils.isEmpty(server) && TextUtils.isEmpty(secret)) {
 					proxy = new Instance.Proxy(server, preferences.getInt("proxy_port", 0), preferences.getString("proxy_user", null), preferences.getString("proxy_pass", null));
 				}

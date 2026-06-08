@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "vpn.sdk"
+    namespace = "vpn.proxy"
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -17,16 +17,10 @@ android {
 }
 
 dependencies {
-    implementation(project(":network"))
-    api(project(":tunnel"))
-    api(project(":proxy"))
+    // libXray.aar — build from https://github.com/xtls/libxray (gomobile bind -target android -androidapi 21)
+    // Place the resulting libXray.aar into vpn/proxy/libs/
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar", "*.jar"))))
 
     implementation(libs.androidx.core.ktx)
-
-    implementation(libs.androidx.lifecycle.viewmodel)
     implementation(libs.kotlinx.coroutines.android)
-
-    implementation(libs.kotlinx.serialization.json)
-
-    implementation(libs.androidx.navigation.runtime)
 }

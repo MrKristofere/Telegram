@@ -36,6 +36,9 @@ object VpnNetworkFactory {
     private var appUpdateRepository: AppUpdateRepository? = null
 
     @Volatile
+    private var registrationRepository: RegistrationRepository? = null
+
+    @Volatile
     private var isDebug: Boolean = false
 
     @Synchronized
@@ -59,6 +62,9 @@ object VpnNetworkFactory {
         appUpdateRepository = AppUpdateRepository(updateApi)
 
         vpnApi = VpnApi(client, configRepo)
+
+        val registerApi = RegisterApi(client, configRepo)
+        registrationRepository = RegistrationRepository(registerApi, deviceIdRepo, storage)
     }
 
     fun getHttpClient(): HttpClient {
@@ -79,6 +85,10 @@ object VpnNetworkFactory {
 
     fun getAppUpdateRepository(): AppUpdateRepository {
         return appUpdateRepository ?: throw IllegalStateException("VpnNetworkFactory is not initialized. Call setup() first.")
+    }
+
+    fun getRegistrationRepository(): RegistrationRepository {
+        return registrationRepository ?: throw IllegalStateException("VpnNetworkFactory is not initialized. Call setup() first.")
     }
 
     private fun createHttpClient(deviceIdRepo: DeviceIdRepository): HttpClient {

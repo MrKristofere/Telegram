@@ -44,6 +44,15 @@ jobs:
           ref: ${{ inputs.branch }}
           submodules: recursive
 
+      - name: Extract Android SDK versions
+        id: sdk
+        run: |
+          BUILD_GRADLE=TMessagesProj_App/build.gradle
+
+          echo "build_tools=$(grep -oP "buildToolsVersion ['\"]\\K[^'\"]+" "$BUILD_GRADLE")" >> "$GITHUB_OUTPUT"
+          echo "compile_sdk=$(grep -oP "compileSdk(?:Version)?\s*=?\s*\K\d+" "$BUILD_GRADLE")" >> "$GITHUB_OUTPUT"
+          echo "ndk=$(grep -oP "ndkVersion ['\"]\\K[^'\"]+" "$BUILD_GRADLE")" >> "$GITHUB_OUTPUT"
+    
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
@@ -53,8 +62,11 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
-          packages: "build-tools;35.0.0 ndk;27.2.12479018 platforms;android-35"
-
+          packages: |
+            build-tools;${{ steps.sdk.outputs.build_tools }}
+            ndk;${{ steps.sdk.outputs.ndk }}
+            platforms;android-${{ steps.sdk.outputs.compile_sdk }}
+            
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2.23
 

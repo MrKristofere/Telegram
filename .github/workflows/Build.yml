@@ -7,6 +7,14 @@ on:
         description: "Branch name"
         type: string
         default: master
+      release-type:
+        description: "Release type"
+        type: choice
+        options:
+          - Release
+          - Debug
+          - Standalone
+        default: Debug
 
 env:
   CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
@@ -82,7 +90,7 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build Debug APK
-        run: ./gradlew :TMessagesProj_App:assembleDebug
+        run: ./gradlew :TMessagesProj_App:assemble${{ inputs.release-type }}
 
       - name: Upload APK
         uses: actions/upload-artifact@v7

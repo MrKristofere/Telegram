@@ -62,7 +62,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
-          packages: |
+          packages: >-
             build-tools;${{ steps.sdk.outputs.build_tools }}
             ndk;${{ steps.sdk.outputs.ndk }}
             platforms;android-${{ steps.sdk.outputs.compile_sdk }}

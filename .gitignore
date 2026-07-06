@@ -19,3 +19,12 @@ TMessagesProj_AppHuawei/afat/
 TMessagesProj/config/release.keystore
 *.jks
 *.keystore
+
+# Firebase App Distribution service-account credentials — never commit
+firebase-service-account*.json
+firebase-credentials*.json
+service-account*.json
+*-service-account.json
+
+# Build outputs
+**/bundleAfat/

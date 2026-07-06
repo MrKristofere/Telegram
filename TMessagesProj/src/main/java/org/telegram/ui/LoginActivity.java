@@ -3619,6 +3619,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
         private CodeFieldContainer codeFieldContainer;
         private TextView prevTypeTextView;
         private TextView confirmTextView;
+        private TextView officialTelegramHintTextView;
         private TextView titleTextView;
         private ImageView blackImageView;
         private RLottieImageView blueImageView;
@@ -3828,6 +3829,14 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                 };
 
                 addView(codeFieldContainer, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, 42, Gravity.CENTER_HORIZONTAL, 0, 32, 0, 0));
+            }
+            if (currentType == AUTH_TYPE_MESSAGE) {
+                officialTelegramHintTextView = new TextView(context);
+                officialTelegramHintTextView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14);
+                officialTelegramHintTextView.setGravity(Gravity.CENTER_HORIZONTAL);
+                officialTelegramHintTextView.setLineSpacing(AndroidUtilities.dp(2), 1.0f);
+                officialTelegramHintTextView.setText(getString(R.string.SentAppCodeOfficialHint));
+                addView(officialTelegramHintTextView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL | Gravity.TOP, 36, 16, 36, 0));
             }
             if (currentType == AUTH_TYPE_FLASH_CALL) {
                 codeFieldContainer.setVisibility(GONE);
@@ -4167,6 +4176,9 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
             confirmTextView.setTextColor(Theme.getColor(isInCancelAccountDeletionMode() ? Theme.key_windowBackgroundWhiteBlackText : Theme.key_windowBackgroundWhiteGrayText6));
             confirmTextView.setLinkTextColor(Theme.getColor(Theme.key_chats_actionBackground));
             titleTextView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+            if (officialTelegramHintTextView != null) {
+                officialTelegramHintTextView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText6));
+            }
 
             if (currentType == AUTH_TYPE_MISSED_CALL) {
                 missedCallDescriptionSubtitle.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));

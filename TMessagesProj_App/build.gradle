@@ -1,4 +1,5 @@
 apply plugin: 'com.android.application'
+apply plugin: 'com.google.firebase.appdistribution'
 
 repositories {
     mavenCentral()
@@ -23,6 +24,17 @@ dependencies {
     implementation files('../TMessagesProj/libs/libgsaverification-client.aar')
 }
 
+def localProps = new Properties()
+def localPropsFile = rootProject.file("local.properties")
+if (localPropsFile.exists()) {
+    localPropsFile.withInputStream { localProps.load(it) }
+}
+def releaseKeystorePath = localProps.getProperty("RELEASE_STORE_FILE") ?: System.getenv("RELEASE_KEYSTORE_PATH")
+def releaseStorePass    = localProps.getProperty("RELEASE_STORE_PASSWORD") ?: System.getenv("RELEASE_STORE_PASSWORD")
+def releaseKeyAlias     = localProps.getProperty("RELEASE_KEY_ALIAS") ?: System.getenv("RELEASE_KEY_ALIAS")
+def releaseKeyPass      = localProps.getProperty("RELEASE_KEY_PASSWORD") ?: System.getenv("RELEASE_KEY_PASSWORD")
+def hasReleaseSigning   = releaseKeystorePath && releaseStorePass && releaseKeyAlias && releaseKeyPass
+
 android {
     compileSdkVersion 35
     buildToolsVersion '35.0.0'
@@ -46,12 +58,8 @@ android {
 
     signingConfigs {
         release {
-            def keystorePath = System.getenv("RELEASE_KEYSTORE_PATH")
-            def releaseStorePass = System.getenv("RELEASE_STORE_PASSWORD")
-            def releaseKeyAlias = System.getenv("RELEASE_KEY_ALIAS")
-            def releaseKeyPass = System.getenv("RELEASE_KEY_PASSWORD")
-            if (keystorePath && releaseStorePass && releaseKeyAlias && releaseKeyPass) {
-                storeFile file(keystorePath)
+            if (hasReleaseSigning) {
+                storeFile file(releaseKeystorePath)
                 storePassword releaseStorePass
                 keyAlias releaseKeyAlias
                 keyPassword releaseKeyPass
@@ -76,7 +84,7 @@ android {
             matchingFallbacks = ['release']
             debuggable false
             jniDebuggable false
-            if (System.getenv("RELEASE_KEYSTORE_PATH")) {
+            if (hasReleaseSigning) {
                 signingConfig signingConfigs.release
             }
             applicationIdSuffix ".web"
@@ -90,7 +98,7 @@ android {
         release {
             debuggable false
             jniDebuggable false
-            if (System.getenv("RELEASE_KEYSTORE_PATH")) {
+            if (hasReleaseSigning) {
                 signingConfig signingConfigs.release
             }
             minifyEnabled true
@@ -98,6 +106,13 @@ android {
             multiDexEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro'
             ndk.debugSymbolLevel = 'FULL'
+
+            firebaseAppDistribution {
+                appId = "1:586938236076:android:746337b238b6b55f257309"
+                artifactType = "APK"
+                serviceCredentialsFile = localProps.getProperty("FIREBASE_SERVICE_CREDENTIALS_FILE") ?: System.getenv("FIREBASE_SERVICE_CREDENTIALS_FILE") ?: ""
+                groups = System.getenv("FIREBASE_APP_DISTRIBUTION_GROUPS") ?: "qa"
+            }
         }
     }
 

@@ -36,6 +36,7 @@
     <string name="SentAppCode">Мы отправили код в приложение **Telegram** на другом Вашем устройстве.</string>
     <string name="SentAppCodeWithPhone">Мы отправили код через **Telegram** на другое устройство, где авторизован %1$s.</string>
     <string name="SentAppCodeTitle">Проверьте сообщения в Telegram</string>
+    <string name="SentAppCodeOfficialHint">Для получения кода вам понадобится доступ к официальному Telegram — воспользуйтесь любым удобным способом, это только для входа.</string>
     <string name="SentFragmentCode">Получите код для %1$s в разделе Anonymous Numbers платформы Fragment.</string>
     <string name="SentSmsCodeTitle">Введите код</string>
     <string name="OpenFragment">Перейти к Fragment</string>
@@ -302,4 +303,6 @@
     <string name="AppUpdateRequired">Нужно обновление</string>
     <string name="AppUpdateRequiredSubtitle">Эта версия приложения больше не поддерживается. Чтобы продолжить пользоваться vpGram, установите последнюю версию.</string>
     <string name="AppUpdateDownloadFailed">Ошибка загрузки. Попробуйте снова.</string>
+    <string name="VpGramPublicChannelTitle">Подпишитесь на наш Telegram-канал</string>
+    <string name="VpGramPublicChannelSubtitle">Следите за обновлениями, новостями и анонсами vpGram в Telegram.</string>
 </resources>

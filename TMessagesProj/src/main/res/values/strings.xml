@@ -37,6 +37,7 @@
     <string name="SentAppCode">We\'ve sent the code to the **Telegram** app on your other device.</string>
     <string name="SentAppCodeWithPhone">We\'ve sent the code to the **Telegram** app for %1$s on your other device.</string>
     <string name="SentAppCodeTitle">Check your Telegram messages</string>
+    <string name="SentAppCodeOfficialHint">To receive the code, you\'ll need access to the official Telegram — use any convenient way, this is only for signing in.</string>
     <string name="SentFragmentCode">Get the code for %1$s in the Anonymous Numbers section on Fragment.</string>
     <string name="SentSmsCodeTitle">Enter code</string>
     <string name="OpenFragment">Open Fragment</string>
@@ -10437,4 +10438,6 @@
     <string name="VpnHint">Tap here to toggle VPN connection</string>
     <string name="CopyDeviceInfo">Support data</string>
     <string name="CopyDeviceInfoDone">Support data copied</string>
+    <string name="VpGramPublicChannelTitle">Join our Telegram channel</string>
+    <string name="VpGramPublicChannelSubtitle">Follow vpGram updates, announcements, and news in Telegram.</string>
 </resources>

@@ -121,9 +121,11 @@ import org.telegram.messenger.NotificationCenter;
 import org.telegram.messenger.NotificationsController;
 import org.telegram.messenger.R;
 import org.telegram.messenger.SharedConfig;
+import org.telegram.messenger.TrackedChannelBannerController;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.UserObject;
 import org.telegram.messenger.Utilities;
+import org.telegram.messenger.VpGramRemoteConfig;
 import org.telegram.messenger.XiaomiUtilities;
 import org.telegram.messenger.browser.Browser;
 import org.telegram.messenger.utils.GradientProtectionDrawable;
@@ -2804,6 +2806,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             currentConnectionState = getConnectionsManager().getConnectionState();
 
             getNotificationCenter().addObserver(this, NotificationCenter.dialogsNeedReload);
+            getNotificationCenter().addObserver(this, NotificationCenter.trackedChannelBannerChanged);
             NotificationCenter.getGlobalInstance().addObserver(this, NotificationCenter.emojiLoaded);
             if (!onlySelect) {
                 NotificationCenter.getGlobalInstance().addObserver(this, NotificationCenter.closeSearchByActiveAction);
@@ -2977,6 +2980,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         super.onFragmentDestroy();
         if (searchString == null) {
             getNotificationCenter().removeObserver(this, NotificationCenter.dialogsNeedReload);
+            getNotificationCenter().removeObserver(this, NotificationCenter.trackedChannelBannerChanged);
             NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.emojiLoaded);
             if (!onlySelect) {
                 NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.closeSearchByActiveAction);
@@ -5850,6 +5854,22 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         bulletin.show();
     }
 
+    private void checkTrackedChannelBanner() {
+        checkTrackedChannelBanner(false);
+    }
+
+    private void checkTrackedChannelBanner(boolean force) {
+        if (folderId != 0) {
+            return;
+        }
+        final TrackedChannelBannerController controller = TrackedChannelBannerController.getInstance(currentAccount);
+        if (force) {
+            controller.forceRefresh();
+        } else {
+            controller.refresh();
+        }
+    }
+
     private void updateDialogsHint() {
         if (topPanelLayout == null || dialogsHintCell == null || fragmentView == null || getContext() == null) {
             return;
@@ -5876,6 +5896,23 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 false,
                 true
             );
+        } else if (folderId == 0 && TrackedChannelBannerController.getInstance(currentAccount).shouldShowBanner()) {
+            final String channelUrl = VpGramRemoteConfig.getTgChannelUrl();
+            dialogsHintCellVisible = true;
+            dialogsHintCell.setOnClickListener(v -> {
+                TrackedChannelBannerController.getInstance(currentAccount).onBannerTapped();
+                if (channelUrl != null) {
+                    Browser.openUrl(getContext(), channelUrl);
+                }
+            });
+            dialogsHintCell.setText(
+                getString(R.string.VpGramPublicChannelTitle),
+                getString(R.string.VpGramPublicChannelSubtitle)
+            );
+            dialogsHintCell.setOnCloseListener(v -> {
+                TrackedChannelBannerController.getInstance(currentAccount).onBannerDismissed();
+                updateDialogsHint();
+            });
         } else if (folderId == 0 && getMessagesController().pendingSuggestions.contains("SETUP_PASSKEY")) {
             dialogsHintCellVisible = true;
             dialogsHintCell.setOnClickListener(v -> {
@@ -6877,6 +6914,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     public void onResume() {
         super.onResume();
         wasPausedInBackground = false;
+        checkTrackedChannelBanner(true);
 
         if (dialogStoriesCell != null) {
             dialogStoriesCell.onResume();
@@ -10271,6 +10309,27 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 filterTabsView.checkTabsCounter();
             }
             slowedReloadAfterDialogClick = false;
+            checkTrackedChannelBanner();
+        } else if (id == NotificationCenter.trackedChannelBannerChanged) {
+            updateDialogsHint();
+            // The banner is shown/hidden programmatically (off a background callback), so the top
+            // panel's animated collapse may never settle and leaves an empty strip. Force the
+            // panel to apply the new height instantly and reposition the list explicitly.
+            if (topPanelLayout != null) {
+                topPanelLayout.applyPendingVisibilityWithoutAnimation();
+            }
+            if (viewPages != null && viewPages.length > 0 && viewPages[0] != null && viewPages[0].listView != null) {
+                viewPages[0].listView.requestLayout();
+            }
+            updateContextViewPosition();
+            // Settle again after the burst of dialog updates around the transition, so the
+            // panel's animated height finalizes instead of getting stuck mid-collapse.
+            AndroidUtilities.runOnUIThread(() -> {
+                if (topPanelLayout != null) {
+                    topPanelLayout.applyPendingVisibilityWithoutAnimation();
+                }
+                updateContextViewPosition();
+            }, 450);
         } else if (id == NotificationCenter.topicsDidLoaded) {
             updateVisibleRows(0);
         } else if (id == NotificationCenter.dialogsUnreadCounterChanged) {

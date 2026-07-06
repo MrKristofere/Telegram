@@ -60,6 +60,16 @@ public class AnimatedLinearLayout extends LinearLayout {
 
     private boolean skipNextAnimation;
 
+    /**
+     * Forces the next layout pass to apply visibility/height changes instantly, without the
+     * usual animation. Useful when a child's visibility was changed programmatically and the
+     * animated collapse would otherwise not settle (e.g. off a background callback).
+     */
+    public void applyPendingVisibilityWithoutAnimation() {
+        skipNextAnimation = true;
+        requestLayout();
+    }
+
     public void setViewVisible(View child, boolean visible, boolean animated) {
         if (child == null) {
             return;

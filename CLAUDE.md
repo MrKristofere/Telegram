@@ -41,6 +41,38 @@ docker run -v $(pwd):/home/source vepegram:latest
 
 Артефакты после Docker-сборки копируются в `TMessagesProj/build/outputs/`.
 
+### Выгрузка в Firebase App Distribution
+
+Плагин `com.google.firebase.appdistribution` подключён для варианта `afat release`
+(App ID `1:586938236076:android:746337b238b6b55f257309`, проект `vepegram`).
+
+```bash
+# Собрать и выгрузить релизный APK тестерам
+FIREBASE_SERVICE_CREDENTIALS_FILE=/path/to/service-account.json \
+FIREBASE_APP_DISTRIBUTION_GROUPS=qa \
+./gradlew :TMessagesProj_App:assembleAfatRelease :TMessagesProj_App:appDistributionUploadAfatRelease
+```
+
+Переменные окружения (или ключи в `local.properties`, gitignored):
+- `FIREBASE_SERVICE_CREDENTIALS_FILE` — путь к JSON-ключу сервис-аккаунта Firebase.
+  Читается сначала из `local.properties`, затем из env. Роль в IAM: **Firebase App Distribution Admin**.
+- `FIREBASE_APP_DISTRIBUTION_GROUPS` — группы тестеров через запятую (по умолчанию `qa`).
+
+Release notes не публикуются (поле пустое).
+
+Конфиг — блок `firebaseAppDistribution` в `buildTypes.release` (`TMessagesProj_App/build.gradle`).
+
+**Подпись release-сборки** (иначе APK неподписан и App Distribution его не примет).
+Значения берутся сначала из `local.properties` в корне (gitignored), иначе из env — для CI:
+- локально: добавить в `local.properties` строки
+  `RELEASE_STORE_FILE=/абсолютный/путь/к/ключу.jks`, `RELEASE_STORE_PASSWORD=...`,
+  `RELEASE_KEY_ALIAS=...`, `RELEASE_KEY_PASSWORD=...`;
+- CI: env-переменные `RELEASE_KEYSTORE_PATH` / `RELEASE_STORE_PASSWORD` /
+  `RELEASE_KEY_ALIAS` / `RELEASE_KEY_PASSWORD`.
+
+Держите один и тот же ключ между сборками, иначе обновление у тестеров упадёт
+с `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
+
 ## Структура VPN-модуля
 
 `vpn/` — composite Gradle build (включён через `includeBuild('vpn')` в `settings.gradle`).

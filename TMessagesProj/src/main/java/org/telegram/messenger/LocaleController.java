@@ -1388,7 +1388,8 @@ public class LocaleController {
             "TelegramBusiness",
             "SentAppCodeTitle",
             "SentAppCode",
-            "SentAppCodeWithPhone"
+            "SentAppCodeWithPhone",
+            "SentAppCodeOfficialHint"
     ));
 
     private static String rebrandString(String value) {

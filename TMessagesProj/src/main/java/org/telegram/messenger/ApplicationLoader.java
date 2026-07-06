@@ -353,6 +353,8 @@ public class ApplicationLoader extends Application {
                     ensureCurrentNetworkGet(true);
                     VpnSDK.updateConfig();
                     refreshXrayConfigIfActivated();
+                    VpGramRemoteConfig.fetch();
+                    TrackedChannelBannerController.onAppForeground();
                 }
             }
         };
@@ -365,6 +367,9 @@ public class ApplicationLoader extends Application {
         // Initialize VPN SDK and fetch remote config
         VpnSDK.setup(applicationContext);
         VpnSDK.updateConfig();
+
+        // Fetch vpGram Firebase Remote Config (tracked channel banner id/url)
+        VpGramRemoteConfig.fetch();
 
         // Bring xray up from cache (returning users) before ConnectionsManager.init()
         // reads mainconfig. On cache miss — first install or after the cached config

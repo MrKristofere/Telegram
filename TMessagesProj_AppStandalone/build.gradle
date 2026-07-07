@@ -127,7 +127,7 @@ android {
         minSdkVersion 21
         targetSdkVersion 35
         versionName APP_VERSION_NAME
-        ndkVersion "20.1.5948944"
+        ndkVersion "27.2.12479018"
 
         multiDexEnabled true
 

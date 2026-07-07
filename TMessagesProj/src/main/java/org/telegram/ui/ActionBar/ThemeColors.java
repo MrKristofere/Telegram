@@ -112,7 +112,7 @@ public class ThemeColors {
         defaultColors[key_windowBackgroundWhiteBlueHeader] = TELEGRAM_COLOR_TEXT;
         defaultColors[key_windowBackgroundWhiteInputField] = 0xffdbdbdb;
         defaultColors[key_windowBackgroundWhiteInputFieldActivated] = TELEGRAM_COLOR;
-        defaultColors[key_switchTrack] = 0xffb0b5ba;
+        defaultColors[key_switchTrack] = 0xffa6adb3;
         defaultColors[key_switchTrackChecked] = TELEGRAM_COLOR;
         defaultColors[key_switchTrackBlue] = 0xff78828A;
         defaultColors[key_switchTrackBlueChecked] = 0xff1079C4;
@@ -147,6 +147,7 @@ public class ThemeColors {
         defaultColors[key_fastScrollActive] = TELEGRAM_COLOR;
         defaultColors[key_fastScrollInactive] = 0xffc9cdd1;
         defaultColors[key_fastScrollText] = 0xffffffff;
+        defaultColors[key_pollCreateIcons] = 0xff909599;
 
         defaultColors[key_avatar_text] = 0xffffffff;
 
@@ -539,6 +540,8 @@ public class ThemeColors {
         defaultColors[key_profile_verifiedCheck] = 0xffffffff;
         defaultColors[key_profile_title] = 0xff222222;
         defaultColors[key_profile_status] = 0xff222222;
+        defaultColors[key_chat_tagAdmin] = 0xff40A920;
+        defaultColors[key_chat_tagCreator] = 0xff955CDB;
 
         defaultColors[key_profile_tabText] = 0xff878c90;
         defaultColors[key_profile_tabSelectedText] = 0xff3a95d5;
@@ -804,7 +807,7 @@ public class ThemeColors {
         defaultColors[key_code_keyword] = 0xFFE05356;
         defaultColors[key_code_operator] = 0xFF4DBBFF;
         defaultColors[key_code_constant] = 0xFF7F79F3;
-        defaultColors[key_code_string] = 0xFF61C752;
+        defaultColors[key_code_string] = 0xFF37C123;
         defaultColors[key_code_number] = 0xFF327FE5;
         defaultColors[key_code_comment] = 0x80000000;
         defaultColors[key_code_function] = 0xFFF28C39;
@@ -894,6 +897,7 @@ public class ThemeColors {
         colorKeysMap.put(key_listSelector, "listSelectorSDK21");
         colorKeysMap.put(key_windowBackgroundWhiteInputField, "windowBackgroundWhiteInputField");
         colorKeysMap.put(key_windowBackgroundWhiteInputFieldActivated, "windowBackgroundWhiteInputFieldActivated");
+        colorKeysMap.put(key_pollCreateIcons, "pollCreateIcons");
         colorKeysMap.put(key_windowBackgroundWhiteGrayIcon, "windowBackgroundWhiteGrayIcon");
         colorKeysMap.put(key_windowBackgroundWhiteBlueText, "windowBackgroundWhiteBlueText");
         colorKeysMap.put(key_windowBackgroundWhiteBlueText2, "windowBackgroundWhiteBlueText2");
@@ -1431,6 +1435,8 @@ public class ThemeColors {
         colorKeysMap.put(key_passport_authorizeBackgroundSelected, "passport_authorizeBackgroundSelected");
         colorKeysMap.put(key_passport_authorizeText, "passport_authorizeText");
         colorKeysMap.put(key_profile_creatorIcon, "profile_creatorIcon");
+        colorKeysMap.put(key_chat_tagAdmin, "chat_tagAdmin");
+        colorKeysMap.put(key_chat_tagCreator, "chat_tagCreator");
         colorKeysMap.put(key_profile_title, "profile_title");
         colorKeysMap.put(key_profile_actionIcon, "profile_actionIcon");
         colorKeysMap.put(key_profile_actionBackground, "profile_actionBackground");

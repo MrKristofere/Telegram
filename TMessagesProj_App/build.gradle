@@ -138,6 +138,7 @@ android {
             ext {
                 abiVersionCode = 1
             }
+            buildConfigField "boolean", "BUNDLE", "true"
         }
         bundleAfat_SDK23 {
             ndk {
@@ -153,6 +154,7 @@ android {
             ext {
                 abiVersionCode = 2
             }
+            buildConfigField "boolean", "BUNDLE", "true"
         }
         afat {
             ndk {
@@ -170,6 +172,7 @@ android {
             ext {
                 abiVersionCode = 9
             }
+            buildConfigField "boolean", "BUNDLE", "false"
         }
     }
 
@@ -215,7 +218,7 @@ android {
         minSdkVersion 21
         targetSdkVersion 35
         versionName APP_VERSION_NAME
-        ndkVersion "20.1.5948944"
+        ndkVersion "27.2.12479018"
 
         buildConfigField "String", "COMMIT_SHA", "\"${System.getenv('COMMIT_SHA') ?: 'dev'}\""
 

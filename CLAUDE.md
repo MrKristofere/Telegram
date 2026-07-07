@@ -9,11 +9,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Проект
 
 - Android-приложение на Java/Kotlin, сборка Gradle
-- Базируется на [DrKLO/Telegram](https://github.com/nicegram/nicegram-android) (TMessagesProj)
+- Базируется на [DrKLO/Telegram](https://github.com/DrKLO/Telegram) (TMessagesProj) — upstream ветки `master`
+  подтягивается git-мёрджем: `upstream` remote = `https://github.com/DrKLO/Telegram.git`, ветка `master` — чистое зеркало upstream (fast-forward), форк-правки живут в `vepegram`
 - Нативный сетевой слой: C++ (`TMessagesProj/jni/tgnet/`)
 - VPN-модуль: Kotlin (`vpn/`) — SDK, tunnel (AmneziaWG/WireGuard), network (Ktor)
 - applicationId: `click.vpgram.messenger`, базовый пакет кода: `org.telegram.messenger`
-- Версия: 12.4.19 (6528), compileSdk 35, NDK 20.1.5948944, Gradle 8.6.1, JDK 17
+- Версия: 12.5.1 (6537), compileSdk 35, NDK 27.2.12479018, Gradle 8.6.1, JDK 17
 - Docker-сборка: `Dockerfile` в корне (базовый образ: gradle:8.7.0-jdk17)
 
 ## Сборка

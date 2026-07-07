@@ -1,5 +1,6 @@
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
+apply plugin: 'test-generator'
 
 repositories {
     mavenCentral()
@@ -136,7 +137,7 @@ android {
         minSdkVersion 26
         targetSdkVersion 35
         versionName APP_VERSION_NAME
-        ndkVersion "20.1.5948944"
+        ndkVersion "27.2.12479018"
 
         multiDexEnabled true
 

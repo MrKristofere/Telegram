@@ -15,7 +15,6 @@ import android.app.Dialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.drawable.Drawable;
@@ -41,6 +40,7 @@ import androidx.core.view.WindowInsetsCompat;
 import org.telegram.messenger.AccountInstance;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
+import org.telegram.messenger.BuildConfig;
 import org.telegram.messenger.ContactsController;
 import org.telegram.messenger.DownloadController;
 import org.telegram.messenger.FileLoader;
@@ -56,6 +56,7 @@ import org.telegram.messenger.NotificationsController;
 import org.telegram.messenger.SecretChatHelper;
 import org.telegram.messenger.SendMessagesHelper;
 import org.telegram.messenger.UserConfig;
+import org.telegram.messenger.utils.LeakDetector;
 import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.ui.ArticleViewer;
 import org.telegram.ui.Components.BulletinFactory;
@@ -202,12 +203,15 @@ public abstract class BaseFragment {
     }
 
     public BaseFragment() {
-        classGuid = ConnectionsManager.generateClassGuid();
+        this(null);
     }
 
     public BaseFragment(Bundle args) {
         arguments = args;
         classGuid = ConnectionsManager.generateClassGuid();
+        if (BuildConfig.DEBUG_PRIVATE_VERSION) {
+            LeakDetector.getInstance().add(this);
+        }
     }
 
     public void setCurrentAccount(int account) {
@@ -393,7 +397,7 @@ public abstract class BaseFragment {
         actionBar.setItemsBackgroundColor(getThemedColor(Theme.key_actionBarActionModeDefaultSelector), true);
         actionBar.setItemsColor(getThemedColor(Theme.key_actionBarDefaultIcon), false);
         actionBar.setItemsColor(getThemedColor(Theme.key_actionBarActionModeDefaultIcon), true);
-        if (inPreviewMode || inBubbleMode) {
+        if (inPreviewMode || inBubbleMode || parentLayout != null && parentLayout.isLayersLayout()) {
             actionBar.setOccupyStatusBar(false);
         }
         return actionBar;
@@ -606,6 +610,10 @@ public abstract class BaseFragment {
             }
         }
         return null;
+    }
+
+    public FrameLayout getBulletinLayoutContainer() {
+        return getLayoutContainer();
     }
 
     public boolean presentFragmentAsPreview(BaseFragment fragment) {
@@ -1339,6 +1347,23 @@ public abstract class BaseFragment {
         return storyViewer;
     }
 
+    public ArticleViewer getArticleViewer() {
+        if (getLastSheet() instanceof ArticleViewer.Sheet && getLastSheet().isShown()) {
+            return ((ArticleViewer.Sheet) getLastSheet()).getArticleViewer();
+        }
+        if (
+            parentLayout instanceof ActionBarLayout &&
+            ((ActionBarLayout) parentLayout).getSheetFragment(false) != null &&
+            ((ActionBarLayout) parentLayout).getSheetFragment(false).getLastSheet() instanceof ArticleViewer.Sheet
+        ) {
+            ArticleViewer.Sheet lastSheet = (ArticleViewer.Sheet) ((ActionBarLayout) parentLayout).getSheetFragment(false).getLastSheet();
+            if (lastSheet.isShown()) {
+                return lastSheet.getArticleViewer();
+            }
+        }
+        return null;
+    }
+
     public ArticleViewer createArticleViewer(boolean forceRecreate) {
         if (sheetsStack == null) {
             sheetsStack = new ArrayList<>();
@@ -1399,5 +1424,11 @@ public abstract class BaseFragment {
 
     public void onInsets(int left, int top, int right, int bottom) {
 
+    }
+
+
+
+    protected void dumpCanvas() {
+        AndroidUtilities.dumpCanvas(fragmentView);
     }
 }

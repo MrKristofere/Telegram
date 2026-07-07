@@ -51,6 +51,7 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.BotWebViewVibrationEffect;
 import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.CacheByChatsController;
@@ -109,7 +110,6 @@ import org.telegram.ui.Components.SlideChooseView;
 import org.telegram.ui.Components.StorageDiagramView;
 import org.telegram.ui.Components.StorageUsageView;
 import org.telegram.ui.Components.TypefaceSpan;
-import org.telegram.ui.Components.UndoView;
 import org.telegram.ui.Storage.CacheModel;
 
 import java.io.File;
@@ -929,7 +929,9 @@ public class CacheControlActivity extends BaseFragment implements NotificationCe
                     entry.delete();
 
                     p[0]++;
-                    onProgress.run(p[0] / (float) count);
+                    if (onProgress != null) {
+                        onProgress.run(p[0] / (float) count);
+                    }
                 }
             }
         }
@@ -994,6 +996,13 @@ public class CacheControlActivity extends BaseFragment implements NotificationCe
             }
             if (type == -1) {
                 continue;
+            }
+            if (a == 7) {
+                try {
+                    cleanDirJava(ApplicationLoader.getFilesDirFixed("rasterized/wallpaper").getAbsolutePath(), 0, null, null);
+                } catch (Exception e) {
+                    FileLog.e(e);
+                }
             }
             File file;
             if (a == 9) {
@@ -1414,7 +1423,7 @@ public class CacheControlActivity extends BaseFragment implements NotificationCe
             return;
         }
 
-        bottomSheet = new DilogCacheBottomSheet(CacheControlActivity.this, entities, entities.createCacheModel(), new DilogCacheBottomSheet.Delegate() {
+        bottomSheet = new DialogCacheBottomSheet(CacheControlActivity.this, entities, entities.createCacheModel(), new DialogCacheBottomSheet.Delegate() {
             @Override
             public void onAvatarClick() {
                 bottomSheet.dismiss();
@@ -2456,7 +2465,7 @@ public class CacheControlActivity extends BaseFragment implements NotificationCe
                         }
                     });
                     cachedMediaLayout.setCacheModel(cacheModel);
-                    nestedSizeNotifierLayout.setChildLayout(cachedMediaLayout);
+                    nestedSizeNotifierLayout.setChildLayout(cachedMediaLayout, dp(12 + 12 + 16));
                     view.setLayoutParams(new RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
                     break;
                 case VIEW_TYPE_CLEAR_CACHE_BUTTON:

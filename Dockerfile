@@ -5,8 +5,8 @@ ENV ANDROID_API_LEVEL android-35
 ENV ANDROID_BUILD_TOOLS_VERSION 35.0.0
 ENV ANDROID_HOME /usr/local/android-sdk-linux
 ENV ANDROID_VERSION 35
-ENV ANDROID_NDK_VERSION 20.1.5948944
-ENV ANDROID_NDK_ZIP https://dl.google.com/android/repository/android-ndk-r20b-linux-x86_64.zip
+ENV ANDROID_NDK_VERSION 27.2.12479018
+ENV ANDROID_NDK_ZIP https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
 ENV ANDROID_NDK_HOME ${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/
 ENV PATH ${PATH}:${ANDROID_HOME}/tools:${ANDROID_HOME}/platform-tools
 
@@ -27,7 +27,7 @@ RUN mkdir -p ${ANDROID_HOME}/ndk && \
     curl -L -o ndk.zip $ANDROID_NDK_ZIP && \
     unzip ndk.zip -d ${ANDROID_HOME}/ndk && \
     rm ndk.zip && \
-    mv ${ANDROID_HOME}/ndk/android-ndk-r20b ${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}
+    mv ${ANDROID_HOME}/ndk/android-ndk-r27c ${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}
 RUN cp $ANDROID_HOME/build-tools/30.0.3/dx $ANDROID_HOME/build-tools/35.0.0/dx
 RUN cp $ANDROID_HOME/build-tools/30.0.3/lib/dx.jar $ANDROID_HOME/build-tools/35.0.0/lib/dx.jar
 ENV PATH ${ANDROID_NDK_HOME}:$PATH

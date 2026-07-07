@@ -172,18 +172,23 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
             return position >= start && position <= end;
         }
     }
+    public int itemsOffset = 0;
     private final ArrayList<Section> whiteSections = new ArrayList<>();
     private final ArrayList<Section> reorderSections = new ArrayList<>();
     private Section currentWhiteSection, currentReorderSection;
     public void whiteSectionStart() {
         currentWhiteSection = new Section();
-        currentWhiteSection.start = items.size();
+        currentWhiteSection.start = itemsOffset + items.size();
         currentWhiteSection.end = -1;
         whiteSections.add(currentWhiteSection);
     }
     public void whiteSectionEnd() {
         if (currentWhiteSection != null) {
-            currentWhiteSection.end = Math.max(0, items.size() - 1);
+            currentWhiteSection.end = Math.max(0, itemsOffset + items.size() - 1);
+            if (currentWhiteSection.start == currentWhiteSection.end) {
+                whiteSections.remove(currentWhiteSection);
+            }
+            currentWhiteSection = null;
         }
     }
 
@@ -282,31 +287,29 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
     }
 
     public void update(boolean animated) {
+        if (listView != null && listView.isComputingLayout()) {
+            listView.post(() -> updateInternal(animated));
+        } else {
+            updateInternal(animated);
+        }
+    }
+
+    private void updateInternal(boolean animated) {
+        if (listView != null && listView.isComputingLayout())
+            return;
         oldItems.clear();
         oldItems.addAll(items);
         items.clear();
+        currentWhiteSection = null;
         whiteSections.clear();
         reorderSections.clear();
         if (fillItems != null) {
             fillItems.run(items, this);
             updateReorderSections();
-            if (listView != null && listView.isComputingLayout()) {
-                listView.post(() -> {
-                    if (listView.isComputingLayout()) {
-                        return;
-                    }
-                    if (animated) {
-                        setItems(oldItems, items);
-                    } else {
-                        notifyDataSetChanged();
-                    }
-                });
+            if (animated) {
+                setItems(oldItems, items);
             } else {
-                if (animated) {
-                    setItems(oldItems, items);
-                } else {
-                    notifyDataSetChanged();
-                }
+                notifyDataSetChanged();
             }
         }
     }
@@ -439,6 +442,9 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
                         super.onMeasure(MeasureSpec.makeMeasureSpec(MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.EXACTLY), heightMeasureSpec);
                     }
                 };
+                if (viewType == VIEW_TYPE_CUSTOM_SHADOW) {
+                    view.setTag(RecyclerListView.TAG_NOT_SECTION);
+                }
                 break;
             case VIEW_TYPE_FULLY_CUSTOM:
                 view = new FrameLayout(context) {
@@ -503,7 +509,7 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
                 view = new ChannelMonetizationLayout.ProceedOverviewCell(context, resourcesProvider);
                 break;
             case VIEW_TYPE_SPACE:
-                view = new View(context);
+                view = new SpaceView(context);
                 break;
             case VIEW_TYPE_BUSINESS_LINK:
                 view = new BusinessLinksActivity.BusinessLinkView(context, resourcesProvider);
@@ -616,6 +622,7 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
             case VIEW_TYPE_BLACK_HEADER:
             case VIEW_TYPE_LARGE_HEADER:
                 ((HeaderCell) holder.itemView).setText(item.text);
+                ((HeaderCell) holder.itemView).setEnabled(item.enabled, true);
                 break;
             case VIEW_TYPE_ANIMATED_HEADER:
                 HeaderCell animatedHeaderCell = (HeaderCell) holder.itemView;
@@ -643,9 +650,16 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
                         topCell.setEmoji(item.iconResId);
                     }
                 } else {
+                    if (item.intValue != 0) {
+                        topCell.setEmojiSize(item.intValue);
+                    }
                     topCell.setEmoji(item.subtext.toString(), item.textValue.toString());
                 }
-                topCell.setText(item.text);
+                if (TextUtils.isEmpty(item.animatedText)) {
+                    topCell.setText(item.text);
+                } else {
+                    topCell.setText(item.text, item.animatedText);
+                }
                 break;
             case VIEW_TYPE_TEXT:
                 TextCell cell = (TextCell) holder.itemView;
@@ -677,6 +691,7 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
                 } else {
                     cell.setColors(Theme.key_windowBackgroundWhiteGrayIcon, Theme.key_windowBackgroundWhiteBlackText);
                 }
+                cell.setEnabled(item.enabled, true);
                 break;
             case VIEW_TYPE_CHECK:
             case VIEW_TYPE_CHECKRIPPLE:
@@ -781,6 +796,8 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
             case VIEW_TYPE_CUSTOM_SHADOW:
             case VIEW_TYPE_FULLY_CUSTOM:
                 FrameLayout frameLayout = (FrameLayout) holder.itemView;
+                frameLayout.setClipChildren(!item.checked);
+                frameLayout.setClipToPadding(!item.checked);
                 if (frameLayout.getChildCount() != (item.view == null ? 0 : 1) || frameLayout.getChildAt(0) != item.view) {
                     frameLayout.removeAllViews();
                     if (item.view != null) {
@@ -818,6 +835,7 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
             case VIEW_TYPE_USER_ADD:
                 UserCell userCell2 = (UserCell) holder.itemView;
                 userCell2.setFromUItem(currentAccount, item, divider);
+                userCell2.setQuery(item.textValue == null ? null : item.textValue.toString().toLowerCase());
                 userCell2.setAddButtonVisible(!item.checked);
                 userCell2.setCloseIcon(item.clickCallback);
                 break;
@@ -892,7 +910,7 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
                     holder.itemView.setBackgroundColor(item.iconResId);
                 }
                 holder.itemView.setId(item.id);
-                holder.itemView.setLayoutParams(new RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, item.intValue));
+                ((SpaceView) holder.itemView).setHeight(item.intValue);
                 break;
             case VIEW_TYPE_BUSINESS_LINK:
                 BusinessLinksActivity.BusinessLinkView businessLinkView = (BusinessLinksActivity.BusinessLinkView) holder.itemView;
@@ -1193,6 +1211,29 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
 
         public void setMinusPadding(boolean minusPadding) {
             this.minusPadding = minusPadding;
+        }
+    }
+
+    public static class SpaceView extends View {
+
+        private int height;
+        public SpaceView(Context context) {
+            super(context);
+            setTag(RecyclerListView.TAG_NOT_SECTION);
+        }
+
+        public void setHeight(int height) {
+            if (this.height == height) return;
+            this.height = height;
+            requestLayout();
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            super.onMeasure(
+                MeasureSpec.makeMeasureSpec(MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.EXACTLY),
+                MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
+            );
         }
     }
 }

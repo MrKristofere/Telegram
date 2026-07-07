@@ -97,6 +97,7 @@ import org.telegram.tgnet.tl.TL_stars;
 import org.telegram.tgnet.tl.TL_stories;
 import org.telegram.ui.AccountFrozenAlert;
 import org.telegram.ui.ActionBar.ActionBar;
+import org.telegram.ui.ActionBar.BackDrawable;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.BottomSheet;
 import org.telegram.ui.ActionBar.SimpleTextView;
@@ -256,11 +257,6 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
     }
 
     @Override
-    public int getNavigationBarColor() {
-        return Theme.getColor(Theme.key_dialogBackgroundGray);
-    }
-
-    @Override
     public View createView(Context context) {
         useFillLastLayoutManager = false;
         particlesViewHeight = dp(32 + 190 + 16);
@@ -270,11 +266,11 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
             protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
                 int firstViewHeight;
                 if (StarsIntroActivity.this.isLandscapeMode) {
-                    firstViewHeight = StarsIntroActivity.this.statusBarHeight + actionBar.getMeasuredHeight() - AndroidUtilities.dp(16);
+                    firstViewHeight = StarsIntroActivity.this.statusBarHeight + actionBar.getMeasuredHeight() - dp(16);
                 } else {
-                    int h = AndroidUtilities.dp(140) + statusBarHeight;
-                    if (backgroundView.getMeasuredHeight() + AndroidUtilities.dp(24) > h) {
-                        h = backgroundView.getMeasuredHeight() + AndroidUtilities.dp(24);
+                    int h = dp(140) + statusBarHeight;
+                    if (backgroundView.getMeasuredHeight() + dp(24) > h) {
+                        h = backgroundView.getMeasuredHeight() + dp(24);
                     }
                     firstViewHeight = h;
                 }
@@ -282,14 +278,12 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
                 super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(firstViewHeight, MeasureSpec.EXACTLY));
             }
         };
-        emptyLayout.setBackgroundColor(Theme.getColor(Theme.key_dialogBackgroundGray));
 
         super.createView(context);
+        if (parentLayout != null && parentLayout.isRightLayout()) {
+            actionBar.setBackButtonImage(R.drawable.ic_ab_close);
+        }
 
-//        balanceView = new StarsBalanceView(context, currentAccount);
-//        actionBar.addView(balanceView, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.RIGHT | Gravity.BOTTOM));
-
-//        yOffset = dp(16);
         aboveTitleView = new FrameLayout(context);
         aboveTitleView.setClickable(true);
         iconTextureView = new GLIconTextureView(context, GLIconRenderer.DIALOG_STYLE, Icon3D.TYPE_GOLDEN_STAR);
@@ -495,7 +489,7 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
                 if (target == listView && transactionsLayout.isAttachedToWindow()) {
                     RecyclerListView innerListView = transactionsLayout.getCurrentListView();
                     int bottom = ((View) transactionsLayout.getParent()).getBottom();
-                    if (listView.getHeight() - bottom >= 0) {
+                    if (listView.getHeight() - listView.getPaddingBottom() - bottom >= 0) {
                         consumed[1] = dyUnconsumed;
                         innerListView.scrollBy(0, dyUnconsumed);
                     }
@@ -533,7 +527,7 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
                 int bottom = ((View) transactionsLayout.getParent()).getBottom();
                 if (dy < 0) {
                     boolean scrolledInner = false;
-                    if (listView.getHeight() - bottom >= 0) {
+                    if (listView.getHeight() - listView.getPaddingBottom() - bottom >= 0) {
                         RecyclerListView innerListView = transactionsLayout.getCurrentListView();
                         LinearLayoutManager linearLayoutManager = (LinearLayoutManager) innerListView.getLayoutManager();
                         int pos = linearLayoutManager.findFirstVisibleItemPosition();
@@ -567,7 +561,7 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
                         }
                     } else if (dy > 0) {
                         RecyclerListView innerListView = transactionsLayout.getCurrentListView();
-                        if (listView.getHeight() - bottom >= 0 && innerListView != null && !innerListView.canScrollVertically(1)) {
+                        if (listView.getHeight() - listView.getPaddingBottom() - bottom >= 0 && innerListView != null && !innerListView.canScrollVertically(1)) {
                             consumed[1] = dy;
                             listView.stopScroll();
                         }
@@ -601,7 +595,7 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
         if (transactionsLayout == null || !(transactionsLayout.getParent() instanceof View))
             return false;
         int bottom = ((View) transactionsLayout.getParent()).getBottom();
-        return listView.getHeight() - bottom >= 0;
+        return listView.getHeight() - listView.getPaddingBottom() - bottom >= 0;
     }
 
     @Override
@@ -737,9 +731,9 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
         }
 
         if (hadTransactions = c.hasTransactions()) {
-            items.add(UItem.asFullscreenCustom(transactionsLayout, ActionBar.getCurrentActionBarHeight() + AndroidUtilities.statusBarHeight + dp(12)));
+            items.add(UItem.asFullscreenCustom(transactionsLayout, ActionBar.getCurrentActionBarHeight() + AndroidUtilities.statusBarHeight + dp(24) + AndroidUtilities.navigationBarHeight));
         } else {
-            items.add(UItem.asCustom(emptyLayout));
+            items.add(UItem.asCustomShadow(emptyLayout));
         }
     }
 
@@ -787,6 +781,7 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
         private final int currentAccount;
         private final TextView headerTextView;
         private final AnimatedTextView amountTextView;
+        private boolean withTon;
 
         public StarsBalanceView(Context context, int currentAccount, Theme.ResourcesProvider resourcesProvider) {
             super(context);
@@ -810,9 +805,11 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
             amountTextView = new AnimatedTextView(context) {
                 @Override
                 protected void dispatchDraw(Canvas canvas) {
-                    int x = (int) (getMeasuredWidth() - getDrawable().getCurrentWidth() - dp(20));
-                    starDrawable.setBounds(x, (getMeasuredHeight() - dp(17)) / 2, x + dp(17), (getMeasuredHeight() + dp(17)) / 2);
-                    starDrawable.draw(canvas);
+                    if (!withTon) {
+                        int x = (int) (getMeasuredWidth() - getDrawable().getCurrentWidth() - dp(20));
+                        starDrawable.setBounds(x, (getMeasuredHeight() - dp(17)) / 2, x + dp(17), (getMeasuredHeight() + dp(17)) / 2);
+                        starDrawable.draw(canvas);
+                    }
                     super.dispatchDraw(canvas);
                 }
             };
@@ -828,6 +825,10 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
             updateBalance(false);
 
             setPadding(dp(15), dp(4), dp(15), dp(4));
+        }
+
+        public void withTon() {
+            this.withTon = true;
         }
 
         public void setDialogId(long dialogId) {
@@ -866,15 +867,25 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
         private SpannableString loadingString;
         public long lastBalance = -1;
 
+        private final ColoredImageSpan[] ref = new ColoredImageSpan[1];
+        private final ColoredImageSpan[] refTon = new ColoredImageSpan[1];
+
         public void updateBalance(boolean animated) {
             StarsController c = StarsController.getInstance(currentAccount);
+            StarsController tc = withTon ? StarsController.getTonInstance(currentAccount) : null;
 
+            AmountUtils.Amount tonAmount = AmountUtils.Amount.fromNano(0, AmountUtils.Currency.TON);
             amountTextView.cancelAnimation();
             boolean loading;
             long balance;
             if (dialogId == UserConfig.getInstance(currentAccount).getClientUserId()) {
                 loading = !c.balanceAvailable();
                 balance = c.getBalance().amount;
+
+                if (tc != null) {
+                    loading |= !tc.balanceAvailable();
+                    tonAmount = tc.getBalanceAmount();
+                }
             } else {
                 TLRPC.TL_payments_starsRevenueStats stats = BotStarsController.getInstance(currentAccount).getStarsRevenueStats(dialogId);
                 loading = stats == null || stats.status == null;
@@ -891,7 +902,21 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
                 amountTextView.setText(loadingString, animated);
                 lastBalance = -1;
             } else {
-                amountTextView.setText(LocaleController.formatNumber(balance, ' '));
+                if (withTon) {
+                    SpannableStringBuilder ssb = new SpannableStringBuilder();
+                    if (!tonAmount.isZero()) {
+                        ssb.append(replaceStarsWithPlain(true, "⭐️" + tonAmount.asFormatString(), 0.62f, refTon));
+                        if (refTon[0] != null) {
+                            refTon[0].setColorKey(Theme.key_telegram_color_text);
+                        }
+                        ssb.append("  ");
+                    }
+                    ssb.append(replaceStarsWithPlain("⭐️" + LocaleController.formatNumber(balance, ' '), 0.62f, ref));
+                    amountTextView.setText(ssb);
+                } else {
+                    amountTextView.setText(LocaleController.formatNumber(balance, ' '));
+                }
+
                 lastBalance = balance;
             }
         }
@@ -1625,7 +1650,16 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
                     spanString.setSpan(span, 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                     setGiftImage(span.imageReceiver, transaction.stargift, 16);
                     titleTextView.setText(username);
-                    if (transaction.stargift_resale) {
+                    if (transaction.offer) {
+                        final SpannableStringBuilder sb = new SpannableStringBuilder("x ");
+                        sb.setSpan(new AnimatedEmojiSpan(transaction.stargift.getDocument(), subtitleTextView.getPaint().getFontMetricsInt()), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                        if (!transaction.amount.negative()) {
+                            sb.append(getString(transaction.refund ? R.string.StarGiftTransactionGiftOfferRefund : R.string.StarGiftTransactionGiftSale));
+                        } else {
+                            sb.append(getString(transaction.refund ? R.string.StarGiftTransactionGiftSaleRefund : R.string.StarGiftTransactionGiftOffer));
+                        }
+                        subtitleTextView.setText(sb);
+                    } else if (transaction.stargift_resale) {
                         final SpannableStringBuilder sb = new SpannableStringBuilder("x ");
                         sb.setSpan(new AnimatedEmojiSpan(transaction.stargift.getDocument(), subtitleTextView.getPaint().getFontMetricsInt()), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                         if (!transaction.amount.negative()) {
@@ -4082,7 +4116,17 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
                 final TL_stars.TL_starsTransactionPeer peer = (TL_stars.TL_starsTransactionPeer) transaction.peer;
                 final long peerId = DialogObject.getPeerDialogId(peer.peer);
                 long from_id, to_id;
-                if (transaction.stargift_resale) {
+                if (transaction.offer) {
+                    if (!negative) {
+                        tableView.addRow(getString(R.string.StarGiftReason), getString(transaction.refund ? R.string.StarGiftReasonOfferRefund : R.string.StarGiftReasonSale));
+                        to_id = selfId;
+                        from_id = peerId;
+                    } else {
+                        tableView.addRow(getString(R.string.StarGiftReason), getString(transaction.refund ? R.string.StarGiftReasonSale : R.string.StarGiftReasonOffer));
+                        to_id = peerId;
+                        from_id = selfId;
+                    }
+                } else if (transaction.stargift_resale) {
                     if (!negative) {
                         tableView.addRow(getString(R.string.StarGiftReason), getString(transaction.refund ? R.string.StarGiftReasonPurchase : R.string.StarGiftReasonSale));
                         to_id = selfId;
@@ -5102,13 +5146,13 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
         infoView.setLinkTextColor(Theme.getColor(Theme.key_chat_messageLinkIn, resourcesProvider));
         linearLayout.addView(infoView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 14, 3, 14, 24));
 
-        ButtonWithCounterView button = new ButtonWithCounterView(context, resourcesProvider);
+        ButtonWithCounterView button = new ButtonWithCounterView(context, resourcesProvider).setRound();
         button.setText(getString(stars > 0 ? R.string.PaidContentUpdateButton : R.string.PaidContentButton), false);
         linearLayout.addView(button, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 48));
 
         final ButtonWithCounterView clearButton;
         if (stars > 0 && allowClear) {
-            clearButton = new ButtonWithCounterView(context, false, resourcesProvider);
+            clearButton = new ButtonWithCounterView(context, false, resourcesProvider).setRound();
             clearButton.setText(getString(R.string.PaidContentClearButton), false, false);
             linearLayout.addView(clearButton, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 48, 0, 4, 0, 0));
         } else {

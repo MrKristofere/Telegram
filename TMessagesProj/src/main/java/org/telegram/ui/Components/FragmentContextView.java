@@ -18,6 +18,7 @@ import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.animation.AnimatorSet;
 import android.animation.ObjectAnimator;
+import android.app.Activity;
 import android.app.Dialog;
 import android.content.Context;
 import android.content.DialogInterface;
@@ -135,7 +136,7 @@ public class FragmentContextView extends FrameLayout implements NotificationCent
     private BaseFragment fragment;
     private ChatActivityInterface chatActivity;
     private View applyingView;
-    private BlurredFrameLayout frameLayout;
+    private FrameLayout frameLayout;
     private FrameLayout groupCallMessagesContainer;
     private View shadow;
     private View selector;
@@ -307,11 +308,7 @@ public class FragmentContextView extends FrameLayout implements NotificationCent
         }
 
         final Context context = getContext();
-        SizeNotifierFrameLayout sizeNotifierFrameLayout = null;
-        if (!isInsideBubble && fragment.getFragmentView() instanceof SizeNotifierFrameLayout) {
-            sizeNotifierFrameLayout = (SizeNotifierFrameLayout) fragment.getFragmentView();
-        }
-        frameLayout = new BlurredFrameLayout(context, sizeNotifierFrameLayout) {
+        frameLayout = new FrameLayout(context) {
 
             @Override
             public void invalidate() {
@@ -392,7 +389,6 @@ public class FragmentContextView extends FrameLayout implements NotificationCent
                 return who == notifyText || super.verifyDrawable(who);
             }
         };
-        frameLayout.drawBlur = !isInsideBubble;
         notifyButtonBounce = new ButtonBounce(frameLayout);
         notifyText.setOverrideFullWidth(AndroidUtilities.displaySize.x);
         notifyText.setScaleProperty(.4f);
@@ -766,8 +762,11 @@ public class FragmentContextView extends FrameLayout implements NotificationCent
                 MessageObject messageObject = MediaController.getInstance().getPlayingMessageObject();
                 if (fragment != null && messageObject != null) {
                     if (messageObject.isMusic()) {
-                        if (getContext() instanceof LaunchActivity) {
-                            fragment.showDialog(new AudioPlayerAlert(getContext(), resourcesProvider));
+                        final Activity activity = AndroidUtilities.findActivity(getContext());
+                        if (activity instanceof LaunchActivity) {
+                            new AudioPlayerAlert(activity, resourcesProvider).show();
+                        } else if (AndroidUtilities.isContextSafe(LaunchActivity.instance)) {
+                            new AudioPlayerAlert(LaunchActivity.instance, resourcesProvider).show();
                         }
                     } else {
                         long dialogId = 0;

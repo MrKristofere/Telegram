@@ -1,0 +1,87 @@
+name: Check Android App Modules
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: List Gradle modules
+        run: |
+          echo "===== Gradle projects ====="
+          ./gradlew projects
+
+      - name: Find Android application modules
+        run: |
+          echo "===== Android application plugins ====="
+
+          grep -R "com.android.application" \
+            --include="build.gradle" \
+            --include="build.gradle.kts" \
+            .
+
+      - name: Show assemble tasks
+        run: |
+          echo "===== Assemble tasks ====="
+
+          ./gradlew tasks --all | grep -iE "assemble|bundle" || true
+
+      - name: Inspect AppStandalone tasks
+        run: |
+          echo "===== TMessagesProj_AppStandalone tasks ====="
+
+          ./gradlew :TMessagesProj_AppStandalone:tasks --all || true
+
+      - name: Inspect App tasks
+        run: |
+          echo "===== TMessagesProj_App tasks ====="
+
+          ./gradlew :TMessagesProj_App:tasks --all || true
+
+      - name: Show module dependencies
+        run: |
+          echo "===== Module dependencies ====="
+
+          ./gradlew :TMessagesProj_App:dependencies \
+            --configuration standaloneRuntimeClasspath \
+            || true
+
+      - name: Check sourceSets
+        run: |
+          echo "===== SourceSets in App modules ====="
+
+          for FILE in $(find . -name "build.gradle" -o -name "build.gradle.kts"); do
+            if grep -q "com.android.application" "$FILE"; then
+              echo
+              echo "----- $FILE -----"
+              grep -A30 -B5 "sourceSets" "$FILE" || true
+            fi
+          done
+
+      - name: Find standalone resources
+        run: |
+          echo "===== Standalone resources ====="
+
+          find . \
+            -path "*src/main/res*" \
+            -o -path "*src/standalone/res*" \
+            | grep -E "mipmap|drawable|values" || true
+
+      - name: Check launcher references
+        run: |
+          echo "===== Launcher references ====="
+
+          grep -R "launcher" \
+            --include="AndroidManifest*.xml" \
+            TMessagesProj* \
+            || true

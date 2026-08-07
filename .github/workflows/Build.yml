@@ -24,6 +24,7 @@ on:
         default: Debug
 
 env:
+  CCACHE_DIR: ~/.ccache
   CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
   CCACHE_HARDLINK: "true"
   CCACHE_NOHASHDIR: "true"
@@ -51,6 +52,16 @@ jobs:
           ref: ${{ inputs.branch }}
           submodules: recursive
 
+      - name: Configure Gradle optimizations
+        run: |
+          sed -i '/^org.gradle.caching=/d' gradle.properties
+          sed -i '/^org.gradle.configuration-cache=/d' gradle.properties
+
+          printf "\norg.gradle.caching=true\norg.gradle.configuration-cache=true\n" >> gradle.properties
+
+          echo "Gradle properties:"
+          cat gradle.properties
+          
       - name: Extract Android SDK versions
         id: sdk
         run: |
@@ -76,6 +87,8 @@ jobs:
             
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2.23
+        with:
+          key: android-ndk
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6

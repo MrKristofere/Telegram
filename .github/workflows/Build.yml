@@ -1,4 +1,4 @@
-name: Build Telegram Debug APK
+name: Build Telegram APK
 
 on:
   workflow_dispatch:
@@ -7,6 +7,13 @@ on:
         description: "Branch name"
         type: string
         default: master
+      app-type:
+        description: "App type"
+        type: choice
+        options:
+          - ""
+          - "Standalone"
+        default: ""
       release-type:
         description: "Release type"
         type: choice
@@ -39,7 +46,7 @@ jobs:
           swap-storage: true
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.branch }}
           submodules: recursive
@@ -101,10 +108,10 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew :TMessagesProj_App:assemble${{ inputs.release-type }}
+      - name: Build APK
+        run: ./gradlew :TMessagesProj_App${{ inputs.app-type }}:assembleAfat${{ inputs.release-type }}
 
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
-          path: TMessagesProj_App/build/outputs/**/*.apk
+          path: TMessagesProj_App${{ inputs.app-type }}/build/outputs/**/*.apk

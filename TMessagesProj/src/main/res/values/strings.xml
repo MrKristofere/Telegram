@@ -7450,15 +7450,16 @@
     <string name="QuoteOutdated">Outdated Quote</string>
     <string name="QuoteMaxError">Quote too long!</string>
     <string name="QuoteMaxErrorMessage">The selected text is too long to quote.</string>
-    <string name="VpnIntroHeader">VPN Toggle</string>
-    <string name="VpnIntroSubHeader">Controls VPN in vpGram.</string>
-    <string name="VpnIntroDismiss">Tap to continue</string>
-    <string name="VpnIntroTurnOffHeader">Turn Off VPN</string>
-    <string name="VpnIntroTurnOffSubHeader">Temporarily turns off VPN</string>
-    <string name="VpnIntroConflictHeader">Avoid Conflicts</string>
-    <string name="VpnIntroConflictSubHeader">If another VPN is already active</string>
-    <string name="VpnIntroAutoOnHeader">Turns On Again</string>
-    <string name="VpnIntroAutoOnSubHeader">When you reopen vpGram</string>
+    <string name="VpnIntroTitle">Manage your connection\nright on the screen</string>
+    <string name="VpnIntroTapToStart">Tap to get started</string>
+    <string name="VpnIntroStatusHeader">Connection status</string>
+    <string name="VpnIntroStatusSubHeader">Always visible in the app bar</string>
+    <string name="VpnIntroTunnelHeader">Tunnel control</string>
+    <string name="VpnIntroTunnelSubHeader">Turn it off whenever you need</string>
+    <string name="VpnIntroMultiHeader">Multiple protocols</string>
+    <string name="VpnIntroMultiSubHeader">Two to choose from or auto mode</string>
+    <string name="VpnIntroAutoHeader">Auto-connect</string>
+    <string name="VpnIntroAutoSubHeader">When vpGram launches</string>
 
     <string name="StoriesIntroHeader">Watching Stories</string>
     <string name="StoriesIntroSubHeader">You can use these gestures\nto control playback.</string>
@@ -10689,6 +10690,20 @@
     <string name="VpnConnectionNotificationDisconnectAction">Disconnect</string>
     <string name="VpnConnectionNotificationContentWithTraffic">Received: %1$s\nTransmitted: %2$s</string>
     <string name="VpnHint">Tap here to toggle VPN connection</string>
+
+    <!--Connection settings-->
+    <string name="ConnectionModeUseTunnel">Use tunnel</string>
+    <string name="ConnectionModeHeader">Connection protocol</string>
+    <string name="ConnectionModeAwg">AWG</string>
+    <string name="ConnectionModeAwgSubtitle">Only without other VPNs</string>
+    <string name="ConnectionModeVpRay">vpRay</string>
+    <string name="ConnectionModeVpRaySubtitle">Your VPN may interfere</string>
+    <string name="ConnectionModeAuto">Automatic</string>
+    <string name="ConnectionModeAutoSubtitle">Your VPN may interfere</string>
+    <string name="ConnectionModeSettingsHeader">Settings</string>
+    <string name="ConnectionModeSettingsCaption">for AWG and Auto</string>
+    <string name="ConnectionModeToggleOnClose">Toggle on close</string>
+    <string name="ConnectionModeToggleOnMinimize">Toggle on minimize</string>
     <string name="CopyDeviceInfo">Support data</string>
     <string name="CopyDeviceInfoDone">Support data copied</string>
     <string name="VpGramPublicChannelTitle">Join our Telegram channel</string>

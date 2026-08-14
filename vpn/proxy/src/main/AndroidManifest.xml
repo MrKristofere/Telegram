@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!-- Isolated process for xray-core: libXray's Go runtime conflicts with
+             the AmneziaWG GoBackend runtime when both live in one process. -->
+        <service
+            android:name="vpn.proxy.XrayProxyService"
+            android:process=":xray"
+            android:exported="false" />
+    </application>
+
+</manifest>

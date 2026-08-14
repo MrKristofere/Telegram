@@ -26,11 +26,13 @@ public class VpnConnectionHelper {
     private static final String TAG = "VpnConnectionHelper";
     public static final int REQUEST_CODE_VPN_PERMISSION = 100;
     public static final int REQUEST_CODE_VPN_NOTIFICATION = 101;
+    public static volatile boolean vpnConsentInFlight;
 
     private final BaseFragment fragment;
     private boolean pendingVpnPermission;
     private boolean waitingForActivityResult;
     private Runnable pendingAction;
+    private Runnable pendingFailure;
     private VpnSDK.StateListener tunnelUpListener;
 
     public interface VpnProgressCallback {
@@ -48,6 +50,17 @@ public class VpnConnectionHelper {
     }
 
     public void startVpnAndThen(Runnable onConnected) {
+        startVpnAndThen(onConnected, null);
+    }
+
+    /**
+     * Как {@link #startVpnAndThen(Runnable)}, но с колбэком неудачи:
+     * {@code onFailed} вызывается, если туннель так и не поднялся — отказ в
+     * VPN-разрешении или уведомлениях, ограниченное устройство, обрыв во
+     * время подключения или таймаут. При уничтожении фрагмента
+     * ({@link #release()}) не вызывается.
+     */
+    public void startVpnAndThen(Runnable onConnected, Runnable onFailed) {
         VpnTunnelState currentState = VpnSDK.getTunnelState();
 
         if (currentState == VpnTunnelState.UP) {
@@ -58,6 +71,7 @@ public class VpnConnectionHelper {
         }
 
         this.pendingAction = onConnected;
+        this.pendingFailure = onFailed;
 
         if (currentState == VpnTunnelState.CONNECTING) {
             showProgress(true);
@@ -74,10 +88,12 @@ public class VpnConnectionHelper {
             return;
         }
         if (currentState == VpnTunnelState.UP) {
+            VpnStatusController.markDeliberateDisconnect();
             VpnSDK.toggleConnection();
             return;
         }
         this.pendingAction = null;
+        this.pendingFailure = null;
         requestVpnPermission();
     }
 
@@ -92,6 +108,7 @@ public class VpnConnectionHelper {
             } else {
                 pendingVpnPermission = true;
                 waitingForActivityResult = true;
+                vpnConsentInFlight = true;
                 activity.startActivityForResult(vpnIntent, REQUEST_CODE_VPN_PERMISSION);
             }
         } catch (Exception e) {
@@ -124,8 +141,22 @@ public class VpnConnectionHelper {
         if (activity != null) {
             VpnConnectionService.start(activity);
         }
-        VpnSDK.toggleConnection();
-
+        VpnTunnelState state = VpnSDK.getTunnelState();
+        if (state == VpnTunnelState.UP) {
+            // Туннель уже поднят (например, фоновым автоподъёмом) — не гасим его
+            // повторным toggleConnection(), а сразу выполняем действие.
+            Runnable action = pendingAction;
+            pendingAction = null;
+            pendingFailure = null;
+            showProgress(false);
+            if (action != null) {
+                action.run();
+            }
+            return;
+        }
+        if (state == VpnTunnelState.DOWN) {
+            VpnSDK.toggleConnection();
+        }
         if (pendingAction != null) {
             showProgress(true);
             listenForTunnelUp();
@@ -146,15 +177,13 @@ public class VpnConnectionHelper {
                 removeTunnelUpListener();
                 Runnable action = pendingAction;
                 pendingAction = null;
+                pendingFailure = null;
                 if (action != null) {
                     action.run();
                 }
             } else if (state == VpnTunnelState.DOWN) {
                 Log.d(TAG, "Tunnel went DOWN while waiting");
-                cancelTunnelUpTimeout();
-                showProgress(false);
-                removeTunnelUpListener();
-                pendingAction = null;
+                clearPendingAction();
             }
         };
         VpnSDK.addStateListener(tunnelUpListener);
@@ -162,9 +191,8 @@ public class VpnConnectionHelper {
         // Таймаут на случай если VPN застрянет в CONNECTING
         tunnelUpTimeoutRunnable = () -> {
             Log.w(TAG, "Tunnel UP timeout reached");
-            showProgress(false);
-            removeTunnelUpListener();
-            pendingAction = null;
+            tunnelUpTimeoutRunnable = null;
+            clearPendingAction();
         };
         AndroidUtilities.runOnUIThread(tunnelUpTimeoutRunnable, TUNNEL_UP_TIMEOUT_MS);
     }
@@ -187,10 +215,14 @@ public class VpnConnectionHelper {
         if (requestCode != REQUEST_CODE_VPN_PERMISSION) {
             return false;
         }
+        if (!pendingVpnPermission) {
+            return true;
+        }
 
         // Результат получен через onActivityResult — handleResume уже не нужен
         pendingVpnPermission = false;
         waitingForActivityResult = false;
+        vpnConsentInFlight = false;
 
         Activity activity = fragment.getParentActivity();
         if (activity == null) return true;
@@ -220,6 +252,7 @@ public class VpnConnectionHelper {
         }
 
         pendingVpnPermission = false;
+        vpnConsentInFlight = false;
 
         Activity activity = fragment.getParentActivity();
         if (activity == null) return;
@@ -278,8 +311,10 @@ public class VpnConnectionHelper {
         cancelTunnelUpTimeout();
         removeTunnelUpListener();
         pendingAction = null;
+        pendingFailure = null;
         pendingVpnPermission = false;
         waitingForActivityResult = false;
+        vpnConsentInFlight = false;
         progressCallback = null;
     }
 
@@ -290,9 +325,18 @@ public class VpnConnectionHelper {
     }
 
     private void clearPendingAction() {
+        // Любой неуспешный путь (отказ, таймаут, ограниченное устройство из catch
+        // requestVpnPermission, обрыв) — снимаем общий флаг, иначе автоподъём AWG
+        // залипнет навсегда.
+        vpnConsentInFlight = false;
         showProgress(false);
         cancelTunnelUpTimeout();
         removeTunnelUpListener();
         pendingAction = null;
+        Runnable failure = pendingFailure;
+        pendingFailure = null;
+        if (failure != null) {
+            failure.run();
+        }
     }
 }

@@ -534,7 +534,7 @@ public class ActionBar extends FrameLayout implements FactorAnimator.Target, The
     }
 
     public void setTitle(CharSequence value, Drawable rightDrawable) {
-        setTitle(value, null, null);
+        setTitle(value, rightDrawable, lastVpnDrawable);
     }
 
     public void setTitle(CharSequence value, Drawable rightDrawable, Drawable vpnDrawable) {

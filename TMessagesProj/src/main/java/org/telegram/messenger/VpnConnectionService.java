@@ -110,6 +110,7 @@ public class VpnConnectionService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP_VPN.equals(intent.getAction())) {
+            VpnStatusController.markDeliberateDisconnect();
             VpnSDK.toggleConnection();
             stopSelf();
             return START_NOT_STICKY;
@@ -133,10 +134,17 @@ public class VpnConnectionService extends Service {
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        Log.d(TAG, "App swiped away, disconnecting VPN");
-        disconnectedBySwipe = true;
-        VpnSDK.toggleConnection();
-        stopSelf();
+        if (VpnConnectionMode.isToggleOnClose()) {
+            Log.d(TAG, "App swiped away, disconnecting VPN");
+            disconnectedBySwipe = true;
+            if (VpnSDK.getTunnelState() != VpnTunnelState.DOWN) {
+                VpnStatusController.markDeliberateDisconnect();
+                VpnSDK.toggleConnection();
+            }
+            stopSelf();
+        } else {
+            Log.d(TAG, "App swiped away, keeping VPN (toggle-on-close off)");
+        }
         super.onTaskRemoved(rootIntent);
     }
 

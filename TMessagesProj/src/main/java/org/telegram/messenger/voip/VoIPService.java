@@ -3451,10 +3451,18 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 
 			// proxy
 			Instance.Proxy proxy = null;
-			// Ensure xray proxy is running — VoIPService may be started via push without ApplicationLoader hitting startProxy()
+			// Ensure xray proxy is running — VoIPService may be started via push
+			// before the proxy came up. startProxy() is synchronous over a live
+			// binder to the :xray process (the usual case — the binding is held
+			// since app start); if the binding isn't up yet it returns false and
+			// this call falls back below, while startProxyAsync warms xray up
+			// for the next attempt.
 			if (!vpn.sdk.VpnSDK.isProxyRunning()) {
 				boolean started = vpn.sdk.VpnSDK.startProxy();
 				FileLog.d("VoIP: xray proxy start attempt — " + (started ? "ok" : "failed: " + vpn.sdk.VpnSDK.getProxyLastError()));
+				if (!started) {
+					vpn.sdk.VpnSDK.startProxyAsync(null);
+				}
 			}
 			if (vpn.sdk.VpnSDK.isProxyRunning()) {
 				// Route calls through local xray SOCKS5 proxy (VLESS+XTLS-Vision)

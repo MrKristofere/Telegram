@@ -130,6 +130,7 @@ import org.telegram.messenger.TrackedChannelBannerController;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.UserObject;
 import org.telegram.messenger.Utilities;
+import org.telegram.messenger.VpnStatusController;
 import org.telegram.messenger.VpGramRemoteConfig;
 import org.telegram.messenger.XiaomiUtilities;
 import org.telegram.messenger.browser.Browser;
@@ -220,6 +221,7 @@ import org.telegram.ui.bots.BotWebViewSheet;
 import org.telegram.ui.Components.Bulletin;
 import org.telegram.ui.Components.BulletinFactory;
 import org.telegram.ui.Components.ChatActivityEnterView;
+import org.telegram.ui.Components.ConnectionModeBottomSheet;
 import org.telegram.ui.Components.ChatAvatarContainer;
 import org.telegram.ui.Components.CombinedDrawable;
 import org.telegram.ui.Components.CubicBezierInterpolator;
@@ -258,6 +260,7 @@ import org.telegram.ui.Components.SizeNotifierFrameLayout;
 import org.telegram.ui.Components.StickersAlert;
 import org.telegram.ui.Components.SwipeGestureSettingsView;
 import org.telegram.ui.Components.UndoView;
+import org.telegram.ui.Components.VpnStatusDrawable;
 import org.telegram.ui.Components.ViewPagerFixed;
 import org.telegram.ui.Stories.DialogStoriesCell;
 import org.telegram.ui.Stories.StoriesController;
@@ -348,6 +351,19 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     private boolean storiesOverscrollCalled;
     private boolean wasDrawn;
     public boolean hasMainTabs;
+
+    private VpnStatusDrawable vpnStatusDrawable;
+    private ConnectionModeBottomSheet connectionModeSheet;
+    private final VpnStatusController.Listener vpnStatusListener = status -> {
+        if (vpnStatusDrawable != null) {
+            vpnStatusDrawable.setStatus(status);
+        }
+    };
+    private static final String VPN_INTRO_SHOWN_KEY = "vpn_modes_intro_shown";
+    private static final long VPN_INTRO_DELAY_MS = 500;
+    private final Runnable vpnIntroRunnable = () -> tryShowVpnIntro(0);
+    private VpnIntroOverlay vpnIntroOverlay;
+    private boolean vpnIntroShowing;
 
     public MessagesStorage.TopicKey getOpenedDialogId() {
         return openedDialogId;
@@ -3015,6 +3031,15 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     @Override
     public void onFragmentDestroy() {
         super.onFragmentDestroy();
+        VpnStatusController.removeListener(vpnStatusListener);
+        vpnStatusDrawable = null;
+        connectionModeSheet = null;
+        AndroidUtilities.cancelRunOnUIThread(vpnIntroRunnable);
+        if (vpnIntroOverlay != null && vpnIntroOverlay.getParent() instanceof ViewGroup) {
+            ((ViewGroup) vpnIntroOverlay.getParent()).removeView(vpnIntroOverlay);
+        }
+        vpnIntroOverlay = null;
+        vpnIntroShowing = false;
         if (observersGroup != null) {
             observersGroup.removeAllObservers();
             observersGroup = null;
@@ -3044,7 +3069,9 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
 
     @Override
     public boolean dismissDialogOnPause(Dialog dialog) {
-        return !(dialog instanceof BotWebViewSheet) && super.dismissDialogOnPause(dialog);
+        // ConnectionModeBottomSheet должен пережить системный диалог VPN-разрешения
+        // (startActivityForResult ставит фрагмент на паузу).
+        return !(dialog instanceof BotWebViewSheet) && !(dialog instanceof ConnectionModeBottomSheet) && super.dismissDialogOnPause(dialog);
     }
 
     @Override
@@ -3268,6 +3295,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 if (switchItem != null) {
                     switchItem.setVisibility(View.GONE);
                 }
+                actionBar.setVpnIconVisibility(false);
                 createSearchViewPager();
                 if (viewPages[0] != null) {
                     if (searchString != null) {
@@ -3339,6 +3367,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 updateFloatingButtonVisibility(true);
                 checkUi_mainTabsVisible();
                 blur3_InvalidateBlur();
+                actionBar.setVpnIconVisibility(true);
             }
 
             @Override
@@ -3457,7 +3486,11 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
                 SpannableStringBuilder ssb = new SpannableStringBuilder(getString(R.string.AppName));
                 ssb.setSpan(new ImageSpan(logoDrawable), 0, ssb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
 
-                actionBar.setTitle(ssb, statusDrawable);
+                vpnStatusDrawable = new VpnStatusDrawable(context, getResourceProvider());
+                vpnStatusDrawable.setStatus(VpnStatusController.getStatus());
+                actionBar.setTitle(ssb, statusDrawable, vpnStatusDrawable);
+                actionBar.setVpnDrawableOnClick(v -> showConnectionModeSheet());
+                VpnStatusController.addListener(vpnStatusListener);
                 updateStatus(UserConfig.getInstance(currentAccount).getCurrentUser(), false);
             }
             if (folderId == 0) {
@@ -6939,6 +6972,11 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         super.onResume();
         wasPausedInBackground = false;
         checkTrackedChannelBanner(true);
+        if (connectionModeSheet != null && connectionModeSheet.isShowing()) {
+            // Возврат из системного диалога VPN-разрешения.
+            connectionModeSheet.onResume();
+        }
+        showVpnIntroIfNeeded();
 
         if (dialogStoriesCell != null) {
             dialogStoriesCell.onResume();
@@ -7186,6 +7224,12 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
 
     @Override
     public boolean onBackPressed(boolean invoked) {
+        if (vpnIntroOverlay != null && vpnIntroOverlay.getParent() != null) {
+            if (invoked) {
+                dismissVpnIntro();
+            }
+            return false;
+        }
         if (hasShownSheet()) {
             if (invoked) closeSheet();
             return false;
@@ -7276,6 +7320,7 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
     @Override
     public void onBecomeFullyVisible() {
         super.onBecomeFullyVisible();
+        showVpnIntroIfNeeded();
         if (isArchive()) {
             SharedPreferences preferences = MessagesController.getGlobalMainSettings();
             boolean showArchiveHint = preferences.getBoolean("archivehint", true);
@@ -10235,12 +10280,87 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         }
     }
 
+    private void showConnectionModeSheet() {
+        if (getParentActivity() == null || connectionModeSheet != null && connectionModeSheet.isShowing()) {
+            return;
+        }
+        connectionModeSheet = new ConnectionModeBottomSheet(this);
+        showDialog(connectionModeSheet, dialog -> connectionModeSheet = null);
+    }
+
+    private void showVpnIntroIfNeeded() {
+        if (onlySelect || vpnIntroShowing || folderId != 0) {
+            return;
+        }
+        if (vpnIntroOverlay != null && vpnIntroOverlay.getParent() != null) {
+            return;
+        }
+        if (MessagesController.getGlobalMainSettings().getBoolean(VPN_INTRO_SHOWN_KEY, false)) {
+            return;
+        }
+        vpnIntroShowing = true;
+        AndroidUtilities.cancelRunOnUIThread(vpnIntroRunnable);
+        AndroidUtilities.runOnUIThread(vpnIntroRunnable, VPN_INTRO_DELAY_MS);
+    }
+
+    private void tryShowVpnIntro(int attempt) {
+        if (!vpnIntroShowing || vpnIntroOverlay != null) {
+            return;
+        }
+        View view = fragmentView;
+        if (getParentActivity() != null && view != null && view.getWidth() > 0) {
+            showVpnIntroOverlay(view);
+            return;
+        }
+        if (attempt < 20) {
+            AndroidUtilities.runOnUIThread(() -> tryShowVpnIntro(attempt + 1), 250);
+        } else {
+            vpnIntroShowing = false;
+        }
+    }
+
+    private void showVpnIntroOverlay(View parent) {
+        ViewGroup rootView = (ViewGroup) parent.getRootView().findViewById(android.R.id.content);
+        if (rootView == null && parent.getParent() instanceof ViewGroup) {
+            rootView = (ViewGroup) parent.getParent();
+        }
+        if (rootView == null) {
+            vpnIntroShowing = false;
+            return;
+        }
+        VpnIntroOverlay overlay = new VpnIntroOverlay(getParentActivity(), parent);
+        vpnIntroOverlay = overlay;
+        overlay.setAlpha(0f);
+        rootView.addView(overlay, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        overlay.animate().alpha(1f).setDuration(200).start();
+        // Отмечаем показ сразу, а не по тапу: иначе онбординг вернётся,
+        // если приложение закрыли, не дочитав его.
+        MessagesController.getGlobalMainSettings().edit()
+                .putBoolean(VPN_INTRO_SHOWN_KEY, true).apply();
+        overlay.setOnClickListener(v -> dismissVpnIntro());
+    }
+
+    private void dismissVpnIntro() {
+        vpnIntroShowing = false;
+        VpnIntroOverlay overlay = vpnIntroOverlay;
+        vpnIntroOverlay = null;
+        if (overlay != null) {
+            overlay.dismiss();
+        }
+    }
+
     @Override
     public void onActivityResultFragment(int requestCode, int resultCode, Intent data) {
+        if (connectionModeSheet != null && connectionModeSheet.onActivityResult(requestCode, resultCode)) {
+            return;
+        }
     }
 
     @Override
     public void onRequestPermissionsResultFragment(int requestCode, String[] permissions, int[] grantResults) {
+        if (connectionModeSheet != null) {
+            connectionModeSheet.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        }
         if (requestCode == 1) {
             for (int a = 0; a < permissions.length; a++) {
                 if (grantResults.length <= a) {

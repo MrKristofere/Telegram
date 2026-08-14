@@ -298,6 +298,29 @@ public class ApplicationLoader extends Application {
         super();
     }
 
+    private static boolean isXrayProcess() {
+        String processName = null;
+        if (Build.VERSION.SDK_INT >= 28) {
+            processName = Application.getProcessName();
+        } else {
+            try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                    new java.io.FileReader("/proc/self/cmdline"))) {
+                StringBuilder sb = new StringBuilder();
+                int c;
+                while ((c = reader.read()) > 0) {
+                    sb.append((char) c);
+                }
+                processName = sb.toString();
+            } catch (Exception e) {
+                // FileLog is off-limits here: it would initialize file logging
+                // in the :xray process. Failing open means the full Telegram
+                // stack (and a second Go runtime) comes up in :xray — log loudly.
+                android.util.Log.e("ApplicationLoader", "failed to read process name from /proc/self/cmdline", e);
+            }
+        }
+        return processName != null && processName.endsWith(":xray");
+    }
+
     @Override
     public void onCreate() {
         applicationLoaderInstance = this;
@@ -308,6 +331,15 @@ public class ApplicationLoader extends Application {
         }
 
         super.onCreate();
+
+        // Application.onCreate() runs in EVERY process of the app. The ":xray"
+        // process exists solely to host libXray (see vpn.proxy.XrayProxyService)
+        // and must stay lightweight: no native Telegram libs, no accounts, no
+        // push, no VpnSDK — and crucially no AmneziaWG Go runtime next to
+        // libXray's, which is the exact conflict the process split avoids.
+        if (isXrayProcess()) {
+            return;
+        }
 
         if (BuildVars.LOGS_ENABLED) {
             FileLog.d("app start time = " + (startTime = SystemClock.elapsedRealtime()));
@@ -356,6 +388,16 @@ public class ApplicationLoader extends Application {
                     refreshXrayConfigIfActivated();
                     VpGramRemoteConfig.fetch();
                     TrackedChannelBannerController.onAppForeground();
+                    onForegroundResolveAwg();
+                    VpnStatusController.refresh();
+                }
+            }
+
+            @Override
+            public void onActivityStopped(Activity activity) {
+                super.onActivityStopped(activity);
+                if (isBackground()) {
+                    disconnectTunnelOnMinimizeIfNeeded();
                 }
             }
         };
@@ -368,39 +410,46 @@ public class ApplicationLoader extends Application {
         // Initialize VPN SDK and fetch remote config
         VpnSDK.setup(applicationContext);
         VpnSDK.updateConfig();
+        VpnStatusController.init();
 
         // Fetch vpGram Firebase Remote Config (tracked channel banner id/url)
         VpGramRemoteConfig.fetch();
 
-        // Bring xray up from cache (returning users) before ConnectionsManager.init()
-        // reads mainconfig. On cache miss — first install or after the cached config
-        // was invalidated — leave the proxy off and trigger a background register;
-        // its callback hot-reloads ConnectionsManager once a fresh config arrives.
-        boolean xrayStarted = VpnSDK.startProxy();
-        if (xrayStarted) {
-            persistXrayProxyToMainConfig(true);
-            FileLog.d("xray proxy started from cache on " + VpnSDK.getProxySocksHost() + ":" + VpnSDK.getProxySocksPort());
-        } else {
-            // Make sure stale proxy_enabled=true from a previous launch doesn't
-            // direct MTProto at a non-listening 127.0.0.1 port now that we have
-            // no cache.
-            persistXrayProxyToMainConfig(false);
-            FileLog.d("no cached xray config; registering in background");
-            VpnSDK.registerOrAuth(3, success -> {
-                if (success) {
-                    applyXrayProxyToConnectionsManager();
-                    FileLog.d("xray initial register succeeded; ConnectionsManager updated");
+        // Xray exists only for authenticated users: login traffic must go
+        // through the AWG tunnel (Telegram doesn't deliver the auth code to
+        // sessions from VLESS exit IPs), so before the first successful auth
+        // the proxy is never started and no /auth/register is issued —
+        // switchToPostAuthConnectionMode() does both once login completes.
+        //
+        // UserConfig.getActivatedAccountsCount() is unusable here: loadConfig()
+        // runs later, in postInitApplication(), so the in-memory check always
+        // sees zero accounts during Application.onCreate(). Read the userconfig
+        // prefs directly instead.
+        if (hasAuthorizedAccountOnDisk()) {
+            if (VpnConnectionMode.getEffective() == VpnConnectionMode.AWG) {
+                if (runAwgMode()) {
+                    persistXrayProxyToMainConfig(false);
+                    FileLog.d("cold start: AWG mode, resolving by cold-start toggle");
+                    bringUpAwgIfWanted(VpnConnectionMode.isToggleOnClose());
                 } else {
-                    FileLog.e("xray initial register failed: " + VpnSDK.getProxyLastError()
-                            + " — will retry on user 'Continue' tap");
+                    if (VpnConnectionMode.isToggleOnClose()) {
+                        pendingAwgReclaim = true;
+                    }
+                    startXrayCarrierOnColdStart();
                 }
-            });
-        }
+            } else if (!VpnConnectionMode.isEnabled()) {
+                persistXrayProxyToMainConfig(false);
+                FileLog.d("vpn master switch off; nothing is brought up");
+            } else {
+                startXrayCarrierOnColdStart();
+            }
 
-        // Refresh xray config in background for already-authenticated users.
-        // First-install users get their config when they tap "Continue" on the
-        // phone-number screen (see LoginActivity).
-        refreshXrayConfigIfActivated();
+            // Refresh xray config in background for already-authenticated users.
+            refreshXrayConfigIfActivated();
+        } else {
+            persistXrayProxyToMainConfig(false);
+            FileLog.d("no authorized accounts; xray stays down until login completes");
+        }
 
 
         AndroidUtilities.runOnUIThread(ApplicationLoader::startPushService);
@@ -412,6 +461,22 @@ public class ApplicationLoader extends Application {
     /** Refresh no more often than once per 5 minutes per process. */
     private static final long XRAY_REFRESH_MIN_INTERVAL_MS = 5L * 60L * 1000L;
     private static volatile long lastXrayRefreshAtMs = 0L;
+
+    /**
+     * True while the login flow routes MTProto directly through the AWG tunnel
+     * (xray off). Set by {@link #disableXrayProxyForLogin()}, cleared by
+     * {@link #switchToPostAuthConnectionMode()}. While set, background xray
+     * refreshes must not re-enable the proxy or touch the tunnel.
+     */
+    private static volatile boolean loginInProgress;
+
+    /**
+     * True when the post-auth switch to xray failed and the AWG tunnel was
+     * deliberately left up. Lets the next successful xray refresh finish the
+     * deferred switch (tunnel down) without disconnecting a tunnel the user
+     * brought up manually.
+     */
+    private static volatile boolean pendingPostAuthTunnelDown;
 
     /**
      * Pushes the current xray SOCKS5 address into the native ConnectionsManager
@@ -427,6 +492,402 @@ public class ApplicationLoader extends Application {
                 VpnSDK.getProxySocksPort(),
                 "", "", ""
         );
+        VpnStatusController.setStatus(VpnStatusController.Status.CONNECTED);
+    }
+
+    /**
+     * Turns the xray SOCKS5 proxy off for the login flow: the auth code is
+     * not delivered to sessions coming from VLESS exit IPs, so MTProto has to
+     * go directly through the AWG tunnel while the user signs in.
+     * {@link #switchToPostAuthConnectionMode()} re-enables it after auth.
+     */
+    public static void disableXrayProxyForLogin() {
+        loginInProgress = true;
+        persistXrayProxyToMainConfig(false);
+        ConnectionsManager.setProxySettings(false, "", 0, "", "", "");
+    }
+
+    /**
+     * Applies the post-auth connection mode after a successful login. For now
+     * the default (and only) mode is xray: route MTProto/VoIP through the
+     * local SOCKS5 proxy and bring the AWG tunnel down. When the AWG / vpRay /
+     * Auto mode setting lands ("Настройки соединения"), this is the single
+     * place that should consult it.
+     *
+     * On a first login there is no cached xray config yet — /auth/register is
+     * issued right here, through the still-up AWG tunnel, so the backend is
+     * reachable even when it's blocked on the direct network. Until (and
+     * unless) xray comes up, the fresh account keeps working through AWG.
+     */
+    public static void switchToPostAuthConnectionMode() {
+        loginInProgress = false;
+        applyEffectiveConnectionMode();
+    }
+
+    /**
+     * Applies {@link VpnConnectionMode#getEffective()} at runtime. Called
+     * after a successful login and when the user changes the mode in
+     * connection settings. For AWG the VPN permission must already be granted
+     * (the settings screen requests it via VpnConnectionHelper and calls this
+     * only once the tunnel is up; after login it's granted since the tunnel
+     * is up) — otherwise {@link #runAwgMode()} falls back to the xray path.
+     * <p>
+     * ИНВАРИАНТ (Option A): {@link VpnConnectionMode#isEnabled()} здесь означает
+     * ТЕКУЩЕЕ вкл/выкл-намерение пользователя — вызывающий обязан выставить его
+     * перед вызовом: смена режима/включение → {@code setEnabled(true)}, ручное
+     * выключение/откат → {@code setEnabled(false)}. Автоподъём по lifecycle-
+     * тумблерам ({@link #bringUpAwgIfWanted}) сюда НЕ ходит и на isEnabled не
+     * смотрит. Не вызывайте этот метод, полагаясь на «старое» значение isEnabled.
+     */
+    public static void applyEffectiveConnectionMode() {
+        if (loginInProgress) {
+            // The login flow owns the connection state right now.
+            FileLog.d("apply mode skipped: login in progress");
+            return;
+        }
+        removeAwgActivateWatcher();
+        if (!VpnConnectionMode.isEnabled()) {
+            pendingPostAuthTunnelDown = false;
+            persistXrayProxyToMainConfig(false);
+            ConnectionsManager.setProxySettings(false, "", 0, "", "", "");
+            VpnSDK.stopProxy();
+            if (VpnSDK.getTunnelState() != VpnTunnelState.DOWN) {
+                VpnStatusController.markDeliberateDisconnect();
+                disconnectTunnelIfUp();
+            }
+            VpnStatusController.setStatus(VpnStatusController.Status.OFF);
+            FileLog.d("vpn master switch off: xray stopped, tunnel down");
+            return;
+        }
+        if (runAwgMode()) {
+            // AWG: tunnel carries everything, xray off. After login the
+            // tunnel is already up; after a settings change it may be down.
+            pendingPostAuthTunnelDown = false;
+            persistXrayProxyToMainConfig(false);
+            ConnectionsManager.setProxySettings(false, "", 0, "", "", "");
+            connectTunnelIfPermitted();
+            VpnStatusController.refresh();
+            FileLog.d("connection mode AWG applied: xray off, tunnel up");
+            return;
+        }
+        VpnStatusController.setStatus(VpnStatusController.Status.CONNECTING);
+        VpnSDK.startProxyAsync(started -> {
+            if (loginInProgress) {
+                // A new login began while xray was coming up — leave the auth
+                // traffic on the AWG tunnel; the next switch call will apply.
+                FileLog.d("post-auth: login restarted during xray start; deferring");
+                return;
+            }
+            if (!VpnConnectionMode.isEnabled()) {
+                FileLog.d("vpRay apply cancelled: master switch off");
+                return;
+            }
+            if (runAwgMode()) {
+                // The user switched to AWG while xray was coming up.
+                FileLog.d("vpRay apply cancelled: mode changed to AWG");
+                return;
+            }
+            if (started) { // already running or started from cache
+                pendingPostAuthTunnelDown = false;
+                applyXrayProxyToConnectionsManager();
+                disconnectTunnelIfUp();
+                FileLog.d("post-auth: switched to xray, AWG tunnel down");
+                return;
+            }
+            FileLog.d("post-auth: xray didn't start from cache (no config, start failed or :xray unreachable: "
+                    + VpnSDK.getProxyLastError() + "); registering through AWG tunnel");
+            VpnSDK.registerOrAuth(3, success -> {
+                if (loginInProgress) {
+                    FileLog.d("post-auth: login restarted during register; deferring");
+                    return;
+                }
+                if (!VpnConnectionMode.isEnabled()) {
+                    FileLog.d("vpRay apply cancelled: master switch off");
+                    return;
+                }
+                if (runAwgMode()) {
+                    FileLog.d("vpRay apply cancelled: mode changed to AWG");
+                    return;
+                }
+                if (success) {
+                    pendingPostAuthTunnelDown = false;
+                    applyXrayProxyToConnectionsManager();
+                    disconnectTunnelIfUp();
+                    FileLog.d("post-auth: xray registered and applied, AWG tunnel down");
+                } else {
+                    // Keep the AWG tunnel up so the fresh account isn't left on a
+                    // direct (possibly blocked) connection. The next foreground
+                    // refresh / cold start will retry xray and finish the switch.
+                    pendingPostAuthTunnelDown = true;
+                    VpnStatusController.setStatus(VpnSDK.getTunnelState() == VpnTunnelState.UP
+                            ? VpnStatusController.Status.CONNECTED
+                            : VpnStatusController.Status.ERROR);
+                    FileLog.e("post-auth: xray register failed (" + VpnSDK.getProxyLastError()
+                            + "); keeping AWG tunnel up");
+                }
+            });
+        });
+    }
+
+    /**
+     * Background /auth/register for an authenticated user with no usable
+     * cached config. On success applies the fresh proxy unless an add-account
+     * login started while the register was in flight — putting xray back
+     * under auth traffic would route the code request to a VLESS exit IP.
+     */
+    private static void registerXrayInBackground() {
+        VpnSDK.registerOrAuth(3, success -> {
+            if (success) {
+                if (loginInProgress) {
+                    FileLog.d("xray initial register succeeded during login; deferring apply");
+                    return;
+                }
+                if (!VpnConnectionMode.isEnabled()) {
+                    FileLog.d("xray initial register: config cached, apply skipped (master switch off)");
+                    return;
+                }
+                if (runAwgMode()) {
+                    FileLog.d("xray initial register: config cached, apply skipped (mode AWG)");
+                    return;
+                }
+                applyXrayProxyToConnectionsManager();
+                FileLog.d("xray initial register succeeded; ConnectionsManager updated");
+            } else {
+                if (!loginInProgress && !runAwgMode() && VpnConnectionMode.isEnabled()) {
+                    VpnStatusController.setStatus(VpnStatusController.Status.ERROR);
+                }
+                FileLog.e("xray initial register failed: " + VpnSDK.getProxyLastError()
+                        + " — will retry on next foreground transition");
+            }
+        });
+    }
+
+    private static void disconnectTunnelIfUp() {
+        if (VpnSDK.getTunnelState() != VpnTunnelState.DOWN) {
+            VpnSDK.disconnect();
+        }
+    }
+
+    private static void disconnectTunnelOnMinimizeIfNeeded() {
+        // Единое правило: жизненный цикл AWG зависит только от тумблера события,
+        // не от мастер-тумблера (симметрично автоподъёму, см. awgWantedAt).
+        if (!VpnConnectionMode.isToggleOnMinimize()) {
+            return;
+        }
+        if (VpnConnectionMode.getEffective() != VpnConnectionMode.AWG) {
+            return;
+        }
+        if (VpnSDK.getTunnelState() == VpnTunnelState.UP) {
+            VpnStatusController.markDeliberateDisconnect();
+            VpnSDK.disconnect();
+            FileLog.d("minimize: AWG tunnel brought down");
+        }
+    }
+
+    /**
+     * Нужно ли автоматически поднимать AWG на данном событии жизненного цикла.
+     * Зависит ТОЛЬКО от тумблера события {@code lifecycleToggle} («при закрытии»
+     * для холодного старта, «при сворачивании» для возврата из фона) — мастер-
+     * тумблер «Использовать туннель» на автоподъём не влияет (он лишь ручное
+     * вкл/выкл). Возвращает true только в режиме AWG.
+     */
+    private static boolean awgWantedAt(boolean lifecycleToggle) {
+        return VpnConnectionMode.getEffective() == VpnConnectionMode.AWG && lifecycleToggle;
+    }
+
+    /**
+     * Приводит AWG в нужное состояние на данном событии (возврат/старт):
+     * слот свободен — поднимаем молча; занял сторонний VPN — просим согласие
+     * (диалог покажет foreground-экран). Ничего не делаем, если поднимать не нужно
+     * или пользователь уже отказался от диалога при активном стороннем VPN.
+     */
+    private static void bringUpAwgIfWanted(boolean lifecycleToggle) {
+        if (pendingAwgReclaim || awgReclaimInProgress || VpnConnectionHelper.vpnConsentInFlight) {
+            return;
+        }
+        if (!awgWantedAt(lifecycleToggle) || VpnSDK.getTunnelState() != VpnTunnelState.DOWN) {
+            return;
+        }
+        try {
+            if (VpnService.prepare(applicationContext) == null) {
+                activateAwgTunnel();
+                FileLog.d("AWG tunnel brought up (slot free)");
+                return;
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        if (!awgReclaimDeclined) {
+            pendingAwgReclaim = true;
+            FileLog.d("AWG reclaim requested (needs VPN consent dialog)");
+        }
+    }
+
+    private static void startXrayCarrierOnColdStart() {
+        if (VpnSDK.hasCachedXrayConfig()) {
+            persistXrayProxyToMainConfig(true);
+            VpnSDK.startProxyAsync(success -> {
+                if (success) {
+                    if (VpnConnectionMode.isEnabled() && !runAwgMode()) {
+                        VpnStatusController.setStatus(VpnStatusController.Status.CONNECTED);
+                    }
+                    FileLog.d("xray proxy started from cache on " + VpnSDK.getProxySocksHost() + ":" + VpnSDK.getProxySocksPort());
+                } else {
+                    FileLog.e("xray start from cache failed: " + VpnSDK.getProxyLastError());
+                    if (!loginInProgress) {
+                        persistXrayProxyToMainConfig(false);
+                        ConnectionsManager.setProxySettings(false, "", 0, "", "", "");
+                    }
+                    registerXrayInBackground();
+                }
+            });
+        } else {
+            persistXrayProxyToMainConfig(false);
+            FileLog.d("no cached xray config; registering in background");
+            registerXrayInBackground();
+        }
+    }
+
+    private static VpnSDK.StateListener awgActivateListener;
+    private static Runnable awgActivateTimeout;
+    private static final long AWG_ACTIVATE_TIMEOUT_MS = 30_000L;
+
+    private static void activateAwgTunnel() {
+        if (VpnSDK.getTunnelState() == VpnTunnelState.UP) {
+            dropXrayCarrier();
+            VpnStatusController.refresh();
+            return;
+        }
+        removeAwgActivateWatcher();
+        awgActivateListener = state -> {
+            if (VpnConnectionMode.getEffective() != VpnConnectionMode.AWG) {
+                // Режим сменился (vpRay / AUTO→vpRay через remote config) — поднятый
+                // прокси теперь нужен, глушить его нельзя. Снимаем watcher.
+                removeAwgActivateWatcher();
+                return;
+            }
+            if (state == VpnTunnelState.UP) {
+                removeAwgActivateWatcher();
+                dropXrayCarrier();
+                VpnStatusController.refresh();
+            }
+        };
+        VpnSDK.addStateListener(awgActivateListener);
+        awgActivateTimeout = ApplicationLoader::removeAwgActivateWatcher;
+        AndroidUtilities.runOnUIThread(awgActivateTimeout, AWG_ACTIVATE_TIMEOUT_MS);
+        connectTunnelIfPermitted();
+        VpnStatusController.refresh();
+    }
+
+    private static void removeAwgActivateWatcher() {
+        if (awgActivateListener != null) {
+            VpnSDK.removeStateListener(awgActivateListener);
+            awgActivateListener = null;
+        }
+        if (awgActivateTimeout != null) {
+            AndroidUtilities.cancelRunOnUIThread(awgActivateTimeout);
+            awgActivateTimeout = null;
+        }
+    }
+
+    private static void dropXrayCarrier() {
+        // Только если xray реально был поднят — иначе stopProxy() зря биндит :xray,
+        // а сброс proxy-настроек и так не нужен.
+        if (!VpnSDK.isProxyRunning()) {
+            return;
+        }
+        persistXrayProxyToMainConfig(false);
+        ConnectionsManager.setProxySettings(false, "", 0, "", "", "");
+        VpnSDK.stopProxy();
+    }
+
+    /** Возврат из фона: тумблер события — «при сворачивании». */
+    private static void onForegroundResolveAwg() {
+        if (!VpnStatusController.isOtherVpnActive()) {
+            awgReclaimDeclined = false;
+        }
+        bringUpAwgIfWanted(VpnConnectionMode.isToggleOnMinimize());
+    }
+
+    public static volatile boolean awgReclaimDeclined;
+    public static volatile boolean pendingAwgReclaim;
+    public static volatile boolean awgReclaimInProgress;
+
+    public static boolean consumePendingAwgReclaim() {
+        if (pendingAwgReclaim) {
+            pendingAwgReclaim = false;
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * True when the effective mode is AWG and the tunnel can actually come up
+     * — i.e. the VPN permission is granted. With the permission missing or
+     * revoked (another VPN app took the slot, user turned it off in system
+     * settings) nothing in the background can bring the tunnel up, so callers
+     * must fall back to xray instead of leaving the user on a direct
+     * connection. The connection-settings screen requests the permission via
+     * VpnConnectionHelper before applying AWG, so there this is transient.
+     */
+    static boolean runAwgMode() {
+        if (VpnConnectionMode.getEffective() != VpnConnectionMode.AWG) {
+            return false;
+        }
+        try {
+            if (VpnService.prepare(applicationContext) == null) {
+                return true;
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        FileLog.d("mode AWG but VPN permission not granted; falling back to xray");
+        return false;
+    }
+
+    /**
+     * Brings the AWG tunnel up when the VPN permission is already granted
+     * (VpnService.prepare() == null). Without the permission this is a no-op —
+     * only a foreground screen can request it (VpnConnectionHelper does that
+     * on the login and connection-settings screens).
+     */
+    private static void connectTunnelIfPermitted() {
+        try {
+            if (VpnSDK.getTunnelState() == VpnTunnelState.DOWN
+                    && VpnService.prepare(applicationContext) == null) {
+                VpnConnectionService.start(applicationContext);
+                VpnSDK.toggleConnection();
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+    }
+
+    /**
+     * Поднять AWG-туннель после того, как пользователь дал согласие на VPN в
+     * системном диалоге (RESULT_OK). Вызывается из LaunchActivity — единого
+     * владельца reclaim-флоу.
+     */
+    public static void connectAwgAfterConsent() {
+        activateAwgTunnel();
+    }
+
+    /**
+     * Checks authorization by reading the userconfig prefs straight from disk
+     * ("user" is written on successful auth and wiped by clearConfig() on
+     * logout). Unlike {@link UserConfig#getActivatedAccountsCount()}, works
+     * before postInitApplication() has run loadConfig() — i.e. inside
+     * {@link #onCreate()}.
+     */
+    private static boolean hasAuthorizedAccountOnDisk() {
+        for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+            String name = a == 0 ? "userconfing" : "userconfig" + a;
+            SharedPreferences prefs = applicationContext.getSharedPreferences(name, Context.MODE_PRIVATE);
+            if (prefs.getString("user", null) != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void persistXrayProxyToMainConfig(boolean enabled) {
@@ -460,7 +921,19 @@ public class ApplicationLoader extends Application {
      * rapidly toggles the app between foreground and background.
      */
     private static void refreshXrayConfigIfActivated() {
-        if (UserConfig.getActivatedAccountsCount() <= 0) {
+        // The on-disk fallback covers the call from onCreate(), where
+        // UserConfig configs aren't loaded yet (see hasAuthorizedAccountOnDisk).
+        if (UserConfig.getActivatedAccountsCount() <= 0 && !hasAuthorizedAccountOnDisk()) {
+            return;
+        }
+        if (loginInProgress) {
+            // Add-account login is routing auth traffic through the AWG tunnel;
+            // re-enabling xray now would put the code request on a VLESS exit IP.
+            FileLog.d("xray refresh skipped: login in progress");
+            return;
+        }
+        if (!VpnConnectionMode.isEnabled()) {
+            FileLog.d("xray refresh skipped: master switch off");
             return;
         }
         long now = SystemClock.elapsedRealtime();
@@ -472,7 +945,29 @@ public class ApplicationLoader extends Application {
         lastXrayRefreshAtMs = now;
         VpnSDK.registerOrAuth(3, success -> {
             if (success) {
+                if (loginInProgress) {
+                    // Login started while the register was in flight.
+                    lastXrayRefreshAtMs = 0L;
+                    FileLog.d("xray refresh result ignored: login in progress");
+                    return;
+                }
+                if (!VpnConnectionMode.isEnabled()) {
+                    FileLog.d("xray refresh: config cached, apply skipped (master switch off)");
+                    return;
+                }
+                if (runAwgMode()) {
+                    // AWG mode: the fresh config stays cached for a future
+                    // switch to vpRay, but the proxy must not be re-enabled.
+                    FileLog.d("xray refresh: config cached, apply skipped (mode AWG)");
+                    return;
+                }
                 applyXrayProxyToConnectionsManager();
+                // Finish the deferred post-auth switch if it left the AWG
+                // tunnel up; never touch a tunnel the user brought up manually.
+                if (pendingPostAuthTunnelDown) {
+                    pendingPostAuthTunnelDown = false;
+                    disconnectTunnelIfUp();
+                }
                 FileLog.d("xray refreshed via /auth/register, ConnectionsManager updated");
             } else {
                 // Allow the next foreground transition to retry sooner.

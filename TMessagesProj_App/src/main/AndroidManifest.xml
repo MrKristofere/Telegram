@@ -5,6 +5,9 @@
 
     <application android:name="org.telegram.messenger.ApplicationLoaderImpl" tools:replace="name">
         <service
+            android:name="org.amnezia.awg.backend.AbstractBackend$VpnService"
+            tools:node="remove" />
+        <service
             android:name="org.telegram.messenger.GoogleVoiceClientService"
             android:exported="true"
             android:foregroundServiceType="dataSync"

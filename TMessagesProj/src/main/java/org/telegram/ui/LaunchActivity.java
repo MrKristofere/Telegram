@@ -94,7 +94,14 @@ import org.telegram.PhoneFormat.PhoneFormat;
 import org.telegram.messenger.AccountInstance;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.AnimationNotificationsLocker;
+import android.net.VpnService;
+
 import org.telegram.messenger.ApplicationLoader;
+import org.telegram.messenger.VpnConnectionHelper;
+import org.telegram.messenger.VpnConnectionMode;
+import org.telegram.messenger.VpnStatusController;
+import vpn.sdk.VpnSDK;
+import vpn.tunnel.VpnTunnelState;
 import org.telegram.messenger.AutoDeleteMediaTask;
 import org.telegram.messenger.BackupAgent;
 import org.telegram.messenger.BetaUpdate;
@@ -360,6 +367,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     private static final int PLAY_SERVICES_REQUEST_CHECK_SETTINGS = 140;
     public static final int SCREEN_CAPTURE_REQUEST_CODE = 520;
     public static final int WEBVIEW_SHARE_API_REQUEST_CODE = 521;
+    public static final int REQUEST_CODE_AWG_RECLAIM = 522;
 
     public static final int BLUETOOTH_CONNECT_TYPE = 0;
     private SparseIntArray requestedPermissions = new SparseIntArray();
@@ -6667,6 +6675,18 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
             }
             UserConfig.getInstance(currentAccount).saveConfig(false);
         }
+        if (requestCode == REQUEST_CODE_AWG_RECLAIM) {
+            ApplicationLoader.awgReclaimInProgress = false;
+            if (resultCode == Activity.RESULT_OK) {
+                ApplicationLoader.awgReclaimDeclined = false;
+                ApplicationLoader.connectAwgAfterConsent();
+            } else {
+                // Пользователь отклонил — не спамим диалогом, пока сторонний VPN активен.
+                ApplicationLoader.awgReclaimDeclined = true;
+                VpnStatusController.refresh();
+            }
+            return;
+        }
         if (requestCode == 105) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 if (ApplicationLoader.canDrawOverlays = Settings.canDrawOverlays(this)) {
@@ -6994,10 +7014,38 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     View feedbackView;
 
+    private void tryAwgReclaim() {
+        if (VpnConnectionHelper.vpnConsentInFlight) {
+            ApplicationLoader.pendingAwgReclaim = true; // вернём запрос на следующий foreground
+            return;
+        }
+        if (VpnConnectionMode.getEffective() != VpnConnectionMode.AWG) {
+            return;
+        }
+        if (VpnSDK.getTunnelState() != VpnTunnelState.DOWN) {
+            return; // уже поднят/поднимается
+        }
+        try {
+            Intent prepare = VpnService.prepare(this);
+            if (prepare == null) {
+                ApplicationLoader.connectAwgAfterConsent();
+            } else {
+                ApplicationLoader.awgReclaimInProgress = true;
+                startActivityForResult(prepare, REQUEST_CODE_AWG_RECLAIM);
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+            ApplicationLoader.awgReclaimInProgress = false;
+        }
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
         isResumed = true;
+        if (ApplicationLoader.consumePendingAwgReclaim()) {
+            tryAwgReclaim();
+        }
         pipActivityHandler.onResume();
         if (onResumeStaticCallback != null) {
             onResumeStaticCallback.run();

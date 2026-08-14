@@ -2,115 +2,266 @@ package org.telegram.ui;
 
 import android.annotation.SuppressLint;
 import android.content.Context;
-import android.graphics.Canvas;
+import android.content.res.Configuration;
+import android.graphics.Bitmap;
 import android.graphics.Color;
-import android.graphics.Paint;
+import android.graphics.Outline;
 import android.graphics.PorterDuff;
 import android.graphics.PorterDuffColorFilter;
-import android.graphics.Rect;
-import android.graphics.RectF;
+import android.graphics.SurfaceTexture;
 import android.graphics.drawable.BitmapDrawable;
-import android.graphics.drawable.Drawable;
-import android.text.TextPaint;
+import android.graphics.drawable.GradientDrawable;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewOutlineProvider;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
-import androidx.annotation.NonNull;
 import androidx.core.content.ContextCompat;
 
+import com.google.android.exoplayer2.upstream.RawResourceDataSource;
+
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.FileLog;
+import org.telegram.messenger.LocaleController;
+import org.telegram.messenger.R;
 import org.telegram.ui.Components.LayoutHelper;
+import org.telegram.ui.Components.VideoPlayer;
 
-import java.util.ArrayList;
-import java.util.List;
-
+/**
+ * Онбординг про режимы подключения, показывается один раз после авторизации.
+ */
 @SuppressLint("ViewConstructor")
 public class VpnIntroOverlay extends FrameLayout {
 
-    public static class Item {
-        public final int drawableRes;
-        public final String header;
-        public final String subHeader;
+    private static final int VIDEO_DESIGN_WIDTH = 345;
+    private static final int VIDEO_DESIGN_HEIGHT = 230;
+    private static final float VIDEO_MAX_HEIGHT_FRACTION = 0.32f;
 
-        public Item(int drawableRes, String header, String subHeader) {
-            this.drawableRes = drawableRes;
-            this.header = header;
-            this.subHeader = subHeader;
+    private final View parentView;
+    private final ImageView backgroundImageView;
+    private final Runnable updateBlurRunnable = () -> {
+        if (isAttachedToWindow()) {
+            updateBlurBackground();
+        }
+    };
+
+    private TextureView videoView;
+    private VideoPlayer videoPlayer;
+
+    public VpnIntroOverlay(Context context, View parentView) {
+        super(context);
+        this.parentView = parentView;
+        setClickable(true);
+
+        backgroundImageView = new ImageView(context);
+        backgroundImageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        addView(backgroundImageView, LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT);
+        updateBlurBackground();
+
+        View scrim = new View(context);
+        scrim.setBackgroundColor(0xB3000000);
+        addView(scrim, LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT);
+
+        LinearLayout content = new LinearLayout(context);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setGravity(Gravity.CENTER_HORIZONTAL);
+        content.setPadding(AndroidUtilities.dp(24), AndroidUtilities.statusBarHeight + AndroidUtilities.dp(56),
+                AndroidUtilities.dp(24), AndroidUtilities.navigationBarHeight + AndroidUtilities.dp(24));
+
+        TextView title = new TextView(context);
+        title.setTextColor(Color.WHITE);
+        title.setTypeface(AndroidUtilities.bold());
+        title.setText(LocaleController.getString(R.string.VpnIntroTitle));
+        title.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 22);
+        title.setGravity(Gravity.CENTER);
+        content.addView(title, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT));
+        content.addView(createVideoBlock(context),
+                LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL, 0, 20, 0, 4));
+
+        LinearLayout cards = new LinearLayout(context);
+        cards.setOrientation(LinearLayout.VERTICAL);
+        addCard(cards, R.drawable.ic_toggle_on_intro, R.string.VpnIntroStatusHeader, R.string.VpnIntroStatusSubHeader, true);
+        addCard(cards, R.drawable.ic_toggle_off_intro, R.string.VpnIntroTunnelHeader, R.string.VpnIntroTunnelSubHeader, false);
+        addCard(cards, R.drawable.ic_thumb_up_intro, R.string.VpnIntroMultiHeader, R.string.VpnIntroMultiSubHeader, false);
+        addCard(cards, R.drawable.ic_power_intro, R.string.VpnIntroAutoHeader, R.string.VpnIntroAutoSubHeader, false);
+        content.addView(cards, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0, 20, 0, 0));
+
+        View spacerTop = new View(context);
+        content.addView(spacerTop, new LinearLayout.LayoutParams(LayoutHelper.MATCH_PARENT, 0, 1f));
+
+        TextView tapToStart = new TextView(context);
+        tapToStart.setTextColor(Color.WHITE);
+        tapToStart.setTypeface(AndroidUtilities.bold());
+        tapToStart.setText(LocaleController.getString(R.string.VpnIntroTapToStart));
+        tapToStart.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13);
+        tapToStart.setGravity(Gravity.CENTER);
+        content.addView(tapToStart, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL));
+
+        View spacerBottom = new View(context);
+        content.addView(spacerBottom, new LinearLayout.LayoutParams(LayoutHelper.MATCH_PARENT, 0, 1f));
+
+        content.setClickable(true);
+        content.setOnClickListener(v -> performClick());
+
+        ScrollView scrollView = new ScrollView(context);
+        scrollView.setFillViewport(true);
+        scrollView.setVerticalScrollBarEnabled(false);
+        scrollView.setOverScrollMode(OVER_SCROLL_NEVER);
+        scrollView.addView(content, new ScrollView.LayoutParams(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+        addView(scrollView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT, Gravity.CENTER));
+
+        setContentDescription(LocaleController.getString(R.string.VpnIntroTitle)
+                + ". " + LocaleController.getString(R.string.VpnIntroTapToStart));
+    }
+
+    private void updateBlurBackground() {
+        Bitmap blurred = AndroidUtilities.makeBlurBitmap(parentView, 12f, 10);
+        if (blurred == null) {
+            return;
+        }
+        BitmapDrawable bitmap = new BitmapDrawable(getResources(), blurred);
+        bitmap.setColorFilter(new PorterDuffColorFilter(0xf0000000, PorterDuff.Mode.DST_OVER));
+        backgroundImageView.setImageDrawable(bitmap);
+    }
+
+    private View createVideoBlock(Context context) {
+        FrameLayout container = new FrameLayout(context) {
+            @Override
+            protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+                int width = MeasureSpec.getSize(widthMeasureSpec);
+                int height = width * VIDEO_DESIGN_HEIGHT / VIDEO_DESIGN_WIDTH;
+                int maxHeight = (int) (AndroidUtilities.displaySize.y * VIDEO_MAX_HEIGHT_FRACTION);
+                if (height > maxHeight) {
+                    height = maxHeight;
+                    width = height * VIDEO_DESIGN_WIDTH / VIDEO_DESIGN_HEIGHT;
+                }
+                super.onMeasure(MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
+                        MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY));
+            }
+        };
+        final float radius = AndroidUtilities.dp(16);
+        container.setOutlineProvider(new ViewOutlineProvider() {
+            @Override
+            public void getOutline(View view, Outline outline) {
+                outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), radius);
+            }
+        });
+        container.setClipToOutline(true);
+        container.setBackgroundColor(0x22000000);
+
+        videoView = new TextureView(context);
+        videoView.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        videoView.setAlpha(0f);
+        container.addView(videoView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT));
+        return container;
+    }
+
+    private void startVideo() {
+        releasePlayer();
+        try {
+            VideoPlayer player = new VideoPlayer(false, true);
+            videoPlayer = player;
+            player.setDelegate(new VideoPlayer.VideoPlayerDelegate() {
+                @Override
+                public void onStateChanged(boolean playWhenReady, int playbackState) {
+                }
+
+                @Override
+                public void onError(VideoPlayer p, Exception e) {
+                    FileLog.e(e);
+                    AndroidUtilities.runOnUIThread(VpnIntroOverlay.this::releasePlayer);
+                }
+
+                @Override
+                public void onVideoSizeChanged(int width, int height, int unappliedRotationDegrees, float pixelWidthHeightRatio) {
+                }
+
+                @Override
+                public void onRenderedFirstFrame() {
+                    videoView.animate().alpha(1f).setDuration(150).start();
+                }
+
+                @Override
+                public void onSurfaceTextureUpdated(SurfaceTexture surfaceTexture) {
+                }
+
+                @Override
+                public boolean onSurfaceDestroyed(SurfaceTexture surfaceTexture) {
+                    return true;
+                }
+            });
+            player.setTextureView(videoView);
+            player.setLooping(true);
+            player.preparePlayer(RawResourceDataSource.buildRawResourceUri(R.raw.onboarding_vpgram), "other");
+            player.setMute(true);
+            if (getWindowVisibility() == VISIBLE) {
+                player.play();
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+            releasePlayer();
         }
     }
 
-    public VpnIntroOverlay(Context context, View parentView, String title, String subtitle, List<Item> items, String dismissText) {
-        super(context);
-        setClickable(true);
+    private void releasePlayer() {
+        if (videoPlayer != null) {
+            videoPlayer.releasePlayer(true);
+            videoPlayer = null;
+        }
+    }
 
-        ImageView backgroundImageView = new ImageView(context);
-        backgroundImageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        addView(backgroundImageView, LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT);
+    private void addCard(LinearLayout parent, int iconRes, int headerRes, int subHeaderRes, boolean highlighted) {
+        LinearLayout card = new LinearLayout(getContext());
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setPadding(AndroidUtilities.dp(16), AndroidUtilities.dp(10), AndroidUtilities.dp(16), AndroidUtilities.dp(10));
+        if (highlighted) {
+            GradientDrawable bg = new GradientDrawable();
+            bg.setShape(GradientDrawable.RECTANGLE);
+            bg.setCornerRadius(AndroidUtilities.dp(12));
+            bg.setColor(0x26FFFFFF);
+            card.setBackground(bg);
+        }
 
-        BitmapDrawable bitmap = new BitmapDrawable(getContext().getResources(), AndroidUtilities.makeBlurBitmap(parentView, 12f, 10));
-        bitmap.setColorFilter(new PorterDuffColorFilter(0xf0000000, PorterDuff.Mode.DST_OVER));
-        backgroundImageView.setImageDrawable(bitmap);
+        ImageView icon = new ImageView(getContext());
+        icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        icon.setImageDrawable(ContextCompat.getDrawable(getContext(), iconRes));
+        icon.setColorFilter(new PorterDuffColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN));
+        card.addView(icon, LayoutHelper.createLinear(24, 24, Gravity.CENTER_VERTICAL));
 
-        View scrim = new View(context);
-        scrim.setBackgroundColor(0x80000000);
-        addView(scrim, LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT);
+        LinearLayout texts = new LinearLayout(getContext());
+        texts.setOrientation(LinearLayout.VERTICAL);
 
-        LinearLayout linearLayout = new LinearLayout(context);
-        linearLayout.setOrientation(LinearLayout.VERTICAL);
-        linearLayout.setPadding(0, AndroidUtilities.dp(48), 0, AndroidUtilities.dp(48));
-        linearLayout.setGravity(Gravity.CENTER_HORIZONTAL);
-
-        TextView header = new TextView(context);
+        TextView header = new TextView(getContext());
         header.setTextColor(Color.WHITE);
         header.setTypeface(AndroidUtilities.bold());
-        header.setText(title);
-        header.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 20);
-        linearLayout.addView(header, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT));
+        header.setText(LocaleController.getString(headerRes));
+        header.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+        texts.addView(header, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT));
 
-        TextView subHeader = new TextView(context);
-        subHeader.setTextColor(0x96FFFFFF);
-        subHeader.setText(subtitle);
+        TextView subHeader = new TextView(getContext());
+        subHeader.setTextColor(0x80FFFFFF);
+        subHeader.setText(LocaleController.getString(subHeaderRes));
         subHeader.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14);
-        subHeader.setGravity(Gravity.CENTER_HORIZONTAL);
-        linearLayout.addView(subHeader, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 68, 8, 68, 36));
+        texts.addView(subHeader, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0, 2, 0, 0));
 
-        List<ItemView> itemViews = new ArrayList<>(items.size());
-        int itemWidth = parentView.getMeasuredWidth() - AndroidUtilities.dp(100);
-        for (Item item : items) {
-            ItemView itemView = new ItemView(context, item.drawableRes, item.header, item.subHeader);
-            itemViews.add(itemView);
-            int w = itemView.getRequiredWidth();
-            if (w > itemWidth) {
-                itemWidth = w;
-            }
-        }
-        if (itemWidth + AndroidUtilities.dp(8) > parentView.getMeasuredWidth()) {
-            itemWidth = parentView.getMeasuredWidth() - AndroidUtilities.dp(8);
-        }
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(itemWidth, AndroidUtilities.dp(64));
-        lp.setMargins(0, AndroidUtilities.dp(5), 0, AndroidUtilities.dp(5));
-        for (ItemView itemView : itemViews) {
-            itemView.setHighlighted(true);
-            linearLayout.addView(itemView, lp);
-        }
+        card.addView(texts, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_VERTICAL, 16, 0, 0, 0));
 
-        TextView bottomText = new TextView(context);
-        bottomText.setTextColor(Color.WHITE);
-        bottomText.setTypeface(AndroidUtilities.bold());
-        bottomText.setText(dismissText);
-        bottomText.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14);
-        linearLayout.addView(bottomText, LayoutHelper.createLinear(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, 0, 73, 0, 0));
-
-        addView(linearLayout, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER));
+        LinearLayout.LayoutParams lp = LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT);
+        lp.topMargin = AndroidUtilities.dp(6);
+        lp.bottomMargin = AndroidUtilities.dp(6);
+        parent.addView(card, lp);
     }
 
     public void dismiss() {
+        releasePlayer();
         animate().alpha(0f).setDuration(200).withEndAction(() -> {
             if (getParent() instanceof ViewGroup) {
                 ((ViewGroup) getParent()).removeView(this);
@@ -118,79 +269,36 @@ public class VpnIntroOverlay extends FrameLayout {
         }).start();
     }
 
-    @SuppressLint("ViewConstructor")
-    static class ItemView extends View {
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        startVideo();
+    }
 
-        private final String header;
-        private final String subHeader;
-        private final Drawable icon;
-        private final Paint backgroundPaint;
-        private final TextPaint headerTextPaint;
-        private final TextPaint subHeaderTextPaint;
-        private final RectF rectF;
-        private final Rect textBounds = new Rect();
-        private boolean highlighted;
-
-        public ItemView(Context context, int drawableRes, String header, String subHeader) {
-            super(context);
-            this.header = header;
-            this.subHeader = subHeader;
-
-            Drawable d = ContextCompat.getDrawable(context, drawableRes);
-            icon = d != null ? d.mutate() : null;
-            if (icon != null) {
-                icon.setColorFilter(new PorterDuffColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN));
-            }
-
-            backgroundPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            backgroundPaint.setColor(0x16D8D8D8);
-
-            headerTextPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-            headerTextPaint.setColor(Color.WHITE);
-            headerTextPaint.setTextSize(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 16, getResources().getDisplayMetrics()));
-            headerTextPaint.setTypeface(AndroidUtilities.bold());
-
-            subHeaderTextPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-            subHeaderTextPaint.setColor(0x96FFFFFF);
-            subHeaderTextPaint.setTextSize(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 14, getResources().getDisplayMetrics()));
-
-            rectF = new RectF();
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        if (videoPlayer == null) {
+            return;
         }
-
-        public int getRequiredWidth() {
-            headerTextPaint.getTextBounds(header, 0, header.length(), textBounds);
-            int headerWidth = textBounds.width();
-            subHeaderTextPaint.getTextBounds(subHeader, 0, subHeader.length(), textBounds);
-            int subHeaderWidth = textBounds.width();
-            return AndroidUtilities.dp(88) + AndroidUtilities.dp(8) + Math.max(headerWidth, subHeaderWidth);
+        if (visibility == VISIBLE) {
+            videoPlayer.play();
+        } else {
+            videoPlayer.pause();
         }
+    }
 
-        public void setHighlighted(boolean highlighted) {
-            this.highlighted = highlighted;
-            invalidate();
-        }
+    @Override
+    protected void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        AndroidUtilities.cancelRunOnUIThread(updateBlurRunnable);
+        AndroidUtilities.runOnUIThread(updateBlurRunnable, 150);
+    }
 
-        @Override
-        protected void onDraw(@NonNull Canvas canvas) {
-            super.onDraw(canvas);
-            int iconCx = AndroidUtilities.dp(40);
-            int iconCy = getMeasuredHeight() / 2;
-            int size = AndroidUtilities.dp(24);
-            int left = iconCx - size / 2;
-            int top = iconCy - size / 2;
-            if (icon != null) {
-                icon.setBounds(left, top, left + size, top + size);
-                icon.draw(canvas);
-            }
-
-            if (highlighted) {
-                rectF.set(0, 0, getMeasuredWidth(), getMeasuredHeight());
-                backgroundPaint.setAlpha(30);
-                canvas.drawRoundRect(rectF, AndroidUtilities.dpf2(12f), AndroidUtilities.dpf2(12f), backgroundPaint);
-            }
-
-            canvas.drawText(header, AndroidUtilities.dpf2(80), getMeasuredHeight() / 2f - AndroidUtilities.dpf2(4), headerTextPaint);
-            canvas.drawText(subHeader, AndroidUtilities.dpf2(80), getMeasuredHeight() / 2f + AndroidUtilities.dpf2(18), subHeaderTextPaint);
-        }
+    @Override
+    protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+        AndroidUtilities.cancelRunOnUIThread(updateBlurRunnable);
+        releasePlayer();
     }
 }

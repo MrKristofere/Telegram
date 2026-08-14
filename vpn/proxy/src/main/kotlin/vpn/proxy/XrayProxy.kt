@@ -36,6 +36,10 @@ object XrayProxy {
         false
     }
 
+    // start/stop are synchronized: binder calls from the main process arrive
+    // on a thread pool, and the isRunning() check-then-act would otherwise let
+    // two concurrent start() calls race for the SOCKS port.
+    @Synchronized
     fun start(configJson: String): Boolean {
         if (isRunning()) {
             Log.d(TAG, "Already running")
@@ -61,6 +65,7 @@ object XrayProxy {
         }
     }
 
+    @Synchronized
     fun stop() {
         try {
             libXray.LibXray.stopXray()

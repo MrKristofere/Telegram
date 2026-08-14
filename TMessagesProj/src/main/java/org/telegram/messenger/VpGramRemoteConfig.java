@@ -19,6 +19,7 @@ public final class VpGramRemoteConfig {
 
     private static final String KEY_TG_CHANNEL_URL = "tg_channel_url";
     private static final String KEY_TG_CHANNEL_ID = "tg_channel_id";
+    private static final String KEY_ACTIVE_VPN_PROTOCOL = "active_vpn_protocol";
 
     // The channel id/url change rarely; fetch at most hourly. fetch() is called on every
     // app foregrounding, so a 0 interval would hammer Firebase and risk FETCH_THROTTLED.
@@ -41,6 +42,21 @@ public final class VpGramRemoteConfig {
             remoteConfig.fetchAndActivate();
         } catch (Throwable e) {
             FileLog.e(e);
+        }
+    }
+
+    /**
+     * Remote-controlled connection mode ("active_vpn_protocol") for users who
+     * selected «Авто» in connection settings: "awg" or "vpray". Empty/unknown
+     * values mean "no remote preference" — {@link VpnConnectionMode} falls
+     * back to vpRay.
+     */
+    public static String getActiveVpnProtocol() {
+        try {
+            return FirebaseRemoteConfig.getInstance().getString(KEY_ACTIVE_VPN_PROTOCOL);
+        } catch (Throwable e) {
+            FileLog.e(e);
+            return "";
         }
     }
 

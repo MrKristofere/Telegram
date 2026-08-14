@@ -14,12 +14,14 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 import vpn.tunnel.VpnTunnelState
 import vpn.tunnel.VpnStatistics
 import vpn.network.NetworkResult
 import vpn.network.VpnNetworkFactory
 import vpn.tunnel.TunnelFactory
 import vpn.proxy.XrayProxy
+import vpn.proxy.XrayProxyClient
 
 /**
  * Единая точка входа для работы с VPN.
@@ -34,6 +36,9 @@ import vpn.proxy.XrayProxy
 object VpnSDK {
 
     private const val TAG = "VpnSDK"
+
+    /** How long background callers wait for the ":xray" process binding. */
+    private const val XRAY_BIND_TIMEOUT_MS = 5_000L
 
     fun interface StateListener {
         fun onStateChanged(state: VpnTunnelState)
@@ -55,6 +60,7 @@ object VpnSDK {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + exceptionHandler)
     private val listeners = mutableSetOf<StateListener>()
     private val registerMutex = Mutex()
+    private val connectInProgress = AtomicBoolean(false)
 
     @Volatile
     private var isInitialized = false
@@ -93,6 +99,9 @@ object VpnSDK {
         val appContext = context.applicationContext
         VpnNetworkFactory.setup(appContext, debug)
         TunnelFactory.setup(appContext)
+        // Kick off the binding to the ":xray" process early — by the time
+        // anything needs the proxy the connection is usually already up.
+        XrayProxyClient.setup(appContext)
         isInitialized = true
         Log.d(TAG, "Initialized")
 
@@ -150,7 +159,20 @@ object VpnSDK {
     fun toggleConnection() {
         checkInitialized()
         when (tunnelStateFlow.value) {
-            VpnTunnelState.DOWN -> scope.launch { connect() }
+            VpnTunnelState.DOWN -> {
+                // CONNECTING lands in the state flow asynchronously (two
+                // coroutine hops away), so two quick toggles can both observe
+                // DOWN; the flag turns the second into a no-op instead of a
+                // concurrent connect().
+                if (!connectInProgress.compareAndSet(false, true)) return
+                scope.launch {
+                    try {
+                        connect()
+                    } finally {
+                        connectInProgress.set(false)
+                    }
+                }
+            }
             VpnTunnelState.UP -> disconnect()
             VpnTunnelState.CONNECTING -> Unit
         }
@@ -173,11 +195,13 @@ object VpnSDK {
             clientIP?.let { append("\nclientIP = $it") }
             serverIP?.let { append("\nserverIP = $it") }
             append("\n--- xray proxy ---")
-            append("\nxray running = ${XrayProxy.isRunning()}")
-            if (XrayProxy.isRunning()) {
+            append("\nxray bound = ${XrayProxyClient.isConnected()}")
+            val xrayRunning = XrayProxyClient.isRunning()
+            append("\nxray running = $xrayRunning")
+            if (xrayRunning) {
                 append("\nxray addr = ${XrayProxy.socksHost}:${XrayProxy.socksPort}")
             }
-            XrayProxy.lastError?.let { append("\nxray error = $it") }
+            XrayProxyClient.lastError?.let { append("\nxray error = $it") }
         }
     }
 
@@ -204,17 +228,26 @@ object VpnSDK {
 
     // ---- Proxy (VLESS+Reality via libxray) ----
 
+    fun interface ProxyStartCallback {
+        /** Invoked on Main thread. */
+        fun onResult(success: Boolean)
+    }
+
     /**
-     * Starts the local SOCKS5 proxy (xray-core) using the cached server-issued
-     * config (from the last successful /auth/register).
+     * Starts the local SOCKS5 proxy (xray-core, in the ":xray" process) using
+     * the cached server-issued config (from the last successful
+     * /auth/register).
      *
      * Returns `true` if xray is now running (or was already running). Returns
-     * `false` if no cached config exists yet — the caller should kick off
-     * [registerOrAuth] and retry once the callback fires.
+     * `false` when no cached config exists yet (kick off [registerOrAuth]) or
+     * when the binder connection to the ":xray" process isn't up — for the
+     * latter case prefer [startProxyAsync], which waits for the binding.
      *
      * If a cached config exists but libxray rejects it (corrupt cache, schema
      * drift, expired credentials in the JSON, etc.) the cache is cleared and
-     * `false` is returned, so the next register cycle will replace it.
+     * `false` is returned, so the next register cycle will replace it. A
+     * transport failure (binding down, ":xray" died mid-call) also returns
+     * `false` but keeps the cache — the config was never evaluated.
      */
     @JvmStatic
     fun startProxy(): Boolean {
@@ -225,10 +258,36 @@ object VpnSDK {
             return false
         }
         Log.d(TAG, "Starting xray with cached server config (size=${cached.length})")
-        if (XrayProxy.start(cached)) return true
-        Log.w(TAG, "Cached xray config failed to start, clearing cache: ${XrayProxy.lastError}")
-        VpnNetworkFactory.getRegistrationRepository().clearCachedConfig()
-        return false
+        return when (XrayProxyClient.start(cached)) {
+            XrayProxyClient.StartResult.STARTED -> true
+            XrayProxyClient.StartResult.REJECTED -> {
+                Log.w(TAG, "Cached xray config rejected, clearing cache: ${XrayProxyClient.lastError}")
+                VpnNetworkFactory.getRegistrationRepository().clearCachedConfig()
+                false
+            }
+            XrayProxyClient.StartResult.UNAVAILABLE -> {
+                Log.w(TAG, "startProxy: :xray unavailable, keeping cache: ${XrayProxyClient.lastError}")
+                false
+            }
+        }
+    }
+
+    /**
+     * Like [startProxy], but tolerates a not-yet-established binding to the
+     * ":xray" process (e.g. right after cold start): waits for the connection
+     * on a background thread, then starts xray. [callback] fires on Main.
+     */
+    @JvmStatic
+    fun startProxyAsync(callback: ProxyStartCallback? = null) {
+        checkInitialized()
+        scope.launch {
+            val bound = XrayProxyClient.awaitConnected(XRAY_BIND_TIMEOUT_MS)
+            if (!bound) {
+                Log.e(TAG, "startProxyAsync: :xray binding not up after ${XRAY_BIND_TIMEOUT_MS}ms")
+            }
+            val success = bound && startProxy()
+            withContext(Dispatchers.Main) { callback?.onResult(success) }
+        }
     }
 
     /** True iff a server-issued xray config is cached locally. */
@@ -241,11 +300,11 @@ object VpnSDK {
     @JvmStatic
     fun stopProxy() {
         Log.d(TAG, "Stopping xray proxy…")
-        XrayProxy.stop()
+        XrayProxyClient.stop()
     }
 
     @JvmStatic
-    fun isProxyRunning(): Boolean = XrayProxy.isRunning()
+    fun isProxyRunning(): Boolean = XrayProxyClient.isRunning()
 
     /** Port of the local SOCKS5 proxy. Valid only when [isProxyRunning] returns true. */
     @JvmStatic
@@ -255,7 +314,7 @@ object VpnSDK {
     fun getProxySocksHost(): String = XrayProxy.socksHost
 
     @JvmStatic
-    fun getProxyLastError(): String? = XrayProxy.lastError
+    fun getProxyLastError(): String? = XrayProxyClient.lastError
 
     /**
      * Calls POST /auth/register against the backend, with [maxAttempts] tries
@@ -315,20 +374,25 @@ object VpnSDK {
         return false
     }
 
+    /** Runs on the IO scope (register cycle) — blocking on the binding is fine here. */
     private fun applyCachedConfigToXray(): Boolean {
         val configJson = VpnNetworkFactory.getRegistrationRepository().getCachedConfigJson()
         if (configJson == null) {
             Log.w(TAG, "applyCachedConfigToXray: no cached config (unexpected after success)")
             return false
         }
-        XrayProxy.stop()
-        val ok = XrayProxy.start(configJson)
-        if (!ok) {
-            Log.w(TAG, "Failed to restart xray with new config: ${XrayProxy.lastError}")
-        } else {
-            Log.d(TAG, "Xray restarted with fresh server config")
+        if (!XrayProxyClient.awaitConnected(XRAY_BIND_TIMEOUT_MS)) {
+            Log.w(TAG, "applyCachedConfigToXray: :xray binding not up after ${XRAY_BIND_TIMEOUT_MS}ms")
+            return false
         }
-        return ok
+        XrayProxyClient.stop()
+        val result = XrayProxyClient.start(configJson)
+        if (result != XrayProxyClient.StartResult.STARTED) {
+            Log.w(TAG, "Failed to restart xray with new config ($result): ${XrayProxyClient.lastError}")
+            return false
+        }
+        Log.d(TAG, "Xray restarted with fresh server config")
+        return true
     }
 
     private fun notifyListeners(state: VpnTunnelState) {

@@ -7691,6 +7691,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 return;
             }
             Runnable onEnd = () -> {
+                photoCropView.cropView.mgDetachTransform();
                 cropTransform.setViewTransform(previousHasTransform, previousCropPx, previousCropPy, previousCropRotation, previousCropOrientation, previousCropScale, scale1(), scale1(), previousCropPw, previousCropPh, 0, 0, previousCropMirrored);
 //                if (previousHasTransform) {
 //                    editState.cropState = new MediaController.CropState();
@@ -7722,7 +7723,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             if (currentEditMode == EDIT_MODE_CROP && !photoCropView.isReady()) {
                 return;
             }
-            applyCurrentEditMode();
+            if (!applyCurrentEditMode()) {
+                return;
+            }
             switchToEditMode(EDIT_MODE_NONE);
         });
 
@@ -7990,6 +7993,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         if (isCaptionOpen()) {
             return;
         }
+        applyCaption();
         if (placeProvider != null && !doneButtonPressed) {
             if (sendPhotoType == SELECT_TYPE_AVATAR) {
                 if (!confirmed && setAvatarFor != null) {
@@ -8077,7 +8081,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     }
                     return;
                 }
-                applyCurrentEditMode();
+                if (!applyCurrentEditMode() && currentEditMode == EDIT_MODE_CROP) {
+                    return;
+                }
             }
             if (!replace && parentChatActivity != null) {
                 TLRPC.Chat chat = parentChatActivity.getCurrentChat();
@@ -9246,7 +9252,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     private boolean cropRotate(float diff) {
-        return cropRotate(diff, false, null);
+        return cropRotate(diff, false, null, true);
     }
 
     private float scale1() {
@@ -9284,13 +9290,19 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     private boolean cropRotate(final float diff, boolean restoreMirror, Runnable onEnd) {
+        return cropRotate(diff, restoreMirror, onEnd, false);
+    }
+
+    private boolean cropRotate(final float diff, boolean restoreMirror, Runnable onEnd, boolean keepCrop) {
         if (imageMoveAnimation != null) {
             return false;
         }
         if (photoCropView == null) {
             return false;
         }
-        photoCropView.cropView.maximize(true);
+        if (!keepCrop) {
+            photoCropView.cropView.maximize(true);
+        }
         rotate = 0;
         animateToRotate = rotate + diff;
         if (restoreMirror) {
@@ -9308,9 +9320,14 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 bitmapWidth = bitmapHeight;
                 bitmapHeight = temp;
             }
-            if (editState.cropState != null) {
-                bitmapWidth *= editState.cropState.cropPw;
-                bitmapHeight *= editState.cropState.cropPh;
+            MediaController.CropState scaleCrop = editState.cropState;
+            if (keepCrop && photoCropView.cropView.state != null) {
+                scaleCrop = new MediaController.CropState();
+                photoCropView.cropView.applyToCropState(scaleCrop);
+            }
+            if (scaleCrop != null) {
+                bitmapWidth *= scaleCrop.cropPw;
+                bitmapHeight *= scaleCrop.cropPh;
             }
             float oldScale = Math.min(getContainerViewWidth(EDIT_MODE_CROP) / (float) bitmapWidth, getContainerViewHeight(EDIT_MODE_CROP) / (float) bitmapHeight);
             float newScale = oldScale;
@@ -9346,13 +9363,16 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 photoCropView.cropView.areaView.setRotationScaleTranslation(0, scale1(false), 0, 0);
                 photoCropView.wheelView.setRotated(false);
                 if (Math.abs(diff) > 0) {
-                    if (photoCropView.rotate(diff)) {
+                    if (photoCropView.rotate(diff, keepCrop)) {
                         rotateItem.setColorFilter(new PorterDuffColorFilter(getThemedColor(Theme.key_chat_editMediaButton), PorterDuff.Mode.MULTIPLY));
                     } else {
                         rotateItem.setColorFilter(null);
                     }
                 }
-                if (editState.cropState != null) {
+                // keepCrop: don't touch editState.cropState here, it aliases the persistent
+                // entry.cropState, so writing the rotated crop would prematurely commit it and
+                // survive a cancel/system-back. "done" reads the live crop view via makeCrop anyway.
+                if (!keepCrop && editState.cropState != null) {
                     editState.cropState.cropPx = editState.cropState.cropPy = 0;
                     editState.cropState.cropPw = editState.cropState.cropPh = 1;
                 }
@@ -11371,15 +11391,16 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         }
     }
 
-    private void applyCurrentEditMode() {
+    private boolean applyCurrentEditMode() {
         if (currentIndex < 0 || currentIndex >= imagesArrLocals.size()) {
-            return;
+            return false;
         }
         Object object = imagesArrLocals.get(currentIndex);
         if (!(object instanceof MediaController.MediaEditState)) {
-            return;
+            return false;
         }
         Bitmap bitmap = null;
+        Bitmap currentCroppedBitmap = null;
         Bitmap[] paintThumbBitmap = new Bitmap[1];
         List<TLRPC.InputDocument> stickers = null;
         MediaController.SavedFilterState savedFilterState = null;
@@ -11388,10 +11409,6 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         boolean hasChanged = false;
         MediaController.MediaEditState entry = (MediaController.MediaEditState) imagesArrLocals.get(currentIndex);
         if (currentEditMode == EDIT_MODE_CROP || currentEditMode == EDIT_MODE_NONE && sendPhotoType == SELECT_TYPE_AVATAR) {
-            photoCropView.makeCrop(entry);
-            if (entry.cropState == null && currentEditMode != EDIT_MODE_CROP) {
-                return;
-            }
             if (isCurrentVideo) {
                 if (!TextUtils.isEmpty(entry.filterPath)) {
                     bitmap = ImageLoader.loadBitmap(entry.filterPath, null, thumbSize, thumbSize, true);
@@ -11408,6 +11425,20 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             } else {
                 bitmap = centerImage.getBitmap();
                 orientation = new int[]{centerImage.getOrientation(), centerImage.getInvert()};
+            }
+            if (bitmap == null && isCurrentVideo) {
+                return false;
+            }
+            // Mercurygram: commit the crop only once the bake is known to succeed;
+            // upstream ran makeCrop first, so a failed bake left the viewer showing a
+            // crop that was never applied to the sent file.
+            photoCropView.makeCrop(entry);
+            if (entry.cropState == null) {
+                return currentEditMode != EDIT_MODE_CROP;
+            }
+            currentCroppedBitmap = it.belloworld.mercurygram.MgPhotoCrop.bakeCropForViewer(entry, bitmap, orientation, AndroidUtilities.getPhotoSize());
+            if (currentCroppedBitmap == null) {
+                return false;
             }
         } else if (currentEditMode == EDIT_MODE_FILTER) {
             bitmap = photoFilterView.getBitmap();
@@ -11449,10 +11480,10 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     stickerMakerView.updateOutlinePath(bitmap);
                 }
             }
-            return;
+            return true;
         }
-        if (bitmap == null) {
-            return;
+        if (bitmap == null && currentCroppedBitmap == null) {
+            return false;
         }
 
         if (entry.thumbPath != null) {
@@ -11470,12 +11501,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             editState.croppedMediaEntities = entry.croppedMediaEntities;
 
             if (entry.cropState != null) {
-                // Mercurygram: prefer cutting the crop out of the source at full resolution;
-                // `bitmap` is already downscaled to the send size, so cropping it loses detail.
-                Bitmap croppedBitmap = it.belloworld.mercurygram.MgPhotoCrop.renderHighQualityCrop(entry, AndroidUtilities.getPhotoSize());
-                if (croppedBitmap == null) {
-                    croppedBitmap = createCroppedBitmap(bitmap, entry.cropState, orientation, true);
-                }
+                Bitmap croppedBitmap = currentCroppedBitmap;
                 if (entry.paintPath != null) {
                     Bitmap paintBitmap = BitmapFactory.decodeFile(entry.fullPaintPath);
                     Bitmap croppedPaintBitmap = createCroppedBitmap(paintBitmap, entry.cropState, null, false);
@@ -11506,6 +11532,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 if (currentEditMode == EDIT_MODE_NONE && isCurrentVideo) {
                     bitmap.recycle();
                     bitmap = croppedBitmap;
+                } else if (croppedBitmap != null && croppedBitmap != bitmap) {
+                    // Mercurygram: the crop is baked at the send size now, not at the thumb
+                    // size, so leaving it to the collector holds tens of MB right before the
+                    // encodes that follow.
+                    croppedBitmap.recycle();
+                    currentCroppedBitmap = null;
                 }
             }
         } else if (currentEditMode == EDIT_MODE_FILTER) {
@@ -11741,6 +11773,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         }
         ignoreDidSetImage = false;
         centerImage.setParentView(containerView);
+        return true;
     }
 
     private void setPhotoChecked() {
@@ -15640,7 +15673,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 
         int prevIndex = currentIndex;
         currentIndex = index;
-        setIsAboutToSwitchToIndex(currentIndex, init, animateCaption);
+        setIsAboutToSwitchToIndex(currentIndex, init, animateCaption, force);
 
         boolean isVideo = false;
         boolean isLivePhoto = false;
@@ -15661,7 +15694,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             }
             MessageObject newMessageObject = imagesArr.get(currentIndex);
             final boolean noforwards = newMessageObject != null && (MessagesController.getInstance(currentAccount).isPeerNoForwards(newMessageObject.getDialogId()) || (newMessageObject.messageOwner != null && newMessageObject.messageOwner.noforwards) || newMessageObject.hasRevealedExtendedMedia());
-            sameImage = init && currentMessageObject != null && currentMessageObject.getId() == newMessageObject.getId();
+            sameImage = (init || force) && currentMessageObject != null && currentMessageObject.getId() == newMessageObject.getId();
             if (sameImage) {
                 newMessageObject.putInDownloadsStore = currentMessageObject.putInDownloadsStore;
             }
@@ -18087,6 +18120,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 return;
             }
             if (currentEditMode == EDIT_MODE_CROP) {
+                if (photoCropView != null) {
+                    photoCropView.cropView.mgDetachTransform();
+                }
                 cropTransform.setViewTransform(previousHasTransform, previousCropPx, previousCropPy, previousCropRotation, previousCropOrientation, previousCropScale, 1.0f, 1.0f, previousCropPw, previousCropPh, 0, 0, previousCropMirrored);
             }
             if (currentEditMode == EDIT_MODE_STICKER_MASK) {
@@ -18812,8 +18848,18 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         float w = centerImage.getImageWidth();
         float h = centerImage.getImageHeight();
         if (editState.cropState != null) {
-            w *= editState.cropState.cropPw;
-            h *= editState.cropState.cropPh;
+            // Mercurygram: in paint/filter the view already shows the cropped bitmap fitted
+            // to the container, so scaling the uncropped display size is off by the fit.
+            float bw = centerImage.getBitmapWidth() * editState.cropState.cropPw;
+            float bh = centerImage.getBitmapHeight() * editState.cropState.cropPh;
+            if ((currentEditMode == EDIT_MODE_PAINT || currentEditMode == EDIT_MODE_FILTER) && cropTransform.hasViewTransform() && bw > 0 && bh > 0) {
+                float fit = Math.min(getContainerViewWidth() / bw, getContainerViewHeight() / bh);
+                w = bw * fit;
+                h = bh * fit;
+            } else {
+                w *= editState.cropState.cropPw;
+                h *= editState.cropState.cropPh;
+            }
         }
         int maxW = sendPhotoType == SELECT_TYPE_STICKER ? (int) (scale * w) : (int) (w * scale - getContainerViewWidth()) / 2;
         int maxH = sendPhotoType == SELECT_TYPE_STICKER ? (int) (scale * h) : (int) (h * scale - getContainerViewHeight()) / 2;
@@ -19884,8 +19930,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 int trueH = getContainerViewHeight(true, 0);
                 trueH -= photoPaintView.getEmojiPadding(Math.abs(AndroidUtilities.displaySize.y + AndroidUtilities.statusBarHeight - trueH) < dp(20));
                 int h = getContainerViewHeight(false, 0);
-                canvas.translate(0, (trueH - h) / 2f * (1f - photoPaintView.adjustPanLayoutHelperProgress()));
-                centerImageTransform.preTranslate(0, (trueH - h) / 2f * (1f - photoPaintView.adjustPanLayoutHelperProgress()));
+                float extraY = (trueH - h) / 2f * (1f - photoPaintView.adjustPanLayoutHelperProgress());
+                canvas.translate(0, extraY);
+                centerImageTransform.preTranslate(0, extraY);
             }
 
             if (!pipAnimationInProgress && (!drawTextureView || !textureUploaded && !videoSizeSet || !videoCrossfadeStarted || videoCrossfadeAlpha != 1.0f)) {

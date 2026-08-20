@@ -51,16 +51,6 @@ jobs:
         with:
           ref: ${{ inputs.branch }}
           submodules: recursive
-
-      - name: Configure Gradle optimizations
-        run: |
-          sed -i '/^org.gradle.caching=/d' gradle.properties
-          sed -i '/^org.gradle.configuration-cache=/d' gradle.properties
-
-          printf "\norg.gradle.caching=true\n" >> gradle.properties
-
-          echo "Gradle properties:"
-          cat gradle.properties
           
       - name: Extract Android SDK versions
         id: sdk
@@ -122,7 +112,10 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build APK
-        run: ./gradlew :TMessagesProj_App${{ inputs.app-type }}:assembleAfat${{ inputs.release-type }}
+        run: |
+          ./gradlew \
+            --build-cache \
+            :TMessagesProj_App${{ inputs.app-type }}:assembleAfat${{ inputs.release-type }}
 
       - name: Upload APK
         uses: actions/upload-artifact@v7

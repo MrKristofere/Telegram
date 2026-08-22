@@ -51,6 +51,14 @@ jobs:
         with:
           ref: ${{ inputs.branch }}
           submodules: recursive
+
+      - name: Configure Gradle optimizations
+        run: |
+          sed -i '/^org.gradle.caching=/d' gradle.properties
+          sed -i '/^org.gradle.configuration-cache=/d' gradle.properties
+          printf "\norg.gradle.caching=true\n" >> gradle.properties
+          echo "Gradle properties:"
+          cat gradle.properties
           
       - name: Extract Android SDK versions
         id: sdk
@@ -78,7 +86,7 @@ jobs:
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2.23
         with:
-          key: android-ndk
+          key: android-ndk-${{ steps.sdk.outputs.ndk }}
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6

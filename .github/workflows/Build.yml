@@ -91,16 +91,6 @@ jobs:
             ndk;${{ steps.sdk.outputs.ndk }}
             platforms;android-${{ steps.sdk.outputs.compile_sdk }}
             
-      - name: Set up ccache
-        uses: hendrikmuhs/ccache-action@v1.2.23
-        with:
-          key: android-ndk-${{ steps.sdk.outputs.ndk }}
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          cache-read-only: false
-
       - name: Configure Android SDK Path
         run: |
           echo "sdk.dir=${ANDROID_HOME}" >> local.properties
@@ -126,6 +116,16 @@ jobs:
 
       - name: Make gradlew executable
         run: chmod +x gradlew
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2.23
+        with:
+          key: android-ndk-${{ steps.sdk.outputs.ndk }}
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
 
       - name: Build APK
         run: |

@@ -52,23 +52,29 @@ jobs:
           ref: ${{ inputs.branch }}
           submodules: recursive
 
-      - name: Fix jlatexmath Gradle build
+      - name: Inspect jlatexmath
         run: |
-          cat > TMessagesProj/lib/jlatexmath/build.gradle <<'EOF'
-          apply plugin: 'com.android.library'
-          repositories {
-              google()
-              mavenCentral()
-          }
-          android {
-              namespace 'ru.noties.jlatexmath'
-              compileSdkVersion 35
+          echo "::group::JLatexMath"
 
-              defaultConfig {
-                  minSdkVersion 21
-              }
-          }
-          EOF
+          echo "=== projectDir ==="
+          ls -la TMessagesProj/lib/jlatexmath/jlatexmath
+
+          echo "=== build.gradle ==="
+          cat TMessagesProj/lib/jlatexmath/jlatexmath/build.gradle
+
+          echo "=== settings.gradle ==="
+          grep -n -A2 -B2 "jlatexmath" settings.gradle || true
+
+          echo "=== classes ==="
+          find TMessagesProj/lib/jlatexmath/jlatexmath/src/main/java \
+            -type f \
+            \( -name 'JLatexMathAndroid.java' -o -name 'JLatexMathDrawable.java' \) \
+            -print
+
+          echo "=== Gradle tasks ==="
+          ./gradlew :jlatexmath:tasks --all --no-configuration-cache
+
+          echo "::endgroup::"
 
       - name: Configure Gradle optimizations
         run: |

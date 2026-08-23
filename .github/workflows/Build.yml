@@ -56,7 +56,10 @@ jobs:
         run: |
           cat > TMessagesProj/lib/jlatexmath/build.gradle <<'EOF'
           apply plugin: 'com.android.library'
-
+          repositories {
+              google()
+              mavenCentral()
+          }
           android {
               namespace 'ru.noties.jlatexmath'
               compileSdkVersion 35

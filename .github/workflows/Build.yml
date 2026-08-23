@@ -52,29 +52,13 @@ jobs:
           ref: ${{ inputs.branch }}
           submodules: recursive
 
-      - name: Inspect jlatexmath
+      - name: Configure jlatexmath Gradle module
         run: |
-          echo "::group::JLatexMath"
+          grep -qF "include ':jlatexmath'" settings.gradle || \
+            echo "include ':jlatexmath'" >> settings.gradle
 
-          echo "=== projectDir ==="
-          ls -la TMessagesProj/lib/jlatexmath/jlatexmath
-
-          echo "=== build.gradle ==="
-          cat TMessagesProj/lib/jlatexmath/jlatexmath/build.gradle
-
-          echo "=== settings.gradle ==="
-          grep -n -A2 -B2 "jlatexmath" settings.gradle || true
-
-          echo "=== classes ==="
-          find TMessagesProj/lib/jlatexmath/jlatexmath/src/main/java \
-            -type f \
-            \( -name 'JLatexMathAndroid.java' -o -name 'JLatexMathDrawable.java' \) \
-            -print
-
-          echo "=== Gradle tasks ==="
-          ./gradlew :jlatexmath:tasks --all --no-configuration-cache
-
-          echo "::endgroup::"
+          grep -qF "project(':jlatexmath').projectDir = file('TMessagesProj/lib/jlatexmath/jlatexmath')" settings.gradle || \
+            echo "project(':jlatexmath').projectDir = file('TMessagesProj/lib/jlatexmath/jlatexmath')" >> settings.gradle
 
       - name: Configure Gradle optimizations
         run: |

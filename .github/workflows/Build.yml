@@ -52,28 +52,20 @@ jobs:
           ref: ${{ inputs.branch }}
           submodules: recursive
 
-      - name: Patch jlatexmath for CI
+      - name: Fix jlatexmath Gradle build
         run: |
-          JLATEX_BUILD="TMessagesProj/lib/jlatexmath/build.gradle"
+          cat > TMessagesProj/lib/jlatexmath/build.gradle <<'EOF'
+          apply plugin: 'com.android.library'
 
-          python3 - <<'PY'
-          from pathlib import Path
+          android {
+              namespace 'ru.noties.jlatexmath'
+              compileSdkVersion 35
 
-          path = Path("TMessagesProj/lib/jlatexmath/build.gradle")
-          text = path.read_text()
-
-          old = """wrapper {
-              gradleVersion '5.5.1'
-              distributionType 'all'
+              defaultConfig {
+                  minSdkVersion 21
+              }
           }
-          """
-
-          if old not in text:
-              raise SystemExit("Expected jlatexmath wrapper block was not found")
-
-          path.write_text(text.replace(old, ""))
-          print("Removed jlatexmath wrapper block for CI")
-          PY
+          EOF
 
       - name: Configure Gradle optimizations
         run: |

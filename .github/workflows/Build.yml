@@ -52,9 +52,28 @@ jobs:
           ref: ${{ inputs.branch }}
           submodules: recursive
 
-      - name: Checkout Library
+      - name: Patch jlatexmath for CI
         run: |
-          git submodule update --init 'TMessagesProj/lib/*'
+          JLATEX_BUILD="TMessagesProj/lib/jlatexmath/build.gradle"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("TMessagesProj/lib/jlatexmath/build.gradle")
+          text = path.read_text()
+
+          old = """wrapper {
+              gradleVersion '5.5.1'
+              distributionType 'all'
+          }
+          """
+
+          if old not in text:
+              raise SystemExit("Expected jlatexmath wrapper block was not found")
+
+          path.write_text(text.replace(old, ""))
+          print("Removed jlatexmath wrapper block for CI")
+          PY
 
       - name: Configure Gradle optimizations
         run: |

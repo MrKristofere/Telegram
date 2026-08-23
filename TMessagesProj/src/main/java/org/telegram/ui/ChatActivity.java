@@ -24937,7 +24937,8 @@ public class ChatActivity extends BaseFragment implements
                             continue;
                         }
                         if (postId < 0) continue;
-                        getMessagesController().ensureMessagesLoaded(did, postId, null);
+                        //                        getMessagesController().ensureMessagesLoaded(did, postId, null);
+                        markSponsoredAsRead(messageObject);
                     }
                 } catch (Exception e) {
                     FileLog.e(e, false);
@@ -24953,7 +24954,7 @@ public class ChatActivity extends BaseFragment implements
             if (notPushedSponsoredMessages != null) {
                 notPushedSponsoredMessages.clear();
             }
-            processNewMessages(res.messages, false);
+            // processNewMessages(res.messages, false);
         }
     }
 

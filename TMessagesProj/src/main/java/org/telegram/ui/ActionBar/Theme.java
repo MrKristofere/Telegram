@@ -1652,9 +1652,13 @@ public class Theme {
                 isDark = LIGHT;
             }
             if (isDark == UNKNOWN) {
-                String[] wallpaperLink = new String[1];
-                SparseIntArray colors = getThemeFileValues(new File(pathToFile), null, wallpaperLink);
-                checkIsDark(colors, this);
+                if (pathToFile == null) {
+                    isDark = isMonetNight() ? DARK : LIGHT;
+                } else {
+                    String[] wallpaperLink = new String[1];
+                    SparseIntArray colors = getThemeFileValues(new File(pathToFile), null, wallpaperLink);
+                    checkIsDark(colors, this);
+                }
             }
             return isDark == DARK;
         }

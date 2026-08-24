@@ -123,6 +123,19 @@ jobs:
         with:
           key: android-ndk-${{ steps.sdk.outputs.ndk }}
 
+      - name: Cache native CMake / NDK build
+        uses: actions/cache@v6
+        with:
+          path: |
+            TMessagesProj/.cxx
+            TMessagesProj/build/intermediates/cxx
+            TMessagesProj/build/intermediates/cmake
+            TMessagesProj/build/intermediates/ndkBuild
+          key: ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-${{ hashFiles('TMessagesProj/jni/**', 'TMessagesProj/**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-
+            ${{ runner.os }}-ndk-
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
         with:

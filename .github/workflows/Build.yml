@@ -53,6 +53,7 @@ jobs:
           submodules: recursive
 
       - name: Configure jlatexmath Gradle module
+        if: false
         run: |
           grep -qF "include ':jlatexmath'" settings.gradle || \
             echo "include ':jlatexmath'" >> settings.gradle

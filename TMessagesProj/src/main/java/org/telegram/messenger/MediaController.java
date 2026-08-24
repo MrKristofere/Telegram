@@ -5417,6 +5417,9 @@ public class MediaController implements AudioManager.OnAudioFocusChangeListener,
             if (id == NotificationCenter.fileLoaded || id == NotificationCenter.fileLoadFailed) {
                 String fileName = (String) args[0];
                 if (loadingMessageObjects.remove(fileName) != null) {
+                    if (id == NotificationCenter.fileLoaded && args.length > 1 && args[1] instanceof File) {
+                        downloadedFile = (File) args[1];
+                    }
                     waitingForFile.countDown();
                 }
             } else if (id == NotificationCenter.fileLoadProgressChanged) {

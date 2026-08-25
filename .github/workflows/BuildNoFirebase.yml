@@ -1,0 +1,372 @@
+name: Build Telegram Standalone FT - Firebase Free
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch name"
+        type: string
+        default: master
+        required: true
+
+env:
+  CCACHE_DIR: ~/.ccache
+  CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+  CCACHE_HARDLINK: "true"
+  CCACHE_NOHASHDIR: "true"
+  CCACHE_MAXSIZE: "10G"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.branch }}
+          submodules: recursive
+
+      - name: Set package name
+        shell: bash
+        run: |
+          set -e
+
+          sed -i -E \
+            's/^APP_PACKAGE=.*/APP_PACKAGE=ft.telegram.messenger/' \
+            gradle.properties
+
+          grep -q '^APP_PACKAGE=ft.telegram.messenger$' gradle.properties
+
+          echo "APP_PACKAGE=ft.telegram.messenger"
+
+      - name: Disable Firebase Gradle integration
+        shell: bash
+        run: |
+          set -e
+
+          sed -i \
+            "/apply plugin: 'com.google.gms.google-services'/d" \
+            TMessagesProj/build.gradle
+
+          sed -i \
+            "/apply plugin: 'com.google.gms.google-services'/d" \
+            TMessagesProj_AppStandalone/build.gradle
+
+          sed -i \
+            "/com.google.gms:google-services/d" \
+            build.gradle
+
+          sed -i \
+            "/com.google.firebase:firebase-crashlytics-gradle/d" \
+            build.gradle
+
+          sed -i \
+            "/com.google.firebase/d" \
+            TMessagesProj/build.gradle
+
+      - name: Remove Firebase configuration
+        shell: bash
+        run: |
+          set -e
+
+          rm -f TMessagesProj/google-services.json
+          rm -f TMessagesProj_AppStandalone/google-services.json
+
+      - name: Remove Firebase push service
+        shell: bash
+        run: |
+          set -e
+
+          rm -f \
+            TMessagesProj/src/main/java/org/telegram/messenger/GcmPushListenerService.java
+
+          sed -i \
+            '/android:name="org.telegram.messenger.GcmPushListenerService"/,+5d' \
+            TMessagesProj/config/release/AndroidManifest_standalone.xml
+
+          sed -i \
+            '/firebase_analytics_collection_deactivated/d' \
+            TMessagesProj/config/release/AndroidManifest_standalone.xml
+
+          sed -i \
+            '/google_analytics_adid_collection_enabled/d' \
+            TMessagesProj/config/release/AndroidManifest_standalone.xml
+
+      - name: Remove Firebase source imports
+        shell: bash
+        run: |
+          set -e
+
+          sed -i \
+            '/import com.google.firebase.appindexing.Action;/d' \
+            TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
+
+          sed -i \
+            '/import com.google.firebase.appindexing.FirebaseUserActions;/d' \
+            TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
+
+          sed -i \
+            '/import com.google.firebase.appindexing.builders.AssistActionBuilder;/d' \
+            TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java
+
+          sed -i \
+            '/import com.google.firebase.platforminfo.UserAgentPublisher;/d' \
+            TMessagesProj/src/main/java/org/telegram/ui/bots/BotStorage.java
+
+      - name: Replace Firebase provider
+        shell: bash
+        run: |
+          set -e
+
+          FILE="TMessagesProj/src/main/java/org/telegram/messenger/PushListenerController.java"
+          TMP="${FILE}.tmp"
+
+          awk '
+          BEGIN {
+              replacement = 0
+          }
+
+          /public final static class GooglePushListenerServiceProvider implements IPushListenerServiceProvider/ {
+              print "    public final static class GooglePushListenerServiceProvider implements IPushListenerServiceProvider {"
+              print "        public static final GooglePushListenerServiceProvider INSTANCE = new GooglePushListenerServiceProvider();"
+              print ""
+              print "        private GooglePushListenerServiceProvider() {}"
+              print ""
+              print "        @Override"
+              print "        public String getLogTitle() {"
+              print "            return \"Firebase disabled\";"
+              print "        }"
+              print ""
+              print "        @Override"
+              print "        public int getPushType() {"
+              print "            return PUSH_TYPE_FIREBASE;"
+              print "        }"
+              print ""
+              print "        @Override"
+              print "        public void onRequestPushToken() {"
+              print "            if (BuildVars.LOGS_ENABLED) {"
+              print "                FileLog.d(\"Firebase push disabled\");"
+              print "            }"
+              print "        }"
+              print ""
+              print "        @Override"
+              print "        public boolean hasServices() {"
+              print "            return false;"
+              print "        }"
+
+              replacement = 1
+              depth = 1
+              next
+          }
+
+          replacement == 1 {
+              opens = gsub(/\{/, "{")
+              closes = gsub(/\}/, "}")
+
+              depth += opens - closes
+
+              if (depth <= 0) {
+                  replacement = 0
+              }
+
+              next
+          }
+
+          {
+              print
+          }
+          ' "$FILE" > "$TMP"
+
+          mv "$TMP" "$FILE"
+
+          sed -i \
+            '/import com.google.firebase.FirebaseApp;/d' \
+            "$FILE"
+
+          sed -i \
+            '/import com.google.firebase.messaging.FirebaseMessaging;/d' \
+            "$FILE"
+
+      - name: Disable Firebase initialization
+        shell: bash
+        run: |
+          set -e
+
+          FILE="TMessagesProj/src/main/java/org/telegram/messenger/ApplicationLoader.java"
+
+          sed -i \
+            '/initPushServices();/d' \
+            "$FILE"
+
+          sed -i \
+            's/__FIREBASE_GENERATING_SINCE_/__PUSH_DISABLED_SINCE_/' \
+            "$FILE"
+
+      - name: Verify Firebase removal
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== Gradle ==="
+
+          if grep -RniE \
+            'google-services|firebase-messaging|firebase-datatransport|firebase-appindexing|firebase-crashlytics' \
+            build.gradle \
+            TMessagesProj/build.gradle \
+            TMessagesProj_AppStandalone/build.gradle; then
+
+            echo "ERROR: Firebase Gradle references remain."
+            exit 1
+          fi
+
+          echo "=== Java ==="
+
+          if grep -Rni \
+            'com.google.firebase' \
+            TMessagesProj/src/main/java; then
+
+            echo "ERROR: Firebase Java imports remain."
+            exit 1
+          fi
+
+          echo "=== Manifest ==="
+
+          if grep -niE \
+            'GcmPushListenerService|com.google.firebase|firebase_analytics|google_analytics' \
+            TMessagesProj/config/release/AndroidManifest_standalone.xml; then
+
+            echo "ERROR: Firebase Manifest references remain."
+            exit 1
+          fi
+
+          echo "Firebase-free patch verified."
+
+      - name: Configure Gradle
+        shell: bash
+        run: |
+          sed -i '/^org.gradle.caching=/d' gradle.properties
+          sed -i '/^org.gradle.configuration-cache=/d' gradle.properties
+
+          printf '\norg.gradle.caching=true\n' >> gradle.properties
+
+      - name: Extract Android SDK versions
+        id: sdk
+        shell: bash
+        run: |
+          BUILD_GRADLE="TMessagesProj_AppStandalone/build.gradle"
+
+          echo "build_tools=$(grep -oP "buildToolsVersion ['\"]\K[^'\"]+" "$BUILD_GRADLE")" >> "$GITHUB_OUTPUT"
+          echo "compile_sdk=$(grep -oP "compileSdk(?:Version)?\s*=?\s*\K\d+" "$BUILD_GRADLE")" >> "$GITHUB_OUTPUT"
+          echo "ndk=$(grep -oP "ndkVersion ['\"]\K[^'\"]+" "$BUILD_GRADLE")" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: temurin
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            build-tools;${{ steps.sdk.outputs.build_tools }}
+            ndk;${{ steps.sdk.outputs.ndk }}
+            platforms;android-${{ steps.sdk.outputs.compile_sdk }}
+
+      - name: Configure Android SDK path
+        run: |
+          echo "sdk.dir=${ANDROID_HOME}" >> local.properties
+
+      - name: Configure Gradle JVM
+        shell: bash
+        run: |
+          MEMORY_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+          MEMORY_GB=$((MEMORY_KB / 1024 / 1024))
+
+          if [ "$MEMORY_GB" -ge 12 ]; then
+            sed -i '/^org\.gradle\.jvmargs=/d' gradle.properties
+
+            echo "org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" \
+              >> gradle.properties
+          fi
+
+      - name: Fill BuildVars
+        shell: bash
+        run: |
+          FILE="TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java"
+
+          sed -i -E \
+            's/public static int APP_ID = [0-9]+;/public static int APP_ID = 6;/' \
+            "$FILE"
+
+          sed -i -E \
+            's/public static String APP_HASH = "[^"]*";/public static String APP_HASH = "eb06d4abfb49dc3eeb1aeb98ae0f581e";/' \
+            "$FILE"
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2.23
+        with:
+          key: android-ndk-${{ steps.sdk.outputs.ndk }}
+
+      - name: Cache native build
+        uses: actions/cache@v6
+        with:
+          path: |
+            TMessagesProj/.cxx
+            TMessagesProj/build/intermediates/cxx
+            TMessagesProj/build/intermediates/cmake
+            TMessagesProj/build/intermediates/ndkBuild
+          key: ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-${{ hashFiles('TMessagesProj/jni/**', 'TMessagesProj/**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-
+            ${{ runner.os }}-ndk-
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
+
+      - name: Build Standalone
+        run: |
+          ./gradlew \
+            --build-cache \
+            :TMessagesProj_AppStandalone:assembleAfatStandalone
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -e
+
+          APK=$(find TMessagesProj_AppStandalone/build/outputs -name "*.apk" | head -n 1)
+
+          test -n "$APK"
+
+          "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/aapt2" \
+            dump badging "$APK" |
+            grep -q "package: name='ft.telegram.messenger.web'"
+
+          echo "APK package: ft.telegram.messenger.web"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: telegram-standalone-ft-firebase-free
+          path: TMessagesProj_AppStandalone/build/outputs/**/*.apk
+          if-no-files-found: error
+          archive: false

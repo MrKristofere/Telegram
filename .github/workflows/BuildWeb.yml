@@ -2,6 +2,12 @@ name: Build Telegram Standalone Web
 
 on:
   workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch name"
+        type: string
+        default: master
+        required: true
 
 env:
   CCACHE_DIR: ~/.ccache
@@ -15,6 +21,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -29,6 +36,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.branch }}
           submodules: recursive
 
       - name: Configure package and Firebase
@@ -38,11 +46,15 @@ jobs:
           # Base package:
           # ft.telegram.messenger
           #
-          # Standalone buildType adds:
-          # .web
+          # Standalone adds applicationIdSuffix ".web"
           #
           # Final applicationId:
           # ft.telegram.messenger.web
+
+          if ! grep -q '^APP_PACKAGE=' gradle.properties; then
+            echo "ERROR: APP_PACKAGE not found in gradle.properties"
+            exit 1
+          fi
 
           sed -i \
             's/^APP_PACKAGE=.*/APP_PACKAGE=ft.telegram.messenger/' \
@@ -51,7 +63,7 @@ jobs:
           echo "APP_PACKAGE:"
           grep '^APP_PACKAGE=' gradle.properties
 
-          # Standalone does not use Google Services plugin.
+          # Do not apply Google Services to the Firebase-free build.
           sed -i \
             "/apply plugin: 'com.google.gms.google-services'/d" \
             TMessagesProj/build.gradle
@@ -60,12 +72,17 @@ jobs:
             "/apply plugin: 'com.google.gms.google-services'/d" \
             TMessagesProj_AppStandalone/build.gradle
 
-          echo "Google Services plugins remaining in Standalone:"
-          grep -RIn \
+          echo "Checking Google Services plugins..."
+
+          if grep -n \
             "com.google.gms.google-services" \
             TMessagesProj/build.gradle \
-            TMessagesProj_AppStandalone/build.gradle \
-            || true
+            TMessagesProj_AppStandalone/build.gradle; then
+            echo "ERROR: Google Services plugin is still enabled."
+            exit 1
+          fi
+
+          echo "Google Services disabled."
 
       - name: Configure Gradle optimizations
         run: |
@@ -113,6 +130,7 @@ jobs:
 
           if [ "$MEMORY_GB" -ge 12 ]; then
             sed -i '/^org\.gradle\.jvmargs=/d' gradle.properties
+
             echo "org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" >> gradle.properties
           fi
 

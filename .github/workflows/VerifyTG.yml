@@ -1,4 +1,4 @@
-name: Telegram Website APK Reproducible Build
+name: Telegram Android Reproducible Build
 
 on:
   workflow_dispatch:
@@ -14,19 +14,19 @@ on:
           - tag
 
       source:
-        description: "Commit SHA, tag, or branch depending on source_type"
+        description: "Commit SHA, tag, or branch"
         required: true
         type: string
         default: "7df875ed136ef9f5c6b5263fc1c7788948587f4d"
 
       latest_branch:
-        description: "Branch to use when source_type=latest"
+        description: "Branch when source_type=latest"
         required: true
         type: string
         default: "master"
 
       search_after:
-        description: "If build does not match, try subsequent commits"
+        description: "Try subsequent commits if the selected commit does not match"
         required: true
         type: boolean
         default: false
@@ -35,7 +35,7 @@ on:
         description: "Maximum subsequent commits to test"
         required: true
         type: number
-        default: 10
+        default: 5
 
 permissions:
   contents: read
@@ -44,9 +44,17 @@ env:
   TELEGRAM_REPO: https://github.com/DrKLO/Telegram.git
   TELEGRAM_APK_URL: https://telegram.org/dl/android/apk
 
+  # Build environment required by the current Telegram source.
+  GRADLE_VERSION: "8.11.1"
+  JDK_VERSION: "17"
+
+  ANDROID_API_LEVEL: "35"
+  ANDROID_BUILD_TOOLS: "35.0.0"
+  ANDROID_NDK_VERSION: "27.2.12479018"
+
 jobs:
   verify:
-    name: Verify Telegram Website APK
+    name: Telegram reproducible build
     runs-on: ubuntu-24.04
 
     steps:
@@ -62,16 +70,15 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/work"
 
       # ============================================================
-      # 2. Download APK directly from telegram.org
+      # 2. Download official APK
       # ============================================================
 
-      - name: Download official Telegram APK
+      - name: Download official APK
         working-directory: work
         run: |
           set -euo pipefail
 
-          echo "Downloading:"
-          echo "$TELEGRAM_APK_URL"
+          echo "Downloading official Telegram APK..."
 
           curl \
             --fail \
@@ -87,15 +94,15 @@ jobs:
           ls -lh telegram_official.apk
 
           echo
-          echo "SHA-256:"
+          echo "Official APK SHA-256:"
           sha256sum telegram_official.apk
 
       # ============================================================
-      # 3. Find Android build-tools / aapt
+      # 3. Install aapt
       # ============================================================
 
-      - name: Locate aapt
-        id: aapt
+      - name: Locate Android build tools
+        id: android_tools
         run: |
           set -euo pipefail
 
@@ -112,24 +119,25 @@ jobs:
             exit 1
           fi
 
-          echo "Using aapt:"
+          echo "AAPT:"
           echo "$AAPT"
 
           echo "aapt=$AAPT" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 4. Read APK metadata
+      # 4. Read APK version/build
       # ============================================================
 
-      - name: Read APK metadata
+      - name: Read official APK metadata
         id: apk
         working-directory: work
         run: |
           set -euo pipefail
 
           BADGING="$(
-            "${{ steps.aapt.outputs.aapt }}" \
-            dump badging telegram_official.apk
+            "${{ steps.android_tools.outputs.aapt }}" \
+            dump badging \
+            telegram_official.apk
           )"
 
           echo "$BADGING"
@@ -150,7 +158,7 @@ jobs:
           )"
 
           if [ -z "$PACKAGE" ]; then
-            echo "::error::Could not determine package name"
+            echo "::error::Could not determine package"
             exit 1
           fi
 
@@ -164,27 +172,27 @@ jobs:
             exit 1
           fi
 
-          echo
-          echo "======================================"
-          echo "Official APK metadata"
-          echo "======================================"
-          echo "Package:      $PACKAGE"
-          echo "Version:      $VERSION"
-          echo "Build:        $BUILD"
-          echo "======================================"
-
           if [ "$PACKAGE" != "org.telegram.messenger.web" ]; then
             echo "::error::Unexpected package: $PACKAGE"
             echo "Expected: org.telegram.messenger.web"
             exit 1
           fi
 
+          echo
+          echo "=========================================="
+          echo "Official Telegram APK"
+          echo "=========================================="
+          echo "Package: $PACKAGE"
+          echo "Version: $VERSION"
+          echo "Build:   $BUILD"
+          echo "=========================================="
+
           echo "package=$PACKAGE" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 5. Resolve requested source
+      # 5. Resolve source
       # ============================================================
 
       - name: Resolve source
@@ -197,61 +205,53 @@ jobs:
           set -euo pipefail
 
           case "$SOURCE_TYPE" in
-
             commit)
-              if [ -z "$SOURCE" ]; then
-                echo "::error::Commit SHA is required"
-                exit 1
-              fi
-
-              RESOLVED_SOURCE="$SOURCE"
+              RESOLVED="$SOURCE"
               ;;
 
             latest)
-              if [ -z "$LATEST_BRANCH" ]; then
-                echo "::error::Branch is required"
-                exit 1
-              fi
-
-              RESOLVED_SOURCE="$LATEST_BRANCH"
+              RESOLVED="$LATEST_BRANCH"
               ;;
 
             tag)
-              if [ -z "$SOURCE" ]; then
-                echo "::error::Tag is required"
-                exit 1
-              fi
-
-              RESOLVED_SOURCE="$SOURCE"
+              RESOLVED="$SOURCE"
               ;;
 
             *)
               echo "::error::Unknown source type: $SOURCE_TYPE"
               exit 1
               ;;
-
           esac
 
-          echo "Requested source:"
-          echo "$RESOLVED_SOURCE"
+          if [ -z "$RESOLVED" ]; then
+            echo "::error::Source is empty"
+            exit 1
+          fi
 
-          echo "resolved=$RESOLVED_SOURCE" >> "$GITHUB_OUTPUT"
+          echo "Source type:"
+          echo "$SOURCE_TYPE"
+
+          echo
+          echo "Requested source:"
+          echo "$RESOLVED"
+
+          echo "resolved=$RESOLVED" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 6. Clone Telegram repository
+      # 6. Clone Telegram source
+      #
+      # We intentionally use recursive + shallow submodules,
+      # matching the current Telegram build instructions.
       # ============================================================
 
       - name: Clone Telegram source
         working-directory: work
-        env:
-          RESOLVED_SOURCE: ${{ steps.source.outputs.resolved }}
         run: |
           set -euo pipefail
 
-          echo "Cloning Telegram repository..."
-
           git clone \
             --recursive \
+            --shallow-submodules \
             "$TELEGRAM_REPO" \
             telegram
 
@@ -262,20 +262,17 @@ jobs:
             --force \
             --prune
 
-          echo
-          echo "Checking out:"
-          echo "$RESOLVED_SOURCE"
-
-          git checkout "$RESOLVED_SOURCE"
+          git checkout "${{ steps.source.outputs.resolved }}"
 
           git submodule update \
             --init \
-            --recursive
+            --recursive \
+            --depth=1
 
           echo
-          echo "======================================"
-          echo "Resolved source"
-          echo "======================================"
+          echo "=========================================="
+          echo "Resolved Telegram source"
+          echo "=========================================="
 
           echo "Commit:"
           git rev-parse HEAD
@@ -292,120 +289,327 @@ jobs:
           echo "Commit subject:"
           git show -s --format='%s' HEAD
 
-          echo
-          echo "======================================"
+          echo "=========================================="
 
       # ============================================================
-      # 7. Verify source version if possible
+      # 7. Create our reproducible build Dockerfile
       # ============================================================
 
-      - name: Show Telegram build configuration
-        working-directory: work/telegram
+      - name: Create reproducible build Dockerfile
+        working-directory: work
         run: |
           set -euo pipefail
 
-          echo "Searching Telegram source for version/build information..."
+          cat > Dockerfile.telegram-build <<'EOF'
+          FROM gradle:8.11.1-jdk17
 
-          grep -R \
-            -E \
-            "12\.|versionName|VERSION_NAME|APP_VERSION|BUILD_VERSION|APP_BUILD" \
-            TMessagesProj \
-            --include='*.java' \
-            --include='*.gradle' \
-            --include='*.gradle.kts' \
-            2>/dev/null \
-            | head -100 \
-            || true
+          ENV DEBIAN_FRONTEND=noninteractive
+
+          ENV ANDROID_HOME=/opt/android-sdk
+          ENV ANDROID_SDK_ROOT=/opt/android-sdk
+
+          ENV ANDROID_API_LEVEL=35
+          ENV ANDROID_BUILD_TOOLS=35.0.0
+          ENV ANDROID_NDK_VERSION=27.2.12479018
+
+          ENV PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/build-tools/35.0.0:$PATH
+
+          RUN apt-get update && \
+              apt-get install -y --no-install-recommends \
+                curl \
+                unzip \
+                git \
+                ca-certificates \
+                python3 \
+                python3-pip \
+                file \
+                zip \
+                rsync \
+                build-essential \
+                cmake \
+                ninja-build \
+                pkg-config && \
+              rm -rf /var/lib/apt/lists/*
+
+          RUN mkdir -p "$ANDROID_HOME"
+
+          ENV CMDLINE_TOOLS_URL=https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+
+          RUN mkdir -p /tmp/cmdline-tools && \
+              curl -fsSL "$CMDLINE_TOOLS_URL" \
+                -o /tmp/cmdline-tools.zip && \
+              unzip -q /tmp/cmdline-tools.zip \
+                -d /tmp/cmdline-tools && \
+              mkdir -p "$ANDROID_HOME/cmdline-tools" && \
+              mv /tmp/cmdline-tools/cmdline-tools \
+                "$ANDROID_HOME/cmdline-tools/latest" && \
+              rm -rf /tmp/cmdline-tools /tmp/cmdline-tools.zip
+
+          RUN yes | sdkmanager --licenses >/dev/null || true
+
+          RUN sdkmanager \
+                "platform-tools" \
+                "platforms;android-35" \
+                "build-tools;35.0.0" \
+                "ndk;27.2.12479018"
+
+          ENV ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018
+
+          ENV PATH=$ANDROID_NDK_HOME:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+
+          WORKDIR /home/gradle
+
+          RUN java -version && \
+              gradle --version && \
+              sdkmanager --list | head -100 && \
+              ls -la "$ANDROID_HOME/ndk"
+
+          CMD ["/bin/bash"]
+          EOF
+
+          echo "Dockerfile:"
+          cat Dockerfile.telegram-build
 
       # ============================================================
-      # 8. Build Docker image
+      # 8. Build our toolchain image
       # ============================================================
 
-      - name: Build Telegram Docker image
-        working-directory: work/telegram
+      - name: Build Telegram build environment
+        working-directory: work
         run: |
           set -euo pipefail
-
-          echo "Building Docker image..."
 
           docker build \
-            --tag "telegram-reproducible:${GITHUB_SHA}" \
+            --file Dockerfile.telegram-build \
+            --tag telegram-reproducible-toolchain:latest \
             .
 
       # ============================================================
-      # 9. Run reproducible Telegram build
+      # 9. Verify toolchain inside Docker
       # ============================================================
 
-      - name: Build Telegram inside Docker
-        working-directory: work/telegram
+      - name: Verify Docker toolchain
         run: |
           set -euo pipefail
-
-          echo "Starting Telegram Docker build..."
 
           docker run \
             --rm \
-            --volume "$PWD:/home/source" \
-            "telegram-reproducible:${GITHUB_SHA}"
+            telegram-reproducible-toolchain:latest \
+            bash -lc '
+              set -e
+
+              echo "=========================================="
+              echo "Build environment"
+              echo "=========================================="
+
+              echo
+              echo "Java:"
+              java -version
+
+              echo
+              echo "Gradle:"
+              gradle --version
+
+              echo
+              echo "Android SDK:"
+              ls -la "$ANDROID_HOME/platforms"
+
+              echo
+              echo "Build Tools:"
+              ls -la "$ANDROID_HOME/build-tools"
+
+              echo
+              echo "NDK:"
+              ls -la "$ANDROID_HOME/ndk"
+
+              echo
+              echo "NDK version:"
+              cat "$ANDROID_NDK_HOME/source.properties"
+
+              echo "=========================================="
+            '
 
       # ============================================================
-      # 10. Find generated APK
+      # 10. Build selected commit
       # ============================================================
 
-      - name: Locate generated standalone APK
-        working-directory: work/telegram
+      - name: Build Telegram
+        id: build
+        working-directory: work
         run: |
           set -euo pipefail
 
-          EXPECTED="TMessagesProj/build/outputs/apk/afat/standalone/app.apk"
+          rm -rf telegram/TMessagesProj/build
+          rm -rf telegram/TMessagesProj_App*/build
 
-          echo "Expected APK:"
-          echo "$EXPECTED"
+          docker run \
+            --rm \
+            --volume "$PWD/telegram:/home/source" \
+            --workdir /home/source \
+            telegram-reproducible-toolchain:latest \
+            bash -lc '
+              set -euo pipefail
 
-          if [ ! -f "$EXPECTED" ]; then
-            echo "::error::Expected standalone APK was not generated."
+              echo "=========================================="
+              echo "Building Telegram"
+              echo "=========================================="
 
-            echo
-            echo "Available APK files:"
-            find TMessagesProj/build/outputs/apk \
+              echo
+              echo "Commit:"
+              git rev-parse HEAD
+
+              echo
+              echo "Java:"
+              java -version
+
+              echo
+              echo "Gradle:"
+              gradle --version
+
+              echo
+              echo "NDK:"
+              cat "$ANDROID_NDK_HOME/source.properties"
+
+              echo
+              echo "SDK:"
+              ls "$ANDROID_HOME/platforms/android-35"
+
+              echo
+              echo "=========================================="
+              echo "Starting build"
+              echo "=========================================="
+
+              mkdir -p /home/source/TMessagesProj/build/outputs/apk
+              mkdir -p /home/gradle/source
+
+              cp -R /home/source/. /home/gradle/source
+
+              cd /home/gradle/source
+
+              gradle \
+                :TMessagesProj_AppStandalone:assembleAfatStandalone \
+                --no-daemon
+
+              cp -R \
+                TMessagesProj_AppStandalone/build/outputs/apk/. \
+                /home/source/TMessagesProj/build/outputs/apk/
+
+              echo
+              echo "Build completed."
+            '
+
+      # ============================================================
+      # 11. Locate standalone APK
+      # ============================================================
+
+      - name: Locate built standalone APK
+        working-directory: work
+        run: |
+          set -euo pipefail
+
+          echo "Searching generated APKs..."
+
+          find telegram/TMessagesProj/build/outputs/apk \
+            -type f \
+            -name '*.apk' \
+            -print \
+            | sort
+
+          APK="$(
+            find telegram/TMessagesProj/build/outputs/apk \
               -type f \
-              -name '*.apk' \
-              -print \
-              | sort
+              -path '*/standalone/app.apk' \
+              | head -n 1
+          )"
 
+          if [ -z "$APK" ]; then
+            echo "::error::Standalone app.apk was not generated"
             exit 1
           fi
 
+          echo
+          echo "Selected APK:"
+          echo "$APK"
+
           cp \
-            "$EXPECTED" \
-            "$GITHUB_WORKSPACE/work/telegram_built.apk"
+            "$APK" \
+            telegram_built.apk
 
           echo
-          echo "Generated APK:"
-          ls -lh "$GITHUB_WORKSPACE/work/telegram_built.apk"
+          echo "Built APK:"
+          ls -lh telegram_built.apk
 
           echo
-          echo "SHA-256:"
-          sha256sum "$GITHUB_WORKSPACE/work/telegram_built.apk"
+          echo "Built APK SHA-256:"
+          sha256sum telegram_built.apk
 
       # ============================================================
-      # 11. Compare APKs using Telegram apkdiff.py
+      # 12. Verify built APK metadata
       # ============================================================
 
-      - name: Run Telegram apkdiff
-        id: apkdiff
-        working-directory: work/telegram
+      - name: Verify built APK metadata
+        working-directory: work
         run: |
           set -euo pipefail
 
-          echo "Comparing official APK with reproducible build..."
+          BADGING="$(
+            "${{ steps.android_tools.outputs.aapt }}" \
+            dump badging \
+            telegram_built.apk
+          )"
+
+          echo "$BADGING"
+
+          PACKAGE="$(
+            echo "$BADGING" |
+            sed -n "s/^package: name='\([^']*\)'.*/\1/p"
+          )"
+
+          VERSION="$(
+            echo "$BADGING" |
+            sed -n "s/.*versionName='\([^']*\)'.*/\1/p"
+          )"
+
+          BUILD="$(
+            echo "$BADGING" |
+            sed -n "s/.*versionCode='\([^']*\)'.*/\1/p"
+          )"
+
+          echo
+          echo "Built package: $PACKAGE"
+          echo "Built version: $VERSION"
+          echo "Built build:   $BUILD"
+
+          if [ "$PACKAGE" != "${{ steps.apk.outputs.package }}" ]; then
+            echo "::error::Package mismatch"
+            exit 1
+          fi
+
+          if [ "$VERSION" != "${{ steps.apk.outputs.version }}" ]; then
+            echo "::error::versionName mismatch"
+            exit 1
+          fi
+
+          if [ "$BUILD" != "${{ steps.apk.outputs.build }}" ]; then
+            echo "::error::versionCode mismatch"
+            exit 1
+          fi
+
+      # ============================================================
+      # 13. Compare with official APK
+      # ============================================================
+
+      - name: Run Telegram apkdiff.py
+        working-directory: work/telegram
+        run: |
+          set -euo pipefail
 
           python3 apkdiff.py \
             "$GITHUB_WORKSPACE/work/telegram_official.apk" \
             "$GITHUB_WORKSPACE/work/telegram_built.apk"
 
       # ============================================================
-      # 12. Final verification report
+      # 14. Final report
       # ============================================================
 
       - name: Verification result
@@ -419,26 +623,24 @@ jobs:
           echo "       REPRODUCIBLE BUILD VERIFIED"
           echo "================================================"
           echo
-          echo "Telegram version:"
-          echo "${{ steps.apk.outputs.version }}"
+          echo "Telegram:"
+          echo "  Version: ${{ steps.apk.outputs.version }}"
+          echo "  Build:   ${{ steps.apk.outputs.build }}"
+          echo "  Package: ${{ steps.apk.outputs.package }}"
           echo
-          echo "Telegram build:"
-          echo "${{ steps.apk.outputs.build }}"
+          echo "Source:"
+          echo "  Mode:      ${{ inputs.source_type }}"
+          echo "  Requested: ${{ inputs.source }}"
+          echo "  Commit:    $(git -C telegram rev-parse HEAD)"
+          echo "  Date:      $(git -C telegram show -s --format='%ci' HEAD)"
+          echo "  Subject:   $(git -C telegram show -s --format='%s' HEAD)"
           echo
-          echo "Package:"
-          echo "${{ steps.apk.outputs.package }}"
-          echo
-          echo "Source mode:"
-          echo "${{ inputs.source_type }}"
-          echo
-          echo "Requested source:"
-          echo "${{ inputs.source }}"
-          echo
-          echo "Resolved commit:"
-          git -C telegram rev-parse HEAD
-          echo
-          echo "Commit subject:"
-          git -C telegram show -s --format='%s' HEAD
+          echo "Build environment:"
+          echo "  JDK:          $JDK_VERSION"
+          echo "  Gradle:       $GRADLE_VERSION"
+          echo "  Android SDK:  $ANDROID_API_LEVEL"
+          echo "  Build Tools:  $ANDROID_BUILD_TOOLS"
+          echo "  Android NDK:  $ANDROID_NDK_VERSION"
           echo
           echo "Official APK SHA-256:"
           sha256sum telegram_official.apk
@@ -446,15 +648,15 @@ jobs:
           echo "Built APK SHA-256:"
           sha256sum telegram_built.apk
           echo
-          echo "Telegram apkdiff.py: PASS"
+          echo "apkdiff.py: PASS"
           echo
           echo "================================================"
 
       # ============================================================
-      # 13. Upload APKs for audit
+      # 15. Upload artifacts
       # ============================================================
 
-      - name: Upload verification artifacts
+      - name: Upload APK artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -462,5 +664,20 @@ jobs:
           path: |
             work/telegram_official.apk
             work/telegram_built.apk
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ============================================================
+      # 16. Upload build logs / metadata
+      # ============================================================
+
+      - name: Upload build metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-build-metadata-${{ github.run_id }}
+          path: |
+            work/telegram/.git
+            work/Dockerfile.telegram-build
           if-no-files-found: warn
           retention-days: 30

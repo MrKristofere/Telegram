@@ -1,4 +1,4 @@
-name: Telegram Android Reproducible Build
+name: Telegram Web APK Reproducible Build
 
 on:
   workflow_dispatch:
@@ -25,18 +25,6 @@ on:
         type: string
         default: "master"
 
-      search_after:
-        description: "Try subsequent commits if the selected commit does not match"
-        required: true
-        type: boolean
-        default: false
-
-      max_commits:
-        description: "Maximum subsequent commits to test"
-        required: true
-        type: number
-        default: 5
-
 permissions:
   contents: read
 
@@ -44,17 +32,22 @@ env:
   TELEGRAM_REPO: https://github.com/DrKLO/Telegram.git
   TELEGRAM_APK_URL: https://telegram.org/dl/android/apk
 
-  # Build environment required by the current Telegram source.
-  GRADLE_VERSION: "8.11.1"
   JDK_VERSION: "17"
+
+  GRADLE_VERSION: "8.11.1"
 
   ANDROID_API_LEVEL: "35"
   ANDROID_BUILD_TOOLS: "35.0.0"
+
+  ANDROID_NDK_VERSION_OLD: "21.4.7075529"
+  ANDROID_NDK_VERSION_MIDDLE: "23.2.8568313"
   ANDROID_NDK_VERSION: "27.2.12479018"
 
+  ANDROID_CMAKE_VERSION: "3.10.2.4988404"
+
 jobs:
-  verify:
-    name: Telegram reproducible build
+  reproducible-build:
+    name: Verify Telegram Web APK
     runs-on: ubuntu-24.04
 
     steps:
@@ -70,10 +63,10 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/work"
 
       # ============================================================
-      # 2. Download official APK
+      # 2. Download APK directly from Telegram website
       # ============================================================
 
-      - name: Download official APK
+      - name: Download official Telegram APK
         working-directory: work
         run: |
           set -euo pipefail
@@ -98,11 +91,11 @@ jobs:
           sha256sum telegram_official.apk
 
       # ============================================================
-      # 3. Install aapt
+      # 3. Install host Android tools needed to inspect APK
       # ============================================================
 
-      - name: Locate Android build tools
-        id: android_tools
+      - name: Locate host aapt
+        id: host_tools
         run: |
           set -euo pipefail
 
@@ -119,13 +112,10 @@ jobs:
             exit 1
           fi
 
-          echo "AAPT:"
-          echo "$AAPT"
-
           echo "aapt=$AAPT" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 4. Read APK version/build
+      # 4. Read official APK metadata
       # ============================================================
 
       - name: Read official APK metadata
@@ -135,7 +125,7 @@ jobs:
           set -euo pipefail
 
           BADGING="$(
-            "${{ steps.android_tools.outputs.aapt }}" \
+            "${{ steps.host_tools.outputs.aapt }}" \
             dump badging \
             telegram_official.apk
           )"
@@ -158,23 +148,17 @@ jobs:
           )"
 
           if [ -z "$PACKAGE" ]; then
-            echo "::error::Could not determine package"
+            echo "::error::Could not determine APK package"
             exit 1
           fi
 
           if [ -z "$VERSION" ]; then
-            echo "::error::Could not determine versionName"
+            echo "::error::Could not determine APK versionName"
             exit 1
           fi
 
           if [ -z "$BUILD" ]; then
-            echo "::error::Could not determine versionCode"
-            exit 1
-          fi
-
-          if [ "$PACKAGE" != "org.telegram.messenger.web" ]; then
-            echo "::error::Unexpected package: $PACKAGE"
-            echo "Expected: org.telegram.messenger.web"
+            echo "::error::Could not determine APK versionCode"
             exit 1
           fi
 
@@ -187,12 +171,18 @@ jobs:
           echo "Build:   $BUILD"
           echo "=========================================="
 
+          if [ "$PACKAGE" != "org.telegram.messenger.web" ]; then
+            echo "::error::Unexpected package: $PACKAGE"
+            echo "Expected: org.telegram.messenger.web"
+            exit 1
+          fi
+
           echo "package=$PACKAGE" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 5. Resolve source
+      # 5. Resolve requested source
       # ============================================================
 
       - name: Resolve source
@@ -224,7 +214,7 @@ jobs:
           esac
 
           if [ -z "$RESOLVED" ]; then
-            echo "::error::Source is empty"
+            echo "::error::Resolved source is empty"
             exit 1
           fi
 
@@ -238,10 +228,7 @@ jobs:
           echo "resolved=$RESOLVED" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 6. Clone Telegram source
-      #
-      # We intentionally use recursive + shallow submodules,
-      # matching the current Telegram build instructions.
+      # 6. Clone Telegram repository
       # ============================================================
 
       - name: Clone Telegram source
@@ -289,10 +276,11 @@ jobs:
           echo "Commit subject:"
           git show -s --format='%s' HEAD
 
+          echo
           echo "=========================================="
 
       # ============================================================
-      # 7. Create our reproducible build Dockerfile
+      # 7. Create build Dockerfile
       # ============================================================
 
       - name: Create reproducible build Dockerfile
@@ -300,7 +288,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          cat > Dockerfile.telegram-build <<'EOF'
+          cat > Dockerfile.telegram-build <<'DOCKERFILE'
           FROM gradle:8.11.1-jdk17
 
           ENV DEBIAN_FRONTEND=noninteractive
@@ -310,9 +298,17 @@ jobs:
 
           ENV ANDROID_API_LEVEL=35
           ENV ANDROID_BUILD_TOOLS=35.0.0
+
+          ENV ANDROID_NDK_VERSION_OLD=21.4.7075529
+          ENV ANDROID_NDK_VERSION_MIDDLE=23.2.8568313
           ENV ANDROID_NDK_VERSION=27.2.12479018
 
-          ENV PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/build-tools/35.0.0:$PATH
+          ENV ANDROID_CMAKE_VERSION=3.10.2.4988404
+
+          ENV ANDROID_NDK_HOME=/opt/android-sdk/ndk/27.2.12479018
+          ENV CMAKE_HOME=/opt/android-sdk/cmake/3.10.2.4988404
+
+          ENV PATH=/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/35.0.0:/opt/android-sdk/cmake/3.10.2.4988404/bin:/opt/android-sdk/ndk/27.2.12479018:$PATH
 
           RUN apt-get update && \
               apt-get install -y --no-install-recommends \
@@ -321,15 +317,23 @@ jobs:
                 git \
                 ca-certificates \
                 python3 \
-                python3-pip \
                 file \
                 zip \
                 rsync \
                 build-essential \
-                cmake \
                 ninja-build \
-                pkg-config && \
+                pkg-config \
+                ccache \
+                libc6-dev \
+                libstdc++6 \
+                zlib1g-dev \
+                libncurses5 \
+                libncurses6 \
+                lib32z1 \
+                lib32stdc++6 && \
               rm -rf /var/lib/apt/lists/*
+
+          RUN git config --global --add safe.directory /home/source
 
           RUN mkdir -p "$ANDROID_HOME"
 
@@ -351,30 +355,28 @@ jobs:
                 "platform-tools" \
                 "platforms;android-35" \
                 "build-tools;35.0.0" \
-                "ndk;27.2.12479018"
+                "ndk;21.4.7075529" \
+                "ndk;23.2.8568313" \
+                "ndk;27.2.12479018" \
+                "cmake;3.10.2.4988404"
 
-          ENV ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018
-
-          ENV PATH=$ANDROID_NDK_HOME:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
-
-          WORKDIR /home/gradle
+          WORKDIR /home/source
 
           RUN java -version && \
               gradle --version && \
-              sdkmanager --list | head -100 && \
-              ls -la "$ANDROID_HOME/ndk"
+              cmake --version && \
+              ninja --version
 
           CMD ["/bin/bash"]
-          EOF
+          DOCKERFILE
 
-          echo "Dockerfile:"
-          cat Dockerfile.telegram-build
+          echo "Dockerfile created."
 
       # ============================================================
-      # 8. Build our toolchain image
+      # 8. Build Docker image
       # ============================================================
 
-      - name: Build Telegram build environment
+      - name: Build reproducible build image
         working-directory: work
         run: |
           set -euo pipefail
@@ -385,7 +387,7 @@ jobs:
             .
 
       # ============================================================
-      # 9. Verify toolchain inside Docker
+      # 9. Verify toolchain
       # ============================================================
 
       - name: Verify Docker toolchain
@@ -396,10 +398,10 @@ jobs:
             --rm \
             telegram-reproducible-toolchain:latest \
             bash -lc '
-              set -e
+              set -euo pipefail
 
               echo "=========================================="
-              echo "Build environment"
+              echo "BUILD TOOLCHAIN"
               echo "=========================================="
 
               echo
@@ -411,36 +413,53 @@ jobs:
               gradle --version
 
               echo
-              echo "Android SDK:"
-              ls -la "$ANDROID_HOME/platforms"
+              echo "CMake:"
+              which cmake
+              cmake --version
 
               echo
-              echo "Build Tools:"
+              echo "Ninja:"
+              which ninja
+              ninja --version
+
+              echo
+              echo "Android SDK:"
+              ls -la "$ANDROID_HOME/platforms"
               ls -la "$ANDROID_HOME/build-tools"
 
               echo
-              echo "NDK:"
+              echo "NDK installations:"
               ls -la "$ANDROID_HOME/ndk"
 
               echo
-              echo "NDK version:"
-              cat "$ANDROID_NDK_HOME/source.properties"
+              echo "NDK 21:"
+              cat "$ANDROID_HOME/ndk/21.4.7075529/source.properties"
 
+              echo
+              echo "NDK 23:"
+              cat "$ANDROID_HOME/ndk/23.2.8568313/source.properties"
+
+              echo
+              echo "NDK 27:"
+              cat "$ANDROID_HOME/ndk/27.2.12479018/source.properties"
+
+              echo
               echo "=========================================="
             '
 
       # ============================================================
-      # 10. Build selected commit
+      # 10. Build standalone Telegram APK
       # ============================================================
 
-      - name: Build Telegram
-        id: build
+      - name: Build Telegram standalone APK
         working-directory: work
         run: |
           set -euo pipefail
 
           rm -rf telegram/TMessagesProj/build
+          rm -rf telegram/TMessagesProj/.cxx
           rm -rf telegram/TMessagesProj_App*/build
+          rm -rf telegram/.gradle
 
           docker run \
             --rm \
@@ -449,45 +468,26 @@ jobs:
             telegram-reproducible-toolchain:latest \
             bash -lc '
               set -euo pipefail
-              
-              git config --global --add safe.directory /home/source
 
-              echo "=========================================="
-              echo "Building Telegram"
-              echo "=========================================="
-
-              echo
-              echo "Commit:"
-              git rev-parse HEAD
-
-              echo
-              echo "Java:"
-              java -version
-
-              echo
-              echo "Gradle:"
-              gradle --version
-
-              echo
-              echo "NDK:"
-              cat "$ANDROID_NDK_HOME/source.properties"
-
-              echo
-              echo "SDK:"
-              ls "$ANDROID_HOME/platforms/android-35"
-
-              echo
-              echo "=========================================="
-              echo "Starting build"
-              echo "=========================================="
-
-              mkdir -p /home/source/TMessagesProj/build/outputs/apk
               git config --global --add safe.directory /home/source
 
               cd /home/source
 
+              echo "=========================================="
+              echo "TELEGRAM REPRODUCIBLE BUILD"
+              echo "=========================================="
+
+              echo
               echo "Commit:"
               git rev-parse HEAD
+
+              echo
+              echo "Commit date:"
+              git show -s --format="%ci" HEAD
+
+              echo
+              echo "Commit subject:"
+              git show -s --format="%s" HEAD
 
               echo
               echo "Java:"
@@ -498,31 +498,46 @@ jobs:
               gradle --version
 
               echo
+              echo "CMake:"
+              which cmake
+              cmake --version
+
+              echo
+              echo "Ninja:"
+              which ninja
+              ninja --version
+
+              echo
               echo "NDK:"
               cat "$ANDROID_NDK_HOME/source.properties"
 
+              echo
+              echo "=========================================="
+              echo "Starting Gradle build"
+              echo "=========================================="
+
               gradle \
                 :TMessagesProj_AppStandalone:assembleAfatStandalone \
-                --no-daemon
-
-              cp -R \
-                TMessagesProj_AppStandalone/build/outputs/apk/. \
-                /home/source/TMessagesProj/build/outputs/apk/
+                --no-daemon \
+                --stacktrace \
+                --info
 
               echo
-              echo "Build completed."
+              echo "=========================================="
+              echo "BUILD FINISHED"
+              echo "=========================================="
             '
 
       # ============================================================
       # 11. Locate standalone APK
       # ============================================================
 
-      - name: Locate built standalone APK
+      - name: Locate generated standalone APK
         working-directory: work
         run: |
           set -euo pipefail
 
-          echo "Searching generated APKs..."
+          echo "Generated APK files:"
 
           find telegram/TMessagesProj/build/outputs/apk \
             -type f \
@@ -530,15 +545,23 @@ jobs:
             -print \
             | sort
 
-          APK="$(
-            find telegram/TMessagesProj/build/outputs/apk \
-              -type f \
-              -path '*/standalone/app.apk' \
-              | head -n 1
-          )"
+          APK=""
+
+          if [ -f "telegram/TMessagesProj/build/outputs/apk/afat/standalone/app.apk" ]; then
+            APK="telegram/TMessagesProj/build/outputs/apk/afat/standalone/app.apk"
+          fi
 
           if [ -z "$APK" ]; then
-            echo "::error::Standalone app.apk was not generated"
+            APK="$(
+              find telegram/TMessagesProj/build/outputs/apk \
+                -type f \
+                -path '*/standalone/app.apk' \
+                | head -n 1
+            )"
+          fi
+
+          if [ -z "$APK" ]; then
+            echo "::error::Could not find standalone APK"
             exit 1
           fi
 
@@ -568,7 +591,7 @@ jobs:
           set -euo pipefail
 
           BADGING="$(
-            "${{ steps.android_tools.outputs.aapt }}" \
+            "${{ steps.host_tools.outputs.aapt }}" \
             dump badging \
             telegram_built.apk
           )"
@@ -611,7 +634,7 @@ jobs:
           fi
 
       # ============================================================
-      # 13. Compare with official APK
+      # 13. Compare APKs
       # ============================================================
 
       - name: Run Telegram apkdiff.py
@@ -637,38 +660,48 @@ jobs:
           echo "================================================"
           echo "       REPRODUCIBLE BUILD VERIFIED"
           echo "================================================"
+
           echo
           echo "Telegram:"
           echo "  Version: ${{ steps.apk.outputs.version }}"
           echo "  Build:   ${{ steps.apk.outputs.build }}"
           echo "  Package: ${{ steps.apk.outputs.package }}"
+
           echo
           echo "Source:"
-          echo "  Mode:      ${{ inputs.source_type }}"
+          echo "  Type:      ${{ inputs.source_type }}"
           echo "  Requested: ${{ inputs.source }}"
           echo "  Commit:    $(git -C telegram rev-parse HEAD)"
           echo "  Date:      $(git -C telegram show -s --format='%ci' HEAD)"
           echo "  Subject:   $(git -C telegram show -s --format='%s' HEAD)"
+
           echo
           echo "Build environment:"
           echo "  JDK:          $JDK_VERSION"
           echo "  Gradle:       $GRADLE_VERSION"
-          echo "  Android SDK:  $ANDROID_API_LEVEL"
+          echo "  SDK:          $ANDROID_API_LEVEL"
           echo "  Build Tools:  $ANDROID_BUILD_TOOLS"
-          echo "  Android NDK:  $ANDROID_NDK_VERSION"
+          echo "  NDK 21:       $ANDROID_NDK_VERSION_OLD"
+          echo "  NDK 23:       $ANDROID_NDK_VERSION_MIDDLE"
+          echo "  NDK 27:       $ANDROID_NDK_VERSION"
+          echo "  CMake:        $ANDROID_CMAKE_VERSION"
+
           echo
           echo "Official APK SHA-256:"
           sha256sum telegram_official.apk
+
           echo
           echo "Built APK SHA-256:"
           sha256sum telegram_built.apk
+
           echo
           echo "apkdiff.py: PASS"
+
           echo
           echo "================================================"
 
       # ============================================================
-      # 15. Upload artifacts
+      # 15. Upload APK artifacts
       # ============================================================
 
       - name: Upload APK artifacts
@@ -683,7 +716,7 @@ jobs:
           retention-days: 30
 
       # ============================================================
-      # 16. Upload build logs / metadata
+      # 16. Upload build metadata
       # ============================================================
 
       - name: Upload build metadata
@@ -692,7 +725,6 @@ jobs:
         with:
           name: telegram-build-metadata-${{ github.run_id }}
           path: |
-            work/telegram/.git
             work/Dockerfile.telegram-build
           if-no-files-found: warn
           retention-days: 30

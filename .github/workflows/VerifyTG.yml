@@ -483,7 +483,23 @@ jobs:
 
               mkdir -p /home/source/TMessagesProj/build/outputs/apk
               git config --global --add safe.directory /home/source
+
               cd /home/source
+
+              echo "Commit:"
+              git rev-parse HEAD
+
+              echo
+              echo "Java:"
+              java -version
+
+              echo
+              echo "Gradle:"
+              gradle --version
+
+              echo
+              echo "NDK:"
+              cat "$ANDROID_NDK_HOME/source.properties"
 
               gradle \
                 :TMessagesProj_AppStandalone:assembleAfatStandalone \

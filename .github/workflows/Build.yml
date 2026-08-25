@@ -64,7 +64,6 @@ jobs:
       - name: Configure Gradle optimizations
         run: |
           sed -i '/^org.gradle.caching=/d' gradle.properties
-          sed -i '/^org.gradle.configuration-cache=/d' gradle.properties
           printf "\norg.gradle.caching=true\n" >> gradle.properties
           echo "Gradle properties:"
           cat gradle.properties

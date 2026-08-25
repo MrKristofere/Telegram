@@ -1,0 +1,41 @@
+name: Check Telegram Resources
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Search missing mipmap resources
+        run: |
+          echo "== Resources referenced from manifests =="
+
+          grep -Rho '@mipmap/[A-Za-z0-9_]\+' \
+            TMessagesProj_App/src \
+            TMessagesProj/config \
+            | sort -u > referenced.txt
+
+          echo
+          echo "== Existing mipmap resources =="
+
+          find TMessagesProj_App/src -type f \
+            | grep '/mipmap' \
+            | sed 's#.*/##' \
+            | sed 's/\.[^.]*$//' \
+            | sort -u > existing.txt
+
+          echo
+          echo "== Missing resources =="
+
+          while read RES; do
+            NAME=$(basename "$RES")
+            if ! grep -qx "$NAME" existing.txt; then
+              echo "$NAME"
+            fi
+          done < referenced.txt

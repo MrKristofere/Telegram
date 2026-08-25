@@ -1,0 +1,63 @@
+name: Inspect jlatexmath
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect-jlatexmath:
+    name: Inspect jlatexmath
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: false
+
+      - name: Checkout jlatexmath submodule
+        run: |
+          git submodule update --init 'TMessagesProj/lib/jlatexmath'
+
+      - name: Inspect jlatexmath
+        run: |
+          echo "::group::JLatexMath classes"
+
+          echo "=== JLatexMathAndroid.java ==="
+          find TMessagesProj/lib/jlatexmath -type f \
+            -name 'JLatexMathAndroid.java' -print
+
+          echo ""
+          echo "=== JLatexMathDrawable.java ==="
+          find TMessagesProj/lib/jlatexmath -type f \
+            -name 'JLatexMathDrawable.java' -print
+
+          echo ""
+          echo "=== JLatexMathView.java ==="
+          find TMessagesProj/lib/jlatexmath -type f \
+            -name 'JLatexMathView.java' -print
+
+          echo "::endgroup::"
+
+          echo "::group::jlatexmath build.gradle"
+          echo "=== build.gradle ==="
+          cat TMessagesProj/lib/jlatexmath/build.gradle
+          echo "::endgroup::"
+
+          echo "::group::jlatexmath source tree"
+          echo "=== source tree ==="
+          find TMessagesProj/lib/jlatexmath -maxdepth 5 -type f | sort
+          echo "::endgroup::"
+
+          echo "::group::jlatexmath git information"
+          echo "=== git status ==="
+          git -C TMessagesProj/lib/jlatexmath status
+
+          echo ""
+          echo "=== git commit ==="
+          git -C TMessagesProj/lib/jlatexmath rev-parse HEAD
+
+          echo ""
+          echo "=== git remote ==="
+          git -C TMessagesProj/lib/jlatexmath remote -v
+
+          echo "::endgroup::"

@@ -449,6 +449,8 @@ jobs:
             telegram-reproducible-toolchain:latest \
             bash -lc '
               set -euo pipefail
+              
+              git config --global --add safe.directory /home/source
 
               echo "=========================================="
               echo "Building Telegram"

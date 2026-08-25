@@ -1,0 +1,221 @@
+name: Build Test Web
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch name"
+        type: string
+        default: master
+        required: true
+
+env:
+  CCACHE_DIR: ~/.ccache
+  CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+  CCACHE_HARDLINK: "true"
+  CCACHE_NOHASHDIR: "true"
+  CCACHE_MAXSIZE: "10G"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.branch }}
+          submodules: recursive
+
+      - name: Configure package
+        run: |
+          set -e
+
+          echo "Original APP_PACKAGE:"
+          grep '^APP_PACKAGE=' gradle.properties
+
+          sed -i \
+            's/^APP_PACKAGE=.*/APP_PACKAGE=ft.telegram.messenger/' \
+            gradle.properties
+
+          echo "Configured APP_PACKAGE:"
+          grep '^APP_PACKAGE=' gradle.properties
+
+      - name: Configure Firebase for custom package
+        run: |
+          set -e
+
+          FILE="TMessagesProj_AppStandalone/google-services.json"
+
+          cp "$FILE" "${FILE}.original"
+
+          python3 <<'PY'
+          import json
+
+          path = "TMessagesProj_AppStandalone/google-services.json"
+
+          with open(path, "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          target = "org.telegram.messenger.web"
+          replacement = "ft.telegram.messenger.web"
+
+          found = False
+
+          for client in data.get("client", []):
+              package_name = (
+                  client
+                  .get("client_info", {})
+                  .get("android_client_info", {})
+                  .get("package_name")
+              )
+
+              if package_name == target:
+                  client["client_info"]["android_client_info"]["package_name"] = replacement
+                  found = True
+                  print(f"Changed Firebase package: {target} -> {replacement}")
+
+          if not found:
+              raise SystemExit(
+                  f"Firebase client '{target}' was not found in {path}"
+              )
+
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(data, f, indent=2)
+              f.write("\n")
+          PY
+
+          echo "Firebase package entries:"
+          grep -n "package_name" "$FILE"
+
+      - name: Configure Gradle optimizations
+        run: |
+          sed -i '/^org.gradle.caching=/d' gradle.properties
+
+          printf "\norg.gradle.caching=true\n" >> gradle.properties
+
+          echo "Gradle properties:"
+          cat gradle.properties
+
+      - name: Extract Android SDK versions
+        id: sdk
+        run: |
+          BUILD_GRADLE="TMessagesProj_AppStandalone/build.gradle"
+
+          echo "build_tools=$(grep -oP "buildToolsVersion ['\"]\\K[^'\"]+" "$BUILD_GRADLE")" >> "$GITHUB_OUTPUT"
+
+          echo "compile_sdk=$(grep -oP "compileSdk(?:Version)?\s*=?\s*\K\d+" "$BUILD_GRADLE")" >> "$GITHUB_OUTPUT"
+
+          echo "ndk=$(grep -oP "ndkVersion ['\"]\\K[^'\"]+" "$BUILD_GRADLE")" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            build-tools;${{ steps.sdk.outputs.build_tools }}
+            ndk;${{ steps.sdk.outputs.ndk }}
+            platforms;android-${{ steps.sdk.outputs.compile_sdk }}
+
+      - name: Configure Android SDK Path
+        run: |
+          echo "sdk.dir=${ANDROID_HOME}" >> local.properties
+
+      - name: Modify Gradle JVM Args
+        run: |
+          MEMORY_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+          MEMORY_GB=$((MEMORY_KB / 1024 / 1024))
+
+          echo "Detected memory size: ${MEMORY_GB}GB"
+
+          if [ "$MEMORY_GB" -ge 12 ]; then
+            sed -i '/^org\.gradle\.jvmargs=/d' gradle.properties
+
+            echo "org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" >> gradle.properties
+          fi
+
+      - name: Fill BuildVars
+        run: |
+          BUILD_VARS="TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java"
+
+          sed -i -E \
+            's/public static int APP_ID = [0-9]+;/public static int APP_ID = 6;/' \
+            "$BUILD_VARS"
+
+          sed -i -E \
+            's/public static String APP_HASH = "[^"]*";/public static String APP_HASH = "eb06d4abfb49dc3eeb1aeb98ae0f581e";/' \
+            "$BUILD_VARS"
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2.23
+        with:
+          key: android-ndk-${{ steps.sdk.outputs.ndk }}
+
+      - name: Cache native CMake / NDK build
+        uses: actions/cache@v6
+        with:
+          path: |
+            TMessagesProj/.cxx
+            TMessagesProj/build/intermediates/cxx
+            TMessagesProj/build/intermediates/cmake
+            TMessagesProj/build/intermediates/ndkBuild
+          key: ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-${{ hashFiles('TMessagesProj/jni/**', 'TMessagesProj/**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-
+            ${{ runner.os }}-ndk-
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
+
+      - name: Build Standalone APK
+        run: |
+          ./gradlew \
+            --build-cache \
+            :TMessagesProj_AppStandalone:assembleAfatStandalone
+
+      - name: Verify APK package
+        run: |
+          set -e
+
+          APK=$(find TMessagesProj_AppStandalone/build/outputs -name "*.apk" | head -n 1)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK not found."
+            exit 1
+          fi
+
+          echo "APK: $APK"
+
+          ${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/aapt2 dump badging "$APK" \
+            | grep "package: name='ft.telegram.messenger.web'"
+
+          echo "Package verification passed."
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: telegram-standalone-ft-web
+          path: TMessagesProj_AppStandalone/build/outputs/**/*.apk
+          if-no-files-found: error

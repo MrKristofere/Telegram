@@ -41610,6 +41610,7 @@ public class ChatActivity extends BaseFragment implements
                         }
                     };
                     */
+                    LaunchActivity.instance.checkAppUpdate(true, null);
                 }
             } else if (BuildVars.isHuaweiStoreApp()) {
                 Browser.openUrl(getContext(), BuildVars.HUAWEI_STORE_URL);

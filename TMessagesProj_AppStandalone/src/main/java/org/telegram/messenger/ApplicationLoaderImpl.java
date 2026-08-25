@@ -49,6 +49,11 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
 
     }
 
+    @Override
+    protected void checkForUpdatesInternal() {
+
+    }
+
     protected void appCenterLogInternal(Throwable e) {
 
     }

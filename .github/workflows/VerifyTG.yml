@@ -482,11 +482,8 @@ jobs:
               echo "=========================================="
 
               mkdir -p /home/source/TMessagesProj/build/outputs/apk
-              mkdir -p /home/gradle/source
-
-              cp -R /home/source/. /home/gradle/source
-
-              cd /home/gradle/source
+              git config --global --add safe.directory /home/source
+              cd /home/source
 
               gradle \
                 :TMessagesProj_AppStandalone:assembleAfatStandalone \

@@ -33,7 +33,6 @@ env:
   TELEGRAM_APK_URL: https://telegram.org/dl/android/apk
 
   JDK_VERSION: "17"
-
   GRADLE_VERSION: "8.11.1"
 
   ANDROID_API_LEVEL: "35"
@@ -53,25 +52,22 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. Workspace
+      # Workspace
       # ============================================================
 
       - name: Create workspace
         run: |
           set -euo pipefail
-
           mkdir -p "$GITHUB_WORKSPACE/work"
 
       # ============================================================
-      # 2. Download APK directly from Telegram website
+      # Official APK
       # ============================================================
 
       - name: Download official Telegram APK
         working-directory: work
         run: |
           set -euo pipefail
-
-          echo "Downloading official Telegram APK..."
 
           curl \
             --fail \
@@ -82,19 +78,18 @@ jobs:
             --output telegram_official.apk \
             "$TELEGRAM_APK_URL"
 
-          echo
           echo "Official APK:"
           ls -lh telegram_official.apk
 
           echo
-          echo "Official APK SHA-256:"
+          echo "SHA-256:"
           sha256sum telegram_official.apk
 
       # ============================================================
-      # 3. Install host Android tools needed to inspect APK
+      # Host APK tools
       # ============================================================
 
-      - name: Locate host aapt
+      - name: Locate aapt
         id: host_tools
         run: |
           set -euo pipefail
@@ -108,14 +103,14 @@ jobs:
           )"
 
           if [ -z "$AAPT" ]; then
-            echo "::error::aapt was not found"
+            echo "::error::aapt not found"
             exit 1
           fi
 
           echo "aapt=$AAPT" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 4. Read official APK metadata
+      # APK metadata
       # ============================================================
 
       - name: Read official APK metadata
@@ -148,23 +143,23 @@ jobs:
           )"
 
           if [ -z "$PACKAGE" ]; then
-            echo "::error::Could not determine APK package"
+            echo "::error::Could not determine package"
             exit 1
           fi
 
           if [ -z "$VERSION" ]; then
-            echo "::error::Could not determine APK versionName"
+            echo "::error::Could not determine version"
             exit 1
           fi
 
           if [ -z "$BUILD" ]; then
-            echo "::error::Could not determine APK versionCode"
+            echo "::error::Could not determine build"
             exit 1
           fi
 
           echo
           echo "=========================================="
-          echo "Official Telegram APK"
+          echo "Official APK"
           echo "=========================================="
           echo "Package: $PACKAGE"
           echo "Version: $VERSION"
@@ -173,7 +168,6 @@ jobs:
 
           if [ "$PACKAGE" != "org.telegram.messenger.web" ]; then
             echo "::error::Unexpected package: $PACKAGE"
-            echo "Expected: org.telegram.messenger.web"
             exit 1
           fi
 
@@ -182,7 +176,7 @@ jobs:
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 5. Resolve requested source
+      # Resolve source
       # ============================================================
 
       - name: Resolve source
@@ -198,37 +192,30 @@ jobs:
             commit)
               RESOLVED="$SOURCE"
               ;;
-
             latest)
               RESOLVED="$LATEST_BRANCH"
               ;;
-
             tag)
               RESOLVED="$SOURCE"
               ;;
-
             *)
-              echo "::error::Unknown source type: $SOURCE_TYPE"
+              echo "::error::Unknown source type"
               exit 1
               ;;
           esac
 
           if [ -z "$RESOLVED" ]; then
-            echo "::error::Resolved source is empty"
+            echo "::error::Source is empty"
             exit 1
           fi
 
-          echo "Source type:"
-          echo "$SOURCE_TYPE"
-
-          echo
           echo "Requested source:"
           echo "$RESOLVED"
 
           echo "resolved=$RESOLVED" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 6. Clone Telegram repository
+      # Clone Telegram
       # ============================================================
 
       - name: Clone Telegram source
@@ -258,29 +245,26 @@ jobs:
 
           echo
           echo "=========================================="
-          echo "Resolved Telegram source"
+          echo "Resolved source"
           echo "=========================================="
 
           echo "Commit:"
           git rev-parse HEAD
 
           echo
-          echo "Short commit:"
+          echo "Short:"
           git rev-parse --short HEAD
 
           echo
-          echo "Commit date:"
+          echo "Date:"
           git show -s --format='%ci' HEAD
 
           echo
-          echo "Commit subject:"
+          echo "Subject:"
           git show -s --format='%s' HEAD
 
-          echo
-          echo "=========================================="
-
       # ============================================================
-      # 7. Create build Dockerfile
+      # Dockerfile
       # ============================================================
 
       - name: Create reproducible build Dockerfile
@@ -334,6 +318,7 @@ jobs:
               rm -rf /var/lib/apt/lists/*
 
           RUN git config --global --add safe.directory /home/source
+          RUN git config --global --add safe.directory /home/gradle
 
           RUN mkdir -p "$ANDROID_HOME"
 
@@ -360,7 +345,7 @@ jobs:
                 "ndk;27.2.12479018" \
                 "cmake;3.10.2.4988404"
 
-          WORKDIR /home/source
+          WORKDIR /home/gradle
 
           RUN java -version && \
               gradle --version && \
@@ -370,13 +355,11 @@ jobs:
           CMD ["/bin/bash"]
           DOCKERFILE
 
-          echo "Dockerfile created."
-
       # ============================================================
-      # 8. Build Docker image
+      # Docker image
       # ============================================================
 
-      - name: Build reproducible build image
+      - name: Build Docker image
         working-directory: work
         run: |
           set -euo pipefail
@@ -387,7 +370,7 @@ jobs:
             .
 
       # ============================================================
-      # 9. Verify toolchain
+      # Verify toolchain
       # ============================================================
 
       - name: Verify Docker toolchain
@@ -423,71 +406,68 @@ jobs:
               ninja --version
 
               echo
-              echo "Android SDK:"
-              ls -la "$ANDROID_HOME/platforms"
-              ls -la "$ANDROID_HOME/build-tools"
+              echo "SDK:"
+              ls -la "$ANDROID_HOME/platforms/android-35"
+              ls -la "$ANDROID_HOME/build-tools/35.0.0"
 
               echo
-              echo "NDK installations:"
+              echo "NDK:"
               ls -la "$ANDROID_HOME/ndk"
-
-              echo
-              echo "NDK 21:"
-              cat "$ANDROID_HOME/ndk/21.4.7075529/source.properties"
-
-              echo
-              echo "NDK 23:"
-              cat "$ANDROID_HOME/ndk/23.2.8568313/source.properties"
-
-              echo
-              echo "NDK 27:"
-              cat "$ANDROID_HOME/ndk/27.2.12479018/source.properties"
 
               echo
               echo "=========================================="
             '
 
       # ============================================================
-      # 10. Build standalone Telegram APK
+      # Build
+      #
+      # IMPORTANT:
+      # We intentionally follow Telegram's Docker build layout:
+      #
+      #   /home/source  = input repository
+      #   /home/gradle  = actual Gradle build directory
+      #
+      # This matches Telegram's own Dockerfile.
       # ============================================================
 
-      - name: Build Telegram standalone APK
+      - name: Build Telegram
         working-directory: work
         run: |
           set -euo pipefail
 
           rm -rf telegram/TMessagesProj/build
           rm -rf telegram/TMessagesProj/.cxx
-          rm -rf telegram/TMessagesProj_App*/build
+          rm -rf telegram/TMessagesProj_App/build
+          rm -rf telegram/TMessagesProj_AppStandalone/build
+          rm -rf telegram/TMessagesProj_AppHuawei/build
+          rm -rf telegram/TMessagesProj_AppHockeyApp/build
           rm -rf telegram/.gradle
+
+          mkdir -p telegram/TMessagesProj/build/outputs/apk
+          mkdir -p telegram/TMessagesProj/build/outputs/native-debug-symbols
 
           docker run \
             --rm \
             --volume "$PWD/telegram:/home/source" \
-            --workdir /home/source \
+            --workdir /home/gradle \
             telegram-reproducible-toolchain:latest \
             bash -lc '
               set -euo pipefail
 
               git config --global --add safe.directory /home/source
-
-              cd /home/source
+              git config --global --add safe.directory /home/gradle
 
               echo "=========================================="
               echo "TELEGRAM REPRODUCIBLE BUILD"
               echo "=========================================="
 
               echo
-              echo "Commit:"
-              git rev-parse HEAD
+              echo "Source commit:"
+              git -C /home/source rev-parse HEAD
 
               echo
-              echo "Commit date:"
-              git show -s --format="%ci" HEAD
-
-              echo
-              echo "Commit subject:"
-              git show -s --format="%s" HEAD
+              echo "Source subject:"
+              git -C /home/source show -s --format="%s" HEAD
 
               echo
               echo "Java:"
@@ -513,6 +493,32 @@ jobs:
 
               echo
               echo "=========================================="
+              echo "Copying source to Gradle workspace"
+              echo "=========================================="
+
+              rm -rf /home/gradle/TMessagesProj
+              rm -rf /home/gradle/TMessagesProj_App
+              rm -rf /home/gradle/TMessagesProj_AppStandalone
+              rm -rf /home/gradle/TMessagesProj_AppHuawei
+              rm -rf /home/gradle/TMessagesProj_AppHockeyApp
+              rm -rf /home/gradle/TMessagesProj_AppTests
+              rm -rf /home/gradle/buildSrc
+              rm -rf /home/gradle/gradle
+
+              cp -a /home/source/. /home/gradle/
+
+              cd /home/gradle
+
+              echo
+              echo "Build workspace:"
+              pwd
+
+              echo
+              echo "Workspace commit:"
+              git rev-parse HEAD
+
+              echo
+              echo "=========================================="
               echo "Starting Gradle build"
               echo "=========================================="
 
@@ -524,12 +530,52 @@ jobs:
 
               echo
               echo "=========================================="
-              echo "BUILD FINISHED"
+              echo "Gradle build completed"
+              echo "=========================================="
+
+              echo
+              echo "Searching for generated APKs:"
+
+              find /home/gradle \
+                -type f \
+                -name "*.apk" \
+                -print \
+                | sort
+
+              echo
+              echo "Copying APK output back to source..."
+
+              mkdir -p /home/source/TMessagesProj/build/outputs/apk
+
+              if [ -d "/home/gradle/TMessagesProj_AppStandalone/build/outputs/apk" ]; then
+                cp -a \
+                  /home/gradle/TMessagesProj_AppStandalone/build/outputs/apk/. \
+                  /home/source/TMessagesProj/build/outputs/apk/
+              fi
+
+              if [ -d "/home/gradle/TMessagesProj/build/outputs/apk" ]; then
+                cp -a \
+                  /home/gradle/TMessagesProj/build/outputs/apk/. \
+                  /home/source/TMessagesProj/build/outputs/apk/
+              fi
+
+              echo
+              echo "Final APK files on source volume:"
+
+              find /home/source/TMessagesProj/build/outputs/apk \
+                -type f \
+                -name "*.apk" \
+                -print \
+                | sort
+
+              echo
+              echo "=========================================="
+              echo "BUILD COMPLETE"
               echo "=========================================="
             '
 
       # ============================================================
-      # 11. Locate standalone APK
+      # Locate APK
       # ============================================================
 
       - name: Locate generated standalone APK
@@ -537,41 +583,57 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Generated APK files:"
+          APK_ROOT="telegram/TMessagesProj/build/outputs/apk"
 
-          find telegram/TMessagesProj/build/outputs/apk \
-            -type f \
-            -name '*.apk' \
-            -print \
-            | sort
+          echo "APK output directory:"
+          echo "$APK_ROOT"
 
-          APK=""
+          if [ ! -d "$APK_ROOT" ]; then
+            echo "::error::APK output directory does not exist"
 
-          if [ -f "telegram/TMessagesProj/build/outputs/apk/afat/standalone/app.apk" ]; then
-            APK="telegram/TMessagesProj/build/outputs/apk/afat/standalone/app.apk"
-          fi
+            echo
+            echo "Build directory:"
+            find telegram/TMessagesProj/build \
+              -maxdepth 8 \
+              -type f \
+              -print \
+              2>/dev/null \
+              | sort || true
 
-          if [ -z "$APK" ]; then
-            APK="$(
-              find telegram/TMessagesProj/build/outputs/apk \
-                -type f \
-                -path '*/standalone/app.apk' \
-                | head -n 1
-            )"
-          fi
-
-          if [ -z "$APK" ]; then
-            echo "::error::Could not find standalone APK"
             exit 1
           fi
 
           echo
+          echo "Generated APK files:"
+
+          find "$APK_ROOT" \
+            -type f \
+            -name "*.apk" \
+            -print \
+            | sort
+
+          APK="$APK_ROOT/afat/standalone/app.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "::error::Standalone APK not found:"
+            echo "$APK"
+
+            echo
+            echo "Available APK files:"
+            find "$APK_ROOT" \
+              -type f \
+              -name "*.apk" \
+              -print \
+              | sort
+
+            exit 1
+          fi
+
+          cp "$APK" telegram_built.apk
+
+          echo
           echo "Selected APK:"
           echo "$APK"
-
-          cp \
-            "$APK" \
-            telegram_built.apk
 
           echo
           echo "Built APK:"
@@ -582,7 +644,7 @@ jobs:
           sha256sum telegram_built.apk
 
       # ============================================================
-      # 12. Verify built APK metadata
+      # Verify built APK metadata
       # ============================================================
 
       - name: Verify built APK metadata
@@ -634,7 +696,7 @@ jobs:
           fi
 
       # ============================================================
-      # 13. Compare APKs
+      # apkdiff
       # ============================================================
 
       - name: Run Telegram apkdiff.py
@@ -647,7 +709,7 @@ jobs:
             "$GITHUB_WORKSPACE/work/telegram_built.apk"
 
       # ============================================================
-      # 14. Final report
+      # Final result
       # ============================================================
 
       - name: Verification result
@@ -676,22 +738,22 @@ jobs:
           echo "  Subject:   $(git -C telegram show -s --format='%s' HEAD)"
 
           echo
-          echo "Build environment:"
-          echo "  JDK:          $JDK_VERSION"
-          echo "  Gradle:       $GRADLE_VERSION"
-          echo "  SDK:          $ANDROID_API_LEVEL"
-          echo "  Build Tools:  $ANDROID_BUILD_TOOLS"
-          echo "  NDK 21:       $ANDROID_NDK_VERSION_OLD"
-          echo "  NDK 23:       $ANDROID_NDK_VERSION_MIDDLE"
-          echo "  NDK 27:       $ANDROID_NDK_VERSION"
-          echo "  CMake:        $ANDROID_CMAKE_VERSION"
+          echo "Toolchain:"
+          echo "  JDK:         $JDK_VERSION"
+          echo "  Gradle:      $GRADLE_VERSION"
+          echo "  SDK:         $ANDROID_API_LEVEL"
+          echo "  Build Tools: $ANDROID_BUILD_TOOLS"
+          echo "  NDK 21:      $ANDROID_NDK_VERSION_OLD"
+          echo "  NDK 23:      $ANDROID_NDK_VERSION_MIDDLE"
+          echo "  NDK 27:      $ANDROID_NDK_VERSION"
+          echo "  CMake:       $ANDROID_CMAKE_VERSION"
 
           echo
-          echo "Official APK SHA-256:"
+          echo "Official APK:"
           sha256sum telegram_official.apk
 
           echo
-          echo "Built APK SHA-256:"
+          echo "Built APK:"
           sha256sum telegram_built.apk
 
           echo
@@ -701,7 +763,7 @@ jobs:
           echo "================================================"
 
       # ============================================================
-      # 15. Upload APK artifacts
+      # Artifacts
       # ============================================================
 
       - name: Upload APK artifacts
@@ -714,10 +776,6 @@ jobs:
             work/telegram_built.apk
           if-no-files-found: warn
           retention-days: 30
-
-      # ============================================================
-      # 16. Upload build metadata
-      # ============================================================
 
       - name: Upload build metadata
         if: always()

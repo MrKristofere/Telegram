@@ -17,7 +17,7 @@ on:
         description: "Commit SHA, tag, or branch"
         required: true
         type: string
-        default: "7df875ed136ef9f5c6b5263fc1c7788948587f4d"
+        default: "62b56a07ca7e30e39f7fd00a6728d6bbd716ca1c"
 
       latest_branch:
         description: "Branch when source_type=latest"
@@ -47,7 +47,7 @@ env:
 jobs:
   reproducible-build:
     name: Verify Telegram Web APK
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
 
     steps:
 
@@ -768,7 +768,7 @@ jobs:
 
       - name: Upload APK artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: telegram-reproducible-${{ steps.apk.outputs.version }}-${{ steps.apk.outputs.build }}-${{ github.run_id }}
           path: |
@@ -779,7 +779,7 @@ jobs:
 
       - name: Upload build metadata
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: telegram-build-metadata-${{ github.run_id }}
           path: |

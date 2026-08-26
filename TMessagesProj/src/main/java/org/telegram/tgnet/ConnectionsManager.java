@@ -1193,9 +1193,11 @@ public class ConnectionsManager extends BaseController {
             }
             if (!done) {
                 try {
-                    InetAddress address = InetAddress.getByName(currentHostName);
-                    ArrayList<String> addresses = new ArrayList<>(1);
-                    addresses.add(address.getHostAddress());
+                    InetAddress[] resolved = InetAddress.getAllByName(currentHostName);
+                ArrayList<String> addresses = new ArrayList<>(resolved.length);
+                for (InetAddress a : resolved) {
+                    addresses.add(a.getHostAddress());
+                }
                     return new ResolvedDomain(addresses, SystemClock.elapsedRealtime());
                 } catch (Exception e) {
                     FileLog.e(e, false);

@@ -1,0 +1,388 @@
+name: Conflict Cherry-pick
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repository:
+        description: "Source repository, example my-org/backend"
+        required: true
+        type: string
+
+      source_branch:
+        description: "Source branch"
+        required: true
+        default: "main"
+        type: string
+
+      target_branch:
+        description: "Target branch"
+        required: true
+        type: string
+
+      commits:
+        description: "Commit SHA — separated by spaces"
+        required: true
+        type: string
+
+      exclude_paths:
+        description: "Exclusions: SHA:path,path SHA:path"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  cherry-pick:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+
+      - name: Checkout target branch
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          git fetch origin "$TARGET_BRANCH"
+          git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+
+      - name: Add source repository
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+        run: |
+          git remote add source "https://github.com/$SOURCE_REPOSITORY.git"
+          git fetch source "$SOURCE_BRANCH" || true
+
+      - name: Prepare logs
+        run: |
+          : > /tmp/applied.log
+          : > /tmp/modified.log
+          : > /tmp/skipped.log
+
+      - name: Cherry-pick selected commits
+        env:
+          COMMITS: ${{ inputs.commits }}
+          EXCLUDE_PATHS: ${{ inputs.exclude_paths }}
+        run: |
+          for commit in $COMMITS; do
+
+            echo ""
+            echo "========================================"
+            echo "Processing: $commit"
+            echo "========================================"
+
+            # --------------------------------------------------
+            # Find commit locally or fetch it.
+            # --------------------------------------------------
+
+            if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
+
+              echo "Commit is not available locally. Fetching..."
+
+              git fetch source "$commit" 2>/dev/null || true
+
+              if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
+
+                echo "SKIPPED: $commit"
+                echo "$commit | commit not found or cannot be fetched" >> /tmp/skipped.log
+
+                continue
+              fi
+            fi
+
+            echo "Commit found: $commit"
+
+            # --------------------------------------------------
+            # Get commit message.
+            # --------------------------------------------------
+
+            git log -1 --format=%B "$commit" > /tmp/commit_message
+
+            # --------------------------------------------------
+            # Find exclusions for this specific commit.
+            #
+            # Format:
+            #
+            # SHA:path,path SHA:path,path
+            # --------------------------------------------------
+
+            EXCLUDED=""
+
+            for rule in $EXCLUDE_PATHS; do
+
+              RULE_SHA="${rule%%:*}"
+
+              if [ "$RULE_SHA" = "$commit" ]; then
+
+                RULE_PATHS="${rule#*:}"
+
+                EXCLUDED="$RULE_PATHS"
+
+                echo "Excluded paths:"
+                echo "$EXCLUDED"
+
+                break
+              fi
+            done
+
+            # --------------------------------------------------
+            # Apply commit without creating a commit.
+            # --------------------------------------------------
+
+            if git cherry-pick --no-commit "$commit"; then
+
+              echo "Cherry-pick completed without conflicts."
+
+              # ------------------------------------------------
+              # Remove explicitly excluded paths.
+              #
+              # This is useful even when the excluded file did
+              # not produce a conflict.
+              # ------------------------------------------------
+
+              if [ -n "$EXCLUDED" ]; then
+
+                OLDIFS="$IFS"
+                IFS=','
+
+                for path in $EXCLUDED; do
+
+                  echo "Excluding: $path"
+
+                  if git ls-files --error-unmatch "$path" >/dev/null 2>&1; then
+                    git restore --source=HEAD --staged --worktree -- "$path"
+                  else
+                    git rm -f --ignore-unmatch -- "$path" || true
+                  fi
+
+                done
+
+                IFS="$OLDIFS"
+              fi
+
+              # ------------------------------------------------
+              # Check whether anything remains.
+              # ------------------------------------------------
+
+              if git diff --cached --quiet && git diff --quiet; then
+
+                echo "SKIPPED: $commit"
+                echo "$commit | nothing to apply after exclusions" >> /tmp/skipped.log
+
+                git reset --hard HEAD
+
+                continue
+              fi
+
+              git add -A
+
+              if git commit \
+                --author="${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>" \
+                --file=/tmp/commit_message
+              then
+
+                if [ -n "$EXCLUDED" ]; then
+                  echo "MODIFIED: $commit"
+                  echo "$commit | applied with exclusions: $EXCLUDED" >> /tmp/modified.log
+                else
+                  echo "APPLIED: $commit"
+                  echo "$commit | applied" >> /tmp/applied.log
+                fi
+
+              else
+
+                echo "SKIPPED: $commit"
+
+                git reset --hard HEAD
+
+                echo "$commit | failed to create commit" >> /tmp/skipped.log
+              fi
+
+              continue
+            fi
+
+            # --------------------------------------------------
+            # Conflict detected.
+            # --------------------------------------------------
+
+            echo "Conflict detected."
+
+            CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
+
+            echo "Conflicted files:"
+            echo "$CONFLICTED_FILES"
+
+            UNEXPECTED_CONFLICT=0
+            RESOLVED_FILES=""
+
+            # --------------------------------------------------
+            # Check every conflicted file.
+            # --------------------------------------------------
+
+            while IFS= read -r file; do
+
+              [ -z "$file" ] && continue
+
+              FOUND=0
+
+              if [ -n "$EXCLUDED" ]; then
+
+                OLDIFS="$IFS"
+                IFS=','
+
+                for excluded_path in $EXCLUDED; do
+
+                  if [ "$file" = "$excluded_path" ]; then
+                    FOUND=1
+                    break
+                  fi
+
+                done
+
+                IFS="$OLDIFS"
+              fi
+
+              # ------------------------------------------------
+              # This conflicted file was explicitly excluded.
+              # Keep target branch version.
+              # ------------------------------------------------
+
+              if [ "$FOUND" -eq 1 ]; then
+
+                echo "Resolving excluded conflict: $file"
+
+                git checkout --ours -- "$file"
+                git add -- "$file"
+
+                if [ -n "$RESOLVED_FILES" ]; then
+                  RESOLVED_FILES="$RESOLVED_FILES, $file"
+                else
+                  RESOLVED_FILES="$file"
+                fi
+
+              else
+
+                # ----------------------------------------------
+                # Conflict was NOT explicitly excluded.
+                # Do not guess how to resolve it.
+                # ----------------------------------------------
+
+                echo "Unexpected conflict: $file"
+
+                UNEXPECTED_CONFLICT=1
+
+              fi
+
+            done <<< "$CONFLICTED_FILES"
+
+            # --------------------------------------------------
+            # There is a conflict that user did not specify.
+            # Reject this commit.
+            # --------------------------------------------------
+
+            if [ "$UNEXPECTED_CONFLICT" -eq 1 ]; then
+
+              echo "Skipping $commit because of an unspecified conflict."
+
+              git reset --hard HEAD
+
+              echo "$commit | unspecified conflict: $CONFLICTED_FILES" >> /tmp/skipped.log
+
+              continue
+            fi
+
+            # --------------------------------------------------
+            # All conflicts were explicitly resolved/excluded.
+            # --------------------------------------------------
+
+            echo "All conflicts were explicitly handled."
+
+            git add -A
+
+            if git diff --cached --quiet; then
+
+              echo "SKIPPED: $commit"
+
+              git reset --hard HEAD
+
+              echo "$commit | all changes were excluded" >> /tmp/skipped.log
+
+              continue
+            fi
+
+            # --------------------------------------------------
+            # Create new commit.
+            # --------------------------------------------------
+
+            if git commit \
+              --author="${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>" \
+              --file=/tmp/commit_message
+            then
+
+              echo "MODIFIED: $commit"
+
+              echo "$commit | applied with excluded paths: $RESOLVED_FILES" >> /tmp/modified.log
+
+            else
+
+              echo "SKIPPED: $commit"
+
+              git reset --hard HEAD
+
+              echo "$commit | failed to create modified commit" >> /tmp/skipped.log
+            fi
+
+          done
+
+      - name: Push
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          git push origin "$TARGET_BRANCH"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "# Cherry-pick result" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Applied" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -s /tmp/applied.log ]; then
+            while IFS= read -r line; do
+              echo "- $line" >> "$GITHUB_STEP_SUMMARY"
+            done < /tmp/applied.log
+          else
+            echo "None" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Applied with exclusions" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -s /tmp/modified.log ]; then
+            while IFS= read -r line; do
+              echo "- $line" >> "$GITHUB_STEP_SUMMARY"
+            done < /tmp/modified.log
+          else
+            echo "None" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Skipped" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -s /tmp/skipped.log ]; then
+            while IFS= read -r line; do
+              echo "- $line" >> "$GITHUB_STEP_SUMMARY"
+            done < /tmp/skipped.log
+          else
+            echo "None" >> "$GITHUB_STEP_SUMMARY"
+          fi

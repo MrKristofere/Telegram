@@ -1,0 +1,95 @@
+name: Import selected commits
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repository:
+        description: "Source repository, например my-org/backend"
+        required: true
+        type: string
+
+      source_branch:
+        description: "Source branch"
+        required: true
+        default: "main"
+        type: string
+
+      target_branch:
+        description: "Target branch"
+        required: true
+        type: string
+
+      commits:
+        description: "Commit SHA — по одному на строку"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  cherry-pick:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Checkout target branch
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          git fetch origin "$TARGET_BRANCH"
+          git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+
+      - name: Add source repository
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+        run: |
+          git remote add source "https://github.com/$SOURCE_REPOSITORY.git"
+          git fetch source "$SOURCE_BRANCH"
+
+      - name: Validate commits
+        env:
+          COMMITS: ${{ inputs.commits }}
+        run: |
+          while IFS= read -r commit; do
+            [ -z "$commit" ] && continue
+
+            git cat-file -e "$commit^{commit}" || {
+              echo "::error::Commit not found: $commit"
+              exit 1
+            }
+
+            echo "Found: $commit"
+          done <<< "$COMMITS"
+
+      - name: Cherry-pick selected commits
+        env:
+          COMMITS: ${{ inputs.commits }}
+        run: |
+          while IFS= read -r commit; do
+            [ -z "$commit" ] && continue
+
+            echo "Cherry-picking $commit"
+
+            git cherry-pick "$commit" || {
+              echo "::error::Conflict while cherry-picking $commit"
+              git cherry-pick --abort
+              exit 1
+            }
+          done <<< "$COMMITS"
+
+      - name: Push
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          git push origin "$TARGET_BRANCH"

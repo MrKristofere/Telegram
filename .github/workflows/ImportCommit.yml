@@ -76,7 +76,6 @@ jobs:
 
             # --------------------------------------------------
             # Make sure the commit exists locally.
-            # If it does not, try to fetch this exact commit.
             # --------------------------------------------------
 
             if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
@@ -100,11 +99,11 @@ jobs:
             git log -1 --format=%B "$commit" > /tmp/commit_message
 
             # --------------------------------------------------
-            # Try to cherry-pick without creating a commit.
+            # Try to apply the commit without creating a commit.
             #
             # IMPORTANT:
-            # Because this command is inside "if", a conflict
-            # does not terminate the GitHub Actions step.
+            # The command is inside "if", so a conflict does not
+            # terminate the GitHub Actions step.
             # --------------------------------------------------
 
             if git cherry-pick --no-commit "$commit"; then
@@ -113,8 +112,6 @@ jobs:
 
               # ------------------------------------------------
               # Nothing changed.
-              # This usually means the changes are already
-              # present in the target branch.
               # ------------------------------------------------
 
               if git diff --cached --quiet && git diff --quiet; then
@@ -123,10 +120,12 @@ jobs:
                 continue
               fi
 
-              # Add only actual repository changes.
               git add -A
 
-              # Create a new commit from the current user.
+              # ------------------------------------------------
+              # Create a new commit.
+              # ------------------------------------------------
+
               if git commit \
                 --author="${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>" \
                 --file=/tmp/commit_message
@@ -148,8 +147,7 @@ jobs:
             fi
 
             # --------------------------------------------------
-            # Cherry-pick failed.
-            # Git has left the repository in conflict state.
+            # Conflict detected.
             # --------------------------------------------------
 
             echo "Conflict detected for $commit"
@@ -163,7 +161,7 @@ jobs:
             MD_CONFLICT_FILES=""
 
             # --------------------------------------------------
-            # Analyze every conflicted file.
+            # Analyze all conflicted files.
             # --------------------------------------------------
 
             while IFS= read -r file; do
@@ -175,7 +173,7 @@ jobs:
                   echo "Markdown conflict: $file"
                   echo "Keeping target branch version."
 
-                  # Keep target branch version of .md.
+                  # Keep target branch version.
                   git checkout --ours -- "$file"
                   git add -- "$file"
 
@@ -195,15 +193,21 @@ jobs:
             done <<< "$CONFLICTED_FILES"
 
             # --------------------------------------------------
-            # If at least one non-.md file has a conflict,
-            # reject this entire commit.
+            # Non-markdown conflict.
+            #
+            # Reject the whole commit and completely restore
+            # the repository to the state before this commit.
             # --------------------------------------------------
 
             if [ "$NON_MD_CONFLICT" -eq 1 ]; then
 
               echo "Skipping $commit because of non-markdown conflict."
 
-              git cherry-pick --abort
+              # IMPORTANT:
+              # Do NOT use git cherry-pick --abort here.
+              #
+              # We use --no-commit, so simply restore HEAD.
+              git reset --hard HEAD
 
               REASON=$(echo "$CONFLICTED_FILES" | tr '\n' ',' | sed 's/,$//')
 
@@ -215,10 +219,10 @@ jobs:
             # --------------------------------------------------
             # Only .md files conflicted.
             #
-            # The target branch version of those files has
-            # already been restored above.
+            # The target branch version has already been restored
+            # above using "git checkout --ours".
             #
-            # All other changes from the original commit remain.
+            # All other changes from the commit remain.
             # --------------------------------------------------
 
             echo "Only markdown conflicts detected."
@@ -227,15 +231,15 @@ jobs:
             git add -A
 
             # --------------------------------------------------
-            # If nothing remains after removing .md changes,
-            # there is nothing useful to commit.
+            # Check whether anything remains to commit.
             # --------------------------------------------------
 
             if git diff --cached --quiet; then
 
               echo "Nothing remains to commit."
 
-              git cherry-pick --abort
+              # Restore clean state.
+              git reset --hard HEAD
 
               echo "$commit | only .md changes conflicted; nothing else to apply" >> /tmp/skipped.log
 
@@ -243,9 +247,7 @@ jobs:
             fi
 
             # --------------------------------------------------
-            # Create a NEW commit.
-            # This commit is no longer the original commit.
-            # Its author is the user who started the workflow.
+            # Create a NEW modified commit.
             # --------------------------------------------------
 
             if git commit \
@@ -275,6 +277,7 @@ jobs:
           git push origin "$TARGET_BRANCH"
 
       - name: Summary
+        if: always()
         run: |
           echo "# Cherry-pick result" >> "$GITHUB_STEP_SUMMARY"
 

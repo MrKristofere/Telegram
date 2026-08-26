@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_repository:
-        description: "Source repository, например my-org/backend"
+        description: "Source repository, example my-org/backend"
         required: true
         type: string
 
@@ -20,7 +20,7 @@ on:
         type: string
 
       commits:
-        description: "Commit SHA — по одному на строку"
+        description: "Commit SHA — separated by a space"
         required: true
         type: string
 
@@ -61,24 +61,20 @@ jobs:
         env:
           COMMITS: ${{ inputs.commits }}
         run: |
-          while IFS= read -r commit; do
-            [ -z "$commit" ] && continue
-
+          for commit in $COMMITS; do
             git cat-file -e "$commit^{commit}" || {
               echo "::error::Commit not found: $commit"
               exit 1
             }
 
             echo "Found: $commit"
-          done <<< "$COMMITS"
+          done
 
       - name: Cherry-pick selected commits
         env:
           COMMITS: ${{ inputs.commits }}
         run: |
-          while IFS= read -r commit; do
-            [ -z "$commit" ] && continue
-
+          for commit in $COMMITS; do
             echo "Cherry-picking $commit"
 
             git cherry-pick "$commit" || {
@@ -86,7 +82,7 @@ jobs:
               git cherry-pick --abort
               exit 1
             }
-          done <<< "$COMMITS"
+          done
 
       - name: Push
         env:

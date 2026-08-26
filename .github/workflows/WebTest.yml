@@ -338,12 +338,20 @@ jobs:
             :TMessagesProj_AppStandalone:assembleAfatStandalone
 
       # ============================================================
-      # VERIFY APK
+      # VERIFY APK PACKAGE + SIGNATURE
       # ============================================================
 
-      - name: Verify APK package
+      - name: Verify APK package and signature
+        env:
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
         run: |
           set -euo pipefail
+
+          echo "::add-mask::$RELEASE_STORE_PASSWORD"
+          echo "::add-mask::$RELEASE_KEY_ALIAS"
+
+          KEYSTORE="TMessagesProj/config/release.keystore"
 
           APK=$(find TMessagesProj_AppStandalone/build/outputs -name "*.apk" | head -n 1)
 
@@ -352,13 +360,63 @@ jobs:
             exit 1
           fi
 
-          echo "APK: $APK"
-
+          # 1. Package name
           "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/aapt2" \
             dump badging "$APK" \
-            | grep "package: name='ft.telegram.messenger'"
+            | grep -q "package: name='ft.telegram.messenger'"
 
           echo "Package verification passed."
+
+          # 2. APK signature itself is valid
+          "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/apksigner" \
+            verify \
+            "$APK"
+
+          echo "APK signature verification passed."
+
+          # 3. SHA-256 certificate from our keystore
+          KEYSTORE_SHA256=$(
+            keytool -list \
+              -keystore "$KEYSTORE" \
+              -storepass "$RELEASE_STORE_PASSWORD" \
+              -alias "$RELEASE_KEY_ALIAS" \
+            | awk -F': ' '/SHA256 fingerprint:/{print $2; exit}'
+          )
+
+          if [ -z "$KEYSTORE_SHA256" ]; then
+            echo "ERROR: Could not determine keystore certificate SHA-256."
+            exit 1
+          fi
+
+          # 4. SHA-256 certificate from the actual APK
+          APK_SHA256=$(
+            "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/apksigner" \
+              verify \
+              --print-certs \
+              "$APK" \
+            | awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}'
+          )
+
+          if [ -z "$APK_SHA256" ]; then
+            echo "ERROR: Could not determine APK certificate SHA-256."
+            exit 1
+          fi
+
+          # Normalize fingerprints
+          KEYSTORE_SHA256=$(echo "$KEYSTORE_SHA256" | tr -d ':' | tr '[:lower:]' '[:upper:]')
+          APK_SHA256=$(echo "$APK_SHA256" | tr -d ':' | tr '[:lower:]' '[:upper:]')
+
+          echo "Keystore certificate SHA-256: $KEYSTORE_SHA256"
+          echo "APK certificate SHA-256:      $APK_SHA256"
+
+          # 5. Compare
+          if [ "$KEYSTORE_SHA256" != "$APK_SHA256" ]; then
+            echo "ERROR: APK is signed with a different certificate!"
+            exit 1
+          fi
+
+          echo "Signing certificate SHA-256 verification passed."
+          echo "APK is signed with the expected release.keystore."
 
       # ============================================================
       # UPLOAD APK
@@ -385,5 +443,7 @@ jobs:
           sed -i '/^RELEASE_KEY_PASSWORD=/d' gradle.properties
           sed -i '/^RELEASE_KEY_ALIAS=/d' gradle.properties
           sed -i '/^RELEASE_STORE_PASSWORD=/d' gradle.properties
+
+          rm -f TMessagesProj_AppStandalone/google-services.json.original
 
           echo "Signing files cleaned up."

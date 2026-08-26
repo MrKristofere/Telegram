@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       commits:
-        description: "Commit SHA via Space (required for cherry-pick, squash and merge-selected)"
+        description: "Commit SHA via Space. If empty, commits are taken from source_branch."
         required: false
         type: string
 
@@ -26,7 +26,12 @@ on:
           - rebase-branch
 
       source_branch:
-        description: "Source branch (required for merge-branch and rebase-branch)"
+        description: "Source branch. Used when commits are empty or for merge/rebase."
+        required: false
+        type: string
+
+      commit_message:
+        description: "Commit/merge message. If empty, generated automatically."
         required: false
         type: string
 
@@ -56,10 +61,10 @@ jobs:
           STRATEGY: ${{ inputs.strategy }}
           SOURCE_BRANCH: ${{ inputs.source_branch }}
         run: |
-          echo "Strategy:       $STRATEGY"
-          echo "Target branch:  $TARGET_BRANCH"
-          echo "Source branch:  ${SOURCE_BRANCH:-<not specified>}"
-          echo "Commits:        ${COMMITS:-<not specified>}"
+          echo "Strategy:      $STRATEGY"
+          echo "Target branch: $TARGET_BRANCH"
+          echo "Source branch: ${SOURCE_BRANCH:-<not specified>}"
+          echo "Commits:       ${COMMITS:-<not specified>}"
 
           if [[ -z "$TARGET_BRANCH" ]]; then
             echo "::error::target_branch is required"
@@ -67,10 +72,9 @@ jobs:
           fi
 
           case "$STRATEGY" in
-
             cherry-pick|squash|merge-selected)
-              if [[ -z "$COMMITS" ]]; then
-                echo "::error::commits is required for strategy '$STRATEGY'"
+              if [[ -z "$COMMITS" && -z "$SOURCE_BRANCH" ]]; then
+                echo "::error::Either commits or source_branch is required for strategy '$STRATEGY'"
                 exit 1
               fi
               ;;
@@ -86,57 +90,149 @@ jobs:
               echo "::error::Unknown strategy: $STRATEGY"
               exit 1
               ;;
-
           esac
+
+          if [[ -n "$SOURCE_BRANCH" && "$SOURCE_BRANCH" == "$TARGET_BRANCH" ]]; then
+            echo "::error::source_branch and target_branch cannot be the same"
+            exit 1
+          fi
 
       - name: Fetch target branch
         env:
           TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
-          git fetch origin \
-            "$TARGET_BRANCH:$TARGET_BRANCH"
+          git fetch origin "$TARGET_BRANCH"
 
       - name: Fetch source branch
-        if: ${{ inputs.strategy == 'merge-branch' || inputs.strategy == 'rebase-branch' }}
+        if: ${{ inputs.source_branch != '' }}
         env:
           SOURCE_BRANCH: ${{ inputs.source_branch }}
         run: |
-          git fetch origin \
-            "$SOURCE_BRANCH:$SOURCE_BRANCH"
+          git fetch origin "$SOURCE_BRANCH"
 
-      - name: Validate commits
+      - name: Checkout target branch
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+
+      - name: Resolve and sort commits
         if: ${{ inputs.strategy == 'cherry-pick' || inputs.strategy == 'squash' || inputs.strategy == 'merge-selected' }}
         env:
           COMMITS: ${{ inputs.commits }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
-          for commit in $COMMITS; do
-            echo "Validating commit: $commit"
+          set -euo pipefail
 
-            git cat-file -e "$commit^{commit}" || {
-              echo "::error::Commit not found: $commit"
-              exit 1
-            }
-          done
+          rm -f /tmp/input_commits.txt
+          rm -f /tmp/sorted_commits.txt
+
+          #
+          # If explicit SHAs were provided, use them.
+          #
+          if [[ -n "$COMMITS" ]]; then
+            echo "Using explicitly selected commits"
+
+            for commit in $COMMITS; do
+              if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
+                echo "::error::Commit not found: $commit"
+                exit 1
+              fi
+
+              echo "$commit" >> /tmp/input_commits.txt
+            done
+
+          #
+          # Otherwise take all commits that exist on source_branch
+          # but not on target_branch.
+          #
+          elif [[ -n "$SOURCE_BRANCH" ]]; then
+            echo "No explicit commits provided."
+            echo "Collecting commits from source branch: $SOURCE_BRANCH"
+
+            git rev-list \
+              "origin/$TARGET_BRANCH..origin/$SOURCE_BRANCH" \
+              > /tmp/input_commits.txt
+
+          else
+            echo "::error::No commits or source_branch provided"
+            exit 1
+          fi
+
+          #
+          # Remove duplicates.
+          #
+          sort -u /tmp/input_commits.txt > /tmp/unique_commits.txt
+
+          #
+          # Sort commits by AUTHOR DATE from oldest to newest.
+          #
+          # Format:
+          # timestamp<TAB>SHA
+          #
+          while IFS= read -r commit; do
+            [[ -z "$commit" ]] && continue
+
+            author_timestamp="$(git show -s --format=%at "$commit")"
+
+            printf '%s\t%s\n' \
+              "$author_timestamp" \
+              "$commit"
+
+          done < /tmp/unique_commits.txt \
+            | sort -n -k1,1 -k2,2 \
+            | cut -f2 \
+            > /tmp/sorted_commits.txt
+
+          if [[ ! -s /tmp/sorted_commits.txt ]]; then
+            echo "::error::No commits found to apply"
+            exit 1
+          fi
+
+          echo ""
+          echo "Commits will be applied in chronological order:"
+          echo ""
+
+          while IFS= read -r commit; do
+            timestamp="$(git show -s --format='%aI' "$commit")"
+            subject="$(git show -s --format='%s' "$commit")"
+
+            echo "$timestamp $commit $subject"
+          done < /tmp/sorted_commits.txt
+
+          #
+          # Make the list available to following steps.
+          #
+          {
+            echo 'COMMITS_TO_APPLY<<EOF'
+            cat /tmp/sorted_commits.txt
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
 
       - name: Apply changes
         env:
-          COMMITS: ${{ inputs.commits }}
+          COMMITS_TO_APPLY: ${{ env.COMMITS_TO_APPLY }}
           TARGET_BRANCH: ${{ inputs.target_branch }}
           SOURCE_BRANCH: ${{ inputs.source_branch }}
           STRATEGY: ${{ inputs.strategy }}
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
         run: |
+          set -euo pipefail
 
           case "$STRATEGY" in
 
-            # ---------------------------------------------------------
+            # =========================================================
             # CHERRY-PICK
-            # ---------------------------------------------------------
+            # =========================================================
             cherry-pick)
-              echo "Applying selected commits using cherry-pick"
+              echo "Strategy: cherry-pick"
 
               git checkout "$TARGET_BRANCH"
 
-              for commit in $COMMITS; do
+              while IFS= read -r commit; do
+                [[ -z "$commit" ]] && continue
+
                 echo "Cherry-picking: $commit"
 
                 git cherry-pick "$commit" || {
@@ -148,19 +244,21 @@ jobs:
 
                   exit 1
                 }
-              done
+              done <<< "$COMMITS_TO_APPLY"
               ;;
 
 
-            # ---------------------------------------------------------
+            # =========================================================
             # SQUASH
-            # ---------------------------------------------------------
+            # =========================================================
             squash)
-              echo "Applying selected commits using squash"
+              echo "Strategy: squash"
 
               git checkout "$TARGET_BRANCH"
 
-              for commit in $COMMITS; do
+              while IFS= read -r commit; do
+                [[ -z "$commit" ]] && continue
+
                 echo "Applying without commit: $commit"
 
                 git cherry-pick --no-commit "$commit" || {
@@ -172,26 +270,34 @@ jobs:
 
                   exit 1
                 }
-              done
+              done <<< "$COMMITS_TO_APPLY"
 
-              git commit \
-                -m "chore: squash selected commits"
+              if [[ -n "$COMMIT_MESSAGE" ]]; then
+                FINAL_MESSAGE="$COMMIT_MESSAGE"
+              elif [[ -n "$SOURCE_BRANCH" ]]; then
+                FINAL_MESSAGE="Squash $SOURCE_BRANCH into $TARGET_BRANCH"
+              else
+                FINAL_MESSAGE="chore: squash selected commits"
+              fi
+
+              git commit -m "$FINAL_MESSAGE"
               ;;
 
 
-            # ---------------------------------------------------------
+            # =========================================================
             # MERGE SELECTED
-            # ---------------------------------------------------------
+            # =========================================================
             merge-selected)
-              echo "Merging selected commits"
+              echo "Strategy: merge-selected"
 
               TEMP_BRANCH="automation/apply-${GITHUB_RUN_ID}"
 
               git checkout "$TARGET_BRANCH"
-
               git checkout -b "$TEMP_BRANCH"
 
-              for commit in $COMMITS; do
+              while IFS= read -r commit; do
+                [[ -z "$commit" ]] && continue
+
                 echo "Cherry-picking into temporary branch: $commit"
 
                 git cherry-pick "$commit" || {
@@ -203,14 +309,22 @@ jobs:
 
                   exit 1
                 }
-              done
+              done <<< "$COMMITS_TO_APPLY"
 
               git checkout "$TARGET_BRANCH"
+
+              if [[ -n "$COMMIT_MESSAGE" ]]; then
+                FINAL_MESSAGE="$COMMIT_MESSAGE"
+              elif [[ -n "$SOURCE_BRANCH" ]]; then
+                FINAL_MESSAGE="Merge selected commits from $SOURCE_BRANCH"
+              else
+                FINAL_MESSAGE="Merge selected commits"
+              fi
 
               git merge \
                 --no-ff \
                 "$TEMP_BRANCH" \
-                -m "Merge selected commits" || {
+                -m "$FINAL_MESSAGE" || {
                   echo "::error::Merge failed"
 
                   if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
@@ -224,20 +338,26 @@ jobs:
               ;;
 
 
-            # ---------------------------------------------------------
+            # =========================================================
             # MERGE BRANCH
-            # ---------------------------------------------------------
+            # =========================================================
             merge-branch)
-              echo "Merging source branch into target branch"
+              echo "Strategy: merge-branch"
               echo "Source: $SOURCE_BRANCH"
               echo "Target: $TARGET_BRANCH"
 
               git checkout "$TARGET_BRANCH"
 
+              if [[ -n "$COMMIT_MESSAGE" ]]; then
+                FINAL_MESSAGE="$COMMIT_MESSAGE"
+              else
+                FINAL_MESSAGE="Merge $SOURCE_BRANCH into $TARGET_BRANCH"
+              fi
+
               git merge \
                 --no-ff \
-                "$SOURCE_BRANCH" \
-                -m "Merge $SOURCE_BRANCH into $TARGET_BRANCH" || {
+                "origin/$SOURCE_BRANCH" \
+                -m "$FINAL_MESSAGE" || {
                   echo "::error::Merge failed"
 
                   if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
@@ -249,27 +369,31 @@ jobs:
               ;;
 
 
-            # ---------------------------------------------------------
+            # =========================================================
             # REBASE BRANCH
-            # ---------------------------------------------------------
+            # =========================================================
             rebase-branch)
-              echo "Rebasing source branch onto target branch"
+              echo "Strategy: rebase-branch"
               echo "Source: $SOURCE_BRANCH"
               echo "Target: $TARGET_BRANCH"
 
-              # Save the current source branch HEAD.
-              SOURCE_HEAD="$(git rev-parse "$SOURCE_BRANCH")"
+              git fetch origin \
+                "$SOURCE_BRANCH:$SOURCE_BRANCH"
 
-              # Find the common ancestor between source and target.
+              git fetch origin \
+                "$TARGET_BRANCH:$TARGET_BRANCH"
+
+              #
+              # Make sure source branch is based on the latest
+              # target branch.
+              #
+              git checkout "$SOURCE_BRANCH"
+
               MERGE_BASE="$(git merge-base \
                 "$SOURCE_BRANCH" \
                 "$TARGET_BRANCH")"
 
-              echo "Source HEAD: $SOURCE_HEAD"
-              echo "Merge base:  $MERGE_BASE"
-
-              # Rebase source branch onto target branch.
-              git checkout "$SOURCE_BRANCH"
+              echo "Merge base: $MERGE_BASE"
 
               git rebase \
                 --onto "$TARGET_BRANCH" \
@@ -283,15 +407,13 @@ jobs:
                   exit 1
                 }
 
-              # The source branch now contains:
-              #
-              # target history + rebased source commits
-              #
-              # Move target branch to the rebased source HEAD.
               REBASED_HEAD="$(git rev-parse HEAD)"
 
               echo "Rebased HEAD: $REBASED_HEAD"
 
+              #
+              # Move target branch forward.
+              #
               git checkout "$TARGET_BRANCH"
 
               git merge \

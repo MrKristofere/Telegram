@@ -13,11 +13,21 @@ on:
         required: true
         type: string
 
+      strategy:
+        description: "How to apply commits"
+        required: true
+        type: choice
+        default: cherry-pick
+        options:
+          - cherry-pick
+          - squash
+          - merge
+
 permissions:
   contents: write
 
 jobs:
-  cherry-pick:
+  apply-commits:
     runs-on: ubuntu-latest
 
     steps:
@@ -32,10 +42,31 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Validate commits
+      - name: Validate inputs
         env:
           COMMITS: ${{ inputs.commits }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          STRATEGY: ${{ inputs.strategy }}
         run: |
+          if [[ -z "$COMMITS" ]]; then
+            echo "::error::No commits specified"
+            exit 1
+          fi
+
+          if [[ -z "$TARGET_BRANCH" ]]; then
+            echo "::error::No target branch specified"
+            exit 1
+          fi
+
+          case "$STRATEGY" in
+            cherry-pick|squash|merge)
+              ;;
+            *)
+              echo "::error::Unknown strategy: $STRATEGY"
+              exit 1
+              ;;
+          esac
+
           for commit in $COMMITS; do
             echo "Validating: $commit"
 
@@ -50,22 +81,83 @@ jobs:
           TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
           git fetch origin "$TARGET_BRANCH"
+
           git checkout -B "$TARGET_BRANCH" \
             "origin/$TARGET_BRANCH"
 
-      - name: Cherry-pick commits
+      - name: Apply commits
         env:
           COMMITS: ${{ inputs.commits }}
+          STRATEGY: ${{ inputs.strategy }}
         run: |
-          for commit in $COMMITS; do
-            echo "Cherry-picking: $commit"
+          case "$STRATEGY" in
 
-            git cherry-pick "$commit" || {
-              echo "::error::Cherry-pick failed for commit: $commit"
-              git cherry-pick --abort
-              exit 1
-            }
-          done
+            cherry-pick)
+              echo "Applying commits using cherry-pick"
+
+              for commit in $COMMITS; do
+                echo "Cherry-picking: $commit"
+
+                git cherry-pick "$commit" || {
+                  echo "::error::Cherry-pick failed for commit: $commit"
+                  git cherry-pick --abort
+                  exit 1
+                }
+              done
+              ;;
+
+            squash)
+              echo "Applying commits using squash"
+
+              for commit in $COMMITS; do
+                echo "Applying without commit: $commit"
+
+                git cherry-pick --no-commit "$commit" || {
+                  echo "::error::Failed to apply commit: $commit"
+                  git cherry-pick --abort
+                  exit 1
+                }
+              done
+
+              git commit \
+                -m "chore: squash selected commits"
+
+              ;;
+
+            merge)
+              echo "Applying commits using merge"
+
+              TEMP_BRANCH="automation/cherry-pick-${GITHUB_RUN_ID}"
+
+              # Create a temporary branch from target branch.
+              git checkout -b "$TEMP_BRANCH"
+
+              for commit in $COMMITS; do
+                echo "Cherry-picking into temporary branch: $commit"
+
+                git cherry-pick "$commit" || {
+                  echo "::error::Cherry-pick failed for commit: $commit"
+                  git cherry-pick --abort
+                  exit 1
+                }
+              done
+
+              # Return to target branch.
+              git checkout "$TARGET_BRANCH"
+
+              # Merge the temporary branch with an explicit merge commit.
+              git merge --no-ff "$TEMP_BRANCH" \
+                -m "Merge selected commits" || {
+                  echo "::error::Merge failed"
+                  git merge --abort
+                  exit 1
+                }
+
+              # Remove temporary local branch.
+              git branch -D "$TEMP_BRANCH"
+              ;;
+
+          esac
 
       - name: Push
         env:

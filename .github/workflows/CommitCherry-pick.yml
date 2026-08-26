@@ -1,0 +1,51 @@
+name: Cherry-pick commit to branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Commit SHA"
+        required: true
+        type: string
+
+      target_branch:
+        description: "Target branch"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  cherry-pick:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Validate commit
+        run: |
+          git cat-file -e "${{ inputs.commit_sha }}^{commit}"
+
+      - name: Checkout target branch
+        run: |
+          git fetch origin "${{ inputs.target_branch }}"
+          git checkout -B "${{ inputs.target_branch }}" \
+            "origin/${{ inputs.target_branch }}"
+
+      - name: Cherry-pick commit
+        run: |
+          git cherry-pick "${{ inputs.commit_sha }}"
+
+      - name: Push
+        run: |
+          git push origin "${{ inputs.target_branch }}"

@@ -25,6 +25,10 @@ jobs:
 
     steps:
 
+      # ============================================================
+      # FREE DISK SPACE
+      # ============================================================
+
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -36,6 +40,10 @@ jobs:
           docker-images: false
           swap-storage: true
 
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout
         uses: actions/checkout@v7
         with:
@@ -43,94 +51,20 @@ jobs:
           submodules: recursive
 
       # ============================================================
-      # RESTORE PRIVATE RELEASE KEYSTORE
+      # ISOLATE GRADLE USER HOME
       # ============================================================
 
-      - name: Restore release keystore
-        env:
-          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+      - name: Isolate Gradle User Home
         run: |
           set -euo pipefail
 
-          KEYSTORE="TMessagesProj/config/release.keystore"
+          GRADLE_HOME="$RUNNER_TEMP/gradle-user-home"
 
-          # We don't print the secret.
-          # Decode it directly into the required Telegram path.
-          mkdir -p "$(dirname "$KEYSTORE")"
+          mkdir -p "$GRADLE_HOME"
 
-          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          echo "GRADLE_USER_HOME=$GRADLE_HOME" >> "$GITHUB_ENV"
 
-          # Basic validation without printing keystore contents.
-          if [ ! -s "$KEYSTORE" ]; then
-            echo "ERROR: release.keystore was not created."
-            exit 1
-          fi
-
-          chmod 600 "$KEYSTORE"
-
-          echo "Release keystore restored."
-
-      # ============================================================
-      # CONFIGURE RELEASE SIGNING
-      # ============================================================
-
-      - name: Configure release signing
-        env:
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-        run: |
-          set -euo pipefail
-
-          # Explicitly mask the values in case they ever appear in logs.
-          echo "::add-mask::$RELEASE_KEY_PASSWORD"
-          echo "::add-mask::$RELEASE_KEY_ALIAS"
-          echo "::add-mask::$RELEASE_STORE_PASSWORD"
-
-          # Remove repository/default values.
-          sed -i '/^RELEASE_KEY_PASSWORD=/d' gradle.properties
-          sed -i '/^RELEASE_KEY_ALIAS=/d' gradle.properties
-          sed -i '/^RELEASE_STORE_PASSWORD=/d' gradle.properties
-
-          # Add the real values only to the temporary runner copy.
-          {
-            printf '%s\n' "RELEASE_KEY_PASSWORD=$RELEASE_KEY_PASSWORD"
-            printf '%s\n' "RELEASE_KEY_ALIAS=$RELEASE_KEY_ALIAS"
-            printf '%s\n' "RELEASE_STORE_PASSWORD=$RELEASE_STORE_PASSWORD"
-          } >> gradle.properties
-
-          echo "Release signing configured."
-
-      # ============================================================
-      # VERIFY KEYSTORE
-      # ============================================================
-
-      - name: Verify release keystore
-        env:
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-        run: |
-          set -euo pipefail
-
-          echo "::add-mask::$RELEASE_KEY_PASSWORD"
-          echo "::add-mask::$RELEASE_KEY_ALIAS"
-          echo "::add-mask::$RELEASE_STORE_PASSWORD"
-
-          KEYSTORE="TMessagesProj/config/release.keystore"
-
-          if [ ! -f "$KEYSTORE" ]; then
-            echo "ERROR: $KEYSTORE not found."
-            exit 1
-          fi
-
-          keytool -list \
-            -keystore "$KEYSTORE" \
-            -storepass "$RELEASE_STORE_PASSWORD" \
-            -alias "$RELEASE_KEY_ALIAS" \
-            >/dev/null
-
-          echo "Release keystore verification passed."
+          echo "Gradle User Home isolated to runner temp directory."
 
       # ============================================================
       # PACKAGE
@@ -296,6 +230,38 @@ jobs:
             "$BUILD_VARS"
 
       # ============================================================
+      # RESTORE PRIVATE RELEASE KEYSTORE
+      # ============================================================
+
+      - name: Restore release keystore
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "ERROR: RELEASE_KEYSTORE_BASE64 secret is not configured."
+            exit 1
+          fi
+
+          KEYSTORE="TMessagesProj/config/release.keystore"
+
+          mkdir -p "$(dirname "$KEYSTORE")"
+
+          printf '%s' "$RELEASE_KEYSTORE_BASE64" \
+            | base64 --decode \
+            > "$KEYSTORE"
+
+          if [ ! -s "$KEYSTORE" ]; then
+            echo "ERROR: release.keystore was not created or is empty."
+            exit 1
+          fi
+
+          chmod 600 "$KEYSTORE"
+
+          echo "Release keystore restored."
+
+      # ============================================================
       # GRADLE
       # ============================================================
 
@@ -306,6 +272,10 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1.2.23
         with:
           key: android-ndk-${{ steps.sdk.outputs.ndk }}
+
+      # ============================================================
+      # NATIVE CACHE
+      # ============================================================
 
       - name: Cache native CMake / NDK build
         uses: actions/cache@v6
@@ -320,10 +290,92 @@ jobs:
             ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-
             ${{ runner.os }}-ndk-
 
+      # ============================================================
+      # SETUP GRADLE
+      # ============================================================
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
           cache-read-only: false
+          gradle-home-cache-excludes: |
+            caches/build-cache-1
+
+      # ============================================================
+      # CONFIGURE RELEASE SIGNING
+      # ============================================================
+
+      - name: Configure release signing
+        env:
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$RELEASE_KEY_PASSWORD" ]; then
+            echo "ERROR: RELEASE_KEY_PASSWORD secret is not configured."
+            exit 1
+          fi
+
+          if [ -z "$RELEASE_KEY_ALIAS" ]; then
+            echo "ERROR: RELEASE_KEY_ALIAS secret is not configured."
+            exit 1
+          fi
+
+          if [ -z "$RELEASE_STORE_PASSWORD" ]; then
+            echo "ERROR: RELEASE_STORE_PASSWORD secret is not configured."
+            exit 1
+          fi
+
+          echo "::add-mask::$RELEASE_KEY_PASSWORD"
+          echo "::add-mask::$RELEASE_KEY_ALIAS"
+          echo "::add-mask::$RELEASE_STORE_PASSWORD"
+
+          # Remove repository/default signing values.
+          sed -i '/^RELEASE_KEY_PASSWORD=/d' gradle.properties
+          sed -i '/^RELEASE_KEY_ALIAS=/d' gradle.properties
+          sed -i '/^RELEASE_STORE_PASSWORD=/d' gradle.properties
+
+          # Store real signing values only in Gradle User Home.
+          {
+            printf '%s\n' "RELEASE_KEY_PASSWORD=$RELEASE_KEY_PASSWORD"
+            printf '%s\n' "RELEASE_KEY_ALIAS=$RELEASE_KEY_ALIAS"
+            printf '%s\n' "RELEASE_STORE_PASSWORD=$RELEASE_STORE_PASSWORD"
+          } > "$GRADLE_USER_HOME/gradle.properties"
+
+          chmod 600 "$GRADLE_USER_HOME/gradle.properties"
+
+          echo "Release signing configured."
+
+      # ============================================================
+      # VERIFY KEYSTORE
+      # ============================================================
+
+      - name: Verify release keystore
+        env:
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+
+          echo "::add-mask::$RELEASE_STORE_PASSWORD"
+          echo "::add-mask::$RELEASE_KEY_ALIAS"
+
+          KEYSTORE="TMessagesProj/config/release.keystore"
+
+          if [ ! -f "$KEYSTORE" ]; then
+            echo "ERROR: $KEYSTORE not found."
+            exit 1
+          fi
+
+          keytool -list \
+            -keystore "$KEYSTORE" \
+            -storepass "$RELEASE_STORE_PASSWORD" \
+            -alias "$RELEASE_KEY_ALIAS" \
+            >/dev/null
+
+          echo "Release keystore verification passed."
 
       # ============================================================
       # BUILD SIGNED APK
@@ -338,7 +390,7 @@ jobs:
             :TMessagesProj_AppStandalone:assembleAfatStandalone
 
       # ============================================================
-      # VERIFY APK PACKAGE + SIGNATURE
+      # VERIFY APK PACKAGE + SIGNATURE + SHA-256
       # ============================================================
 
       - name: Verify APK package and signature
@@ -353,34 +405,50 @@ jobs:
 
           KEYSTORE="TMessagesProj/config/release.keystore"
 
-          APK=$(find TMessagesProj_AppStandalone/build/outputs -name "*.apk" | head -n 1)
+          APK=$(find TMessagesProj_AppStandalone/build/outputs \
+            -type f \
+            -name "*.apk" \
+            | head -n 1)
 
           if [ -z "$APK" ]; then
             echo "ERROR: APK not found."
             exit 1
           fi
 
-          # 1. Package name
+          echo "APK: $APK"
+
+          # ----------------------------------------------------------
+          # 1. Verify package name
+          # ----------------------------------------------------------
+
           "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/aapt2" \
             dump badging "$APK" \
             | grep -q "package: name='ft.telegram.messenger'"
 
           echo "Package verification passed."
 
-          # 2. APK signature itself is valid
+          # ----------------------------------------------------------
+          # 2. Verify APK cryptographic signature
+          # ----------------------------------------------------------
+
           "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/apksigner" \
             verify \
+            --verbose \
             "$APK"
 
           echo "APK signature verification passed."
 
-          # 3. SHA-256 certificate from our keystore
+          # ----------------------------------------------------------
+          # 3. SHA-256 from release.keystore certificate
+          # ----------------------------------------------------------
+
           KEYSTORE_SHA256=$(
             keytool -list \
+              -v \
               -keystore "$KEYSTORE" \
               -storepass "$RELEASE_STORE_PASSWORD" \
               -alias "$RELEASE_KEY_ALIAS" \
-            | awk -F': ' '/SHA256 fingerprint:/{print $2; exit}'
+            | awk -F': ' '/SHA256:/{print $2; exit}'
           )
 
           if [ -z "$KEYSTORE_SHA256" ]; then
@@ -388,7 +456,10 @@ jobs:
             exit 1
           fi
 
-          # 4. SHA-256 certificate from the actual APK
+          # ----------------------------------------------------------
+          # 4. SHA-256 from APK certificate
+          # ----------------------------------------------------------
+
           APK_SHA256=$(
             "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/apksigner" \
               verify \
@@ -402,14 +473,25 @@ jobs:
             exit 1
           fi
 
-          # Normalize fingerprints
-          KEYSTORE_SHA256=$(echo "$KEYSTORE_SHA256" | tr -d ':' | tr '[:lower:]' '[:upper:]')
-          APK_SHA256=$(echo "$APK_SHA256" | tr -d ':' | tr '[:lower:]' '[:upper:]')
+          # ----------------------------------------------------------
+          # 5. Normalize fingerprints
+          # ----------------------------------------------------------
+
+          KEYSTORE_SHA256=$(echo "$KEYSTORE_SHA256" \
+            | tr -d ':' \
+            | tr '[:lower:]' '[:upper:]')
+
+          APK_SHA256=$(echo "$APK_SHA256" \
+            | tr -d ':' \
+            | tr '[:lower:]' '[:upper:]')
 
           echo "Keystore certificate SHA-256: $KEYSTORE_SHA256"
           echo "APK certificate SHA-256:      $APK_SHA256"
 
-          # 5. Compare
+          # ----------------------------------------------------------
+          # 6. Compare certificates
+          # ----------------------------------------------------------
+
           if [ "$KEYSTORE_SHA256" != "$APK_SHA256" ]; then
             echo "ERROR: APK is signed with a different certificate!"
             exit 1
@@ -439,11 +521,7 @@ jobs:
           set -euo pipefail
 
           rm -f TMessagesProj/config/release.keystore
-
-          sed -i '/^RELEASE_KEY_PASSWORD=/d' gradle.properties
-          sed -i '/^RELEASE_KEY_ALIAS=/d' gradle.properties
-          sed -i '/^RELEASE_STORE_PASSWORD=/d' gradle.properties
-
+          rm -f "$GRADLE_USER_HOME/gradle.properties"
           rm -f TMessagesProj_AppStandalone/google-services.json.original
 
           echo "Signing files cleaned up."

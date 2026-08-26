@@ -1,5 +1,4 @@
-name: Cherry-pick with manual exclusions
-
+name: Conflict Commit Cherry-pick
 on:
   workflow_dispatch:
     inputs:

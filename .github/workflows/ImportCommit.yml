@@ -39,8 +39,8 @@ jobs:
 
       - name: Configure Git
         run: |
-          git config user.name "${{ github.actor }}"
-          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Checkout target branch
         env:
@@ -74,9 +74,7 @@ jobs:
             echo "Processing: $commit"
             echo "========================================"
 
-            # --------------------------------------------------
             # Make sure the commit exists locally.
-            # --------------------------------------------------
 
             if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
               echo "Commit is not available locally. Fetching..."
@@ -92,27 +90,40 @@ jobs:
 
             echo "Commit found: $commit"
 
-            # --------------------------------------------------
-            # Save original commit message.
-            # --------------------------------------------------
+            # Get original commit information.
+
+            AUTHOR_NAME=$(git log -1 --format='%an' "$commit" 2>/dev/null || true)
+            AUTHOR_EMAIL=$(git log -1 --format='%ae' "$commit" 2>/dev/null || true)
+            AUTHOR_DATE=$(git log -1 --format='%aI' "$commit" 2>/dev/null || true)
 
             git log -1 --format=%B "$commit" > /tmp/commit_message
 
-            # --------------------------------------------------
+            # Fallback to github-actions[bot] if author cannot be determined.
+
+            if [ -z "$AUTHOR_NAME" ] || [ -z "$AUTHOR_EMAIL" ]; then
+              echo "Could not determine original author."
+              echo "Using github-actions[bot] as author."
+
+              AUTHOR_NAME="github-actions[bot]"
+              AUTHOR_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
+              AUTHOR_DATE=""
+            fi
+
+            echo "Author: $AUTHOR_NAME <$AUTHOR_EMAIL>"
+
+            if [ -n "$AUTHOR_DATE" ]; then
+              echo "Author date: $AUTHOR_DATE"
+            else
+              echo "Author date: current date"
+            fi
+
             # Try to apply the commit without creating a commit.
-            #
-            # IMPORTANT:
-            # The command is inside "if", so a conflict does not
-            # terminate the GitHub Actions step.
-            # --------------------------------------------------
 
             if git cherry-pick --no-commit "$commit"; then
 
               echo "Cherry-pick completed without conflicts."
 
-              # ------------------------------------------------
               # Nothing changed.
-              # ------------------------------------------------
 
               if git diff --cached --quiet && git diff --quiet; then
                 echo "SKIPPED: $commit"
@@ -122,17 +133,30 @@ jobs:
 
               git add -A
 
-              # ------------------------------------------------
-              # Create a new commit.
-              # ------------------------------------------------
+              # Set original author.
 
-              if git commit \
-                --author="${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>" \
-                --file=/tmp/commit_message
-              then
+              export GIT_AUTHOR_NAME="$AUTHOR_NAME"
+              export GIT_AUTHOR_EMAIL="$AUTHOR_EMAIL"
+
+              if [ -n "$AUTHOR_DATE" ]; then
+                export GIT_AUTHOR_DATE="$AUTHOR_DATE"
+              else
+                unset GIT_AUTHOR_DATE
+              fi
+
+              # Bot is always the committer.
+
+              export GIT_COMMITTER_NAME="github-actions[bot]"
+              export GIT_COMMITTER_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
+
+              if git commit --file=/tmp/commit_message; then
+
+                NEW_SHA=$(git rev-parse HEAD)
 
                 echo "APPLIED: $commit"
-                echo "$commit | applied" >> /tmp/applied.log
+                echo "Created: $NEW_SHA"
+
+                echo "$commit | applied | new: $NEW_SHA | author: $AUTHOR_NAME <$AUTHOR_EMAIL>" >> /tmp/applied.log
 
               else
 
@@ -146,9 +170,7 @@ jobs:
               continue
             fi
 
-            # --------------------------------------------------
             # Conflict detected.
-            # --------------------------------------------------
 
             echo "Conflict detected for $commit"
 
@@ -160,9 +182,7 @@ jobs:
             NON_MD_CONFLICT=0
             MD_CONFLICT_FILES=""
 
-            # --------------------------------------------------
             # Analyze all conflicted files.
-            # --------------------------------------------------
 
             while IFS= read -r file; do
               [ -z "$file" ] && continue
@@ -173,7 +193,6 @@ jobs:
                   echo "Markdown conflict: $file"
                   echo "Keeping target branch version."
 
-                  # Keep target branch version.
                   git checkout --ours -- "$file"
                   git add -- "$file"
 
@@ -190,23 +209,15 @@ jobs:
                   ;;
 
               esac
+
             done <<< "$CONFLICTED_FILES"
 
-            # --------------------------------------------------
             # Non-markdown conflict.
-            #
-            # Reject the whole commit and completely restore
-            # the repository to the state before this commit.
-            # --------------------------------------------------
 
             if [ "$NON_MD_CONFLICT" -eq 1 ]; then
 
               echo "Skipping $commit because of non-markdown conflict."
 
-              # IMPORTANT:
-              # Do NOT use git cherry-pick --abort here.
-              #
-              # We use --no-commit, so simply restore HEAD.
               git reset --hard HEAD
 
               REASON=$(echo "$CONFLICTED_FILES" | tr '\n' ',' | sed 's/,$//')
@@ -216,29 +227,19 @@ jobs:
               continue
             fi
 
-            # --------------------------------------------------
-            # Only .md files conflicted.
-            #
-            # The target branch version has already been restored
-            # above using "git checkout --ours".
-            #
-            # All other changes from the commit remain.
-            # --------------------------------------------------
+            # Only markdown conflicts detected.
 
             echo "Only markdown conflicts detected."
             echo "Markdown changes will be excluded."
 
             git add -A
 
-            # --------------------------------------------------
-            # Check whether anything remains to commit.
-            # --------------------------------------------------
+            # Check whether anything remains.
 
             if git diff --cached --quiet; then
 
               echo "Nothing remains to commit."
 
-              # Restore clean state.
               git reset --hard HEAD
 
               echo "$commit | only .md changes conflicted; nothing else to apply" >> /tmp/skipped.log
@@ -246,18 +247,32 @@ jobs:
               continue
             fi
 
-            # --------------------------------------------------
-            # Create a NEW modified commit.
-            # --------------------------------------------------
+            # Set original author.
 
-            if git commit \
-              --author="${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>" \
-              --file=/tmp/commit_message
-            then
+            export GIT_AUTHOR_NAME="$AUTHOR_NAME"
+            export GIT_AUTHOR_EMAIL="$AUTHOR_EMAIL"
+
+            if [ -n "$AUTHOR_DATE" ]; then
+              export GIT_AUTHOR_DATE="$AUTHOR_DATE"
+            else
+              unset GIT_AUTHOR_DATE
+            fi
+
+            # Bot is always the committer.
+
+            export GIT_COMMITTER_NAME="github-actions[bot]"
+            export GIT_COMMITTER_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
+
+            # Create modified commit.
+
+            if git commit --file=/tmp/commit_message; then
+
+              NEW_SHA=$(git rev-parse HEAD)
 
               echo "MODIFIED: $commit"
+              echo "Created: $NEW_SHA"
 
-              echo "$commit | applied with .md conflicts excluded: $MD_CONFLICT_FILES" >> /tmp/modified.log
+              echo "$commit | applied with .md conflicts excluded: $MD_CONFLICT_FILES | new: $NEW_SHA | author: $AUTHOR_NAME <$AUTHOR_EMAIL>" >> /tmp/modified.log
 
             else
 

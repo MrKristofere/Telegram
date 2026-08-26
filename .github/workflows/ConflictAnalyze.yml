@@ -1,0 +1,309 @@
+name: Analyze selected commits
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repository:
+        description: "Source repository, example my-org/backend"
+        required: true
+        type: string
+
+      source_branch:
+        description: "Source branch"
+        required: true
+        default: "main"
+        type: string
+
+      target_branch:
+        description: "Target branch"
+        required: true
+        type: string
+
+      commits:
+        description: "Commit SHA — separated by a space"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Checkout target branch
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          git fetch origin "$TARGET_BRANCH"
+          git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+
+      - name: Add source repository
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+        run: |
+          git remote add source "https://github.com/$SOURCE_REPOSITORY.git"
+          git fetch source "$SOURCE_BRANCH" || true
+
+      - name: Analyze commits
+        env:
+          COMMITS: ${{ inputs.commits }}
+        run: |
+          for commit in $COMMITS; do
+
+            echo ""
+            echo "========================================"
+            echo "Processing: $commit"
+            echo "========================================"
+
+            if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
+              echo "Commit is not available locally. Fetching..."
+
+              git fetch source "$commit" 2>/dev/null || true
+
+              if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
+                echo "SKIPPED: commit not found"
+                continue
+              fi
+            fi
+
+            echo "Commit found: $commit"
+
+            AUTHOR_NAME=$(git log -1 --format='%an' "$commit" 2>/dev/null || true)
+            AUTHOR_EMAIL=$(git log -1 --format='%ae' "$commit" 2>/dev/null || true)
+            AUTHOR_DATE=$(git log -1 --format='%aI' "$commit" 2>/dev/null || true)
+
+            echo "Author: $AUTHOR_NAME <$AUTHOR_EMAIL>"
+            echo "Author date: $AUTHOR_DATE"
+
+            PARENT=$(git rev-parse "$commit^" 2>/dev/null || true)
+
+            if [ -n "$PARENT" ]; then
+              echo "Parent: $PARENT"
+            else
+              echo "Parent: none"
+            fi
+
+            echo ""
+            echo "----------------------------------------"
+            echo "Original commit diff"
+            echo "----------------------------------------"
+
+            if [ -n "$PARENT" ]; then
+              git diff --no-ext-diff "$PARENT" "$commit" || true
+            else
+              git show --format=fuller --stat "$commit" || true
+            fi
+
+            echo ""
+            echo "----------------------------------------"
+            echo "Trying cherry-pick --no-commit"
+            echo "----------------------------------------"
+
+            if git cherry-pick --no-commit "$commit"; then
+
+              echo ""
+              echo "NO CONFLICT"
+              echo "Commit can be applied cleanly."
+
+              git reset --hard HEAD
+
+              continue
+            fi
+
+            echo ""
+            echo "========================================"
+            echo "CONFLICT DETECTED"
+            echo "========================================"
+
+            echo ""
+            echo "----------------------------------------"
+            echo "Git status"
+            echo "----------------------------------------"
+
+            git status --short || true
+
+            echo ""
+            echo "----------------------------------------"
+            echo "Unmerged files"
+            echo "----------------------------------------"
+
+            git diff --name-only --diff-filter=U || true
+
+            echo ""
+            echo "----------------------------------------"
+            echo "Index stages"
+            echo "----------------------------------------"
+
+            git ls-files --unmerged || true
+
+            echo ""
+            echo "----------------------------------------"
+            echo "Combined conflict diff"
+            echo "----------------------------------------"
+
+            git diff --cc || true
+
+            echo ""
+            echo "----------------------------------------"
+            echo "Normal conflict diff"
+            echo "----------------------------------------"
+
+            git diff || true
+
+            echo ""
+            echo "----------------------------------------"
+            echo "Detailed file analysis"
+            echo "----------------------------------------"
+
+            CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
+
+            while IFS= read -r file; do
+
+              [ -z "$file" ] && continue
+
+              echo ""
+              echo "========================================"
+              echo "CONFLICT FILE:"
+              echo "$file"
+              echo "========================================"
+
+              echo ""
+              echo "File status:"
+              git status --short -- "$file" || true
+
+              echo ""
+              echo "Index entries:"
+              git ls-files --stage -- "$file" || true
+
+              echo ""
+              echo "----- BASE (stage 1) -----"
+
+              if git show ":1:$file" > /tmp/base_file 2>/dev/null; then
+                wc -l /tmp/base_file || true
+                cat /tmp/base_file || true
+              else
+                echo "[No BASE version]"
+              fi
+
+              echo ""
+              echo "----- OURS / TARGET (stage 2) -----"
+
+              if git show ":2:$file" > /tmp/ours_file 2>/dev/null; then
+                wc -l /tmp/ours_file || true
+                cat /tmp/ours_file || true
+              else
+                echo "[No OURS version]"
+              fi
+
+              echo ""
+              echo "----- THEIRS / SOURCE COMMIT (stage 3) -----"
+
+              if git show ":3:$file" > /tmp/theirs_file 2>/dev/null; then
+                wc -l /tmp/theirs_file || true
+                cat /tmp/theirs_file || true
+              else
+                echo "[No THEIRS version]"
+              fi
+
+              echo ""
+              echo "----- CURRENT WORKTREE -----"
+
+              if [ -f "$file" ]; then
+                wc -l "$file" || true
+                cat "$file" || true
+              else
+                echo "[File does not exist in working tree]"
+              fi
+
+              echo ""
+              echo "----- DIFF: BASE -> OURS -----"
+
+              if [ -f /tmp/base_file ] && [ -f /tmp/ours_file ]; then
+                diff -u /tmp/base_file /tmp/ours_file || true
+              elif [ -f /tmp/base_file ]; then
+                echo "OURS deleted the file."
+              elif [ -f /tmp/ours_file ]; then
+                echo "OURS added the file."
+              else
+                echo "No BASE or OURS version."
+              fi
+
+              echo ""
+              echo "----- DIFF: BASE -> THEIRS -----"
+
+              if [ -f /tmp/base_file ] && [ -f /tmp/theirs_file ]; then
+                diff -u /tmp/base_file /tmp/theirs_file || true
+              elif [ -f /tmp/base_file ]; then
+                echo "THEIRS deleted the file."
+              elif [ -f /tmp/theirs_file ]; then
+                echo "THEIRS added the file."
+              else
+                echo "No BASE or THEIRS version."
+              fi
+
+              echo ""
+              echo "----- DIFF: OURS -> THEIRS -----"
+
+              if [ -f /tmp/ours_file ] && [ -f /tmp/theirs_file ]; then
+                diff -u /tmp/ours_file /tmp/theirs_file || true
+              elif [ -f /tmp/ours_file ]; then
+                echo "THEIRS deleted the file."
+              elif [ -f /tmp/theirs_file ]; then
+                echo "THEIRS added the file."
+              else
+                echo "No OURS or THEIRS version."
+              fi
+
+              echo ""
+              echo "----- Conflict markers in working tree -----"
+
+              if [ -f "$file" ]; then
+                grep -n -E '^(<<<<<<<|=======|>>>>>>>)' "$file" || true
+              else
+                echo "No working tree file."
+              fi
+
+            done <<< "$CONFLICTED_FILES"
+
+            echo ""
+            echo "========================================"
+            echo "END ANALYSIS: $commit"
+            echo "========================================"
+
+            echo ""
+            echo "IMPORTANT:"
+            echo "This commit was NOT applied."
+            echo "Repository will be restored before processing the next commit."
+
+            git reset --hard HEAD
+
+          done
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "# Conflict analysis" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Commits analyzed:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          for commit in ${{ inputs.commits }}; do
+            echo "- \`$commit\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Detailed conflict information is available in the workflow log above." >> "$GITHUB_STEP_SUMMARY"

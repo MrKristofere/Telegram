@@ -1,4 +1,4 @@
-name: Conflict Cherry-pick
+name: Cherry-pick with manual exclusions
 
 on:
   workflow_dispatch:
@@ -81,7 +81,7 @@ jobs:
             echo "========================================"
 
             # --------------------------------------------------
-            # Find commit locally or fetch it.
+            # Find commit.
             # --------------------------------------------------
 
             if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
@@ -102,17 +102,17 @@ jobs:
             echo "Commit found: $commit"
 
             # --------------------------------------------------
-            # Get commit message.
+            # Save commit message.
             # --------------------------------------------------
 
             git log -1 --format=%B "$commit" > /tmp/commit_message
 
             # --------------------------------------------------
-            # Find exclusions for this specific commit.
+            # Find exclusions for this commit.
             #
             # Format:
             #
-            # SHA:path,path SHA:path,path
+            # SHA:path,path
             # --------------------------------------------------
 
             EXCLUDED=""
@@ -122,20 +122,18 @@ jobs:
               RULE_SHA="${rule%%:*}"
 
               if [ "$RULE_SHA" = "$commit" ]; then
-
-                RULE_PATHS="${rule#*:}"
-
-                EXCLUDED="$RULE_PATHS"
+                EXCLUDED="${rule#*:}"
 
                 echo "Excluded paths:"
                 echo "$EXCLUDED"
 
                 break
               fi
+
             done
 
             # --------------------------------------------------
-            # Apply commit without creating a commit.
+            # Apply commit without creating commit.
             # --------------------------------------------------
 
             if git cherry-pick --no-commit "$commit"; then
@@ -143,10 +141,7 @@ jobs:
               echo "Cherry-pick completed without conflicts."
 
               # ------------------------------------------------
-              # Remove explicitly excluded paths.
-              #
-              # This is useful even when the excluded file did
-              # not produce a conflict.
+              # Explicit exclusions even if there was no conflict.
               # ------------------------------------------------
 
               if [ -n "$EXCLUDED" ]; then
@@ -158,10 +153,26 @@ jobs:
 
                   echo "Excluding: $path"
 
-                  if git ls-files --error-unmatch "$path" >/dev/null 2>&1; then
-                    git restore --source=HEAD --staged --worktree -- "$path"
+                  # If file exists in HEAD, restore target version.
+                  if git cat-file -e "HEAD:$path" 2>/dev/null; then
+
+                    git restore \
+                      --source=HEAD \
+                      --staged \
+                      --worktree \
+                      -- "$path"
+
                   else
-                    git rm -f --ignore-unmatch -- "$path" || true
+
+                    # File does not exist in target branch.
+                    # Make sure the imported version is removed.
+                    git rm \
+                      -f \
+                      --ignore-unmatch \
+                      -- "$path" || true
+
+                    rm -f -- "$path" || true
+
                   fi
 
                 done
@@ -169,21 +180,26 @@ jobs:
                 IFS="$OLDIFS"
               fi
 
+              git add -A
+
               # ------------------------------------------------
-              # Check whether anything remains.
+              # Nothing remains.
               # ------------------------------------------------
 
-              if git diff --cached --quiet && git diff --quiet; then
+              if git diff --cached --quiet; then
 
                 echo "SKIPPED: $commit"
-                echo "$commit | nothing to apply after exclusions" >> /tmp/skipped.log
 
                 git reset --hard HEAD
+
+                echo "$commit | nothing to apply after exclusions" >> /tmp/skipped.log
 
                 continue
               fi
 
-              git add -A
+              # ------------------------------------------------
+              # Create new commit.
+              # ------------------------------------------------
 
               if git commit \
                 --author="${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>" \
@@ -225,7 +241,7 @@ jobs:
             RESOLVED_FILES=""
 
             # --------------------------------------------------
-            # Check every conflicted file.
+            # Process conflicted files.
             # --------------------------------------------------
 
             while IFS= read -r file; do
@@ -252,16 +268,45 @@ jobs:
               fi
 
               # ------------------------------------------------
-              # This conflicted file was explicitly excluded.
-              # Keep target branch version.
+              # Explicitly excluded conflict.
               # ------------------------------------------------
 
               if [ "$FOUND" -eq 1 ]; then
 
                 echo "Resolving excluded conflict: $file"
 
-                git checkout --ours -- "$file"
-                git add -- "$file"
+                # ------------------------------------------------
+                # If target branch has this file:
+                # restore target version.
+                #
+                # If target branch deleted this file:
+                # remove it completely.
+                # ------------------------------------------------
+
+                if git cat-file -e "HEAD:$file" 2>/dev/null; then
+
+                  echo "Target contains $file."
+                  echo "Keeping target version."
+
+                  git restore \
+                    --source=HEAD \
+                    --staged \
+                    --worktree \
+                    -- "$file"
+
+                else
+
+                  echo "Target deleted $file."
+                  echo "Keeping deletion."
+
+                  git rm \
+                    -f \
+                    --ignore-unmatch \
+                    -- "$file" || true
+
+                  rm -f -- "$file" || true
+
+                fi
 
                 if [ -n "$RESOLVED_FILES" ]; then
                   RESOLVED_FILES="$RESOLVED_FILES, $file"
@@ -271,10 +316,9 @@ jobs:
 
               else
 
-                # ----------------------------------------------
-                # Conflict was NOT explicitly excluded.
-                # Do not guess how to resolve it.
-                # ----------------------------------------------
+                # ------------------------------------------------
+                # Conflict was not specified by user.
+                # ------------------------------------------------
 
                 echo "Unexpected conflict: $file"
 
@@ -285,13 +329,12 @@ jobs:
             done <<< "$CONFLICTED_FILES"
 
             # --------------------------------------------------
-            # There is a conflict that user did not specify.
-            # Reject this commit.
+            # Unexpected conflict.
             # --------------------------------------------------
 
             if [ "$UNEXPECTED_CONFLICT" -eq 1 ]; then
 
-              echo "Skipping $commit because of an unspecified conflict."
+              echo "Skipping $commit because of unspecified conflict."
 
               git reset --hard HEAD
 
@@ -301,12 +344,31 @@ jobs:
             fi
 
             # --------------------------------------------------
-            # All conflicts were explicitly resolved/excluded.
+            # All conflicts were explicitly handled.
             # --------------------------------------------------
 
             echo "All conflicts were explicitly handled."
 
             git add -A
+
+            # --------------------------------------------------
+            # Make sure no unmerged paths remain.
+            # --------------------------------------------------
+
+            if git diff --name-only --diff-filter=U | grep -q .; then
+
+              echo "ERROR: Unresolved conflicts remain."
+
+              git reset --hard HEAD
+
+              echo "$commit | unresolved conflicts remain after exclusions" >> /tmp/skipped.log
+
+              continue
+            fi
+
+            # --------------------------------------------------
+            # Nothing remains.
+            # --------------------------------------------------
 
             if git diff --cached --quiet; then
 
@@ -320,7 +382,7 @@ jobs:
             fi
 
             # --------------------------------------------------
-            # Create new commit.
+            # Create modified commit.
             # --------------------------------------------------
 
             if git commit \

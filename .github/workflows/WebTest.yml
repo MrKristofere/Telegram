@@ -419,16 +419,21 @@ jobs:
           echo "APK: $APK"
 
           # ----------------------------------------------------------
-          # 1. Verify APK package
+          # 1. Verify APK package name
           # ----------------------------------------------------------
 
-          BADGING=$(
+          APK_PACKAGE=$(
             "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/aapt2" \
-              dump badging "$APK"
+               dump packagename "$APK" \
+               | tr -d '\r\n'
           )
 
-          if ! grep -q "package: name='ft.telegram.messenger'" <<< "$BADGING"; then
+          echo "APK package: $APK_PACKAGE"
+
+          if [ "$APK_PACKAGE" != "ft.telegram.messenger" ]; then
             echo "ERROR: APK package name is incorrect."
+            echo "Expected: ft.telegram.messenger"
+            echo "Actual:   $APK_PACKAGE"
             exit 1
           fi
 

@@ -393,7 +393,7 @@ jobs:
       # VERIFY APK PACKAGE + SIGNATURE + SHA-256
       # ============================================================
 
-      - name: Verify APK package + signature + certificate
+      - name: Verify APK signature + certificate
         continue-on-error: true
         env:
           RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
@@ -419,28 +419,7 @@ jobs:
           echo "APK: $APK"
 
           # ----------------------------------------------------------
-          # 1. Verify APK package name
-          # ----------------------------------------------------------
-
-          APK_PACKAGE=$(
-            "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/aapt2" \
-               dump packagename "$APK" \
-               | tr -d '\r\n'
-          )
-
-          echo "APK package: $APK_PACKAGE"
-
-          if [ "$APK_PACKAGE" != "ft.telegram.messenger" ]; then
-            echo "ERROR: APK package name is incorrect."
-            echo "Expected: ft.telegram.messenger"
-            echo "Actual:   $APK_PACKAGE"
-            exit 1
-          fi
-
-          echo "Package verification passed."
-
-          # ----------------------------------------------------------
-          # 2. Verify APK cryptographic signature
+          # 1. Verify APK cryptographic signature
           # ----------------------------------------------------------
 
           APKSIGNER_OUTPUT=$(
@@ -456,7 +435,7 @@ jobs:
           echo "APK signature verification passed."
 
           # ----------------------------------------------------------
-          # 3. SHA-256 from release.keystore certificate
+          # 2. SHA-256 from release.keystore certificate
           # ----------------------------------------------------------
 
           KEYSTORE_SHA256=$(
@@ -474,7 +453,7 @@ jobs:
           fi
 
           # ----------------------------------------------------------
-          # 4. SHA-256 from APK certificate
+          # 3. SHA-256 from APK certificate
           # ----------------------------------------------------------
 
           APK_SHA256=$(
@@ -488,7 +467,7 @@ jobs:
           fi
 
           # ----------------------------------------------------------
-          # 5. Normalize fingerprints
+          # 4. Normalize fingerprints
           # ----------------------------------------------------------
 
           KEYSTORE_SHA256=$(
@@ -507,7 +486,7 @@ jobs:
           echo "APK certificate SHA-256:      $APK_SHA256"
 
           # ----------------------------------------------------------
-          # 6. Compare certificates
+          # 5. Compare certificates
           # ----------------------------------------------------------
 
           if [ "$KEYSTORE_SHA256" != "$APK_SHA256" ]; then

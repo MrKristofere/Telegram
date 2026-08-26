@@ -39,8 +39,8 @@ jobs:
 
       - name: Configure Git
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
 
       - name: Checkout target branch
         env:
@@ -57,15 +57,23 @@ jobs:
           git remote add source "https://github.com/$SOURCE_REPOSITORY.git"
           git fetch source "$SOURCE_BRANCH"
 
+      - name: Prepare logs
+        run: |
+          touch applied.log
+          touch modified.log
+          touch skipped.log
+
       - name: Validate commits
         env:
           COMMITS: ${{ inputs.commits }}
         run: |
           for commit in $COMMITS; do
-            git cat-file -e "$commit^{commit}" || {
+            echo "Validating: $commit"
+
+            if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
               echo "::error::Commit not found: $commit"
               exit 1
-            }
+            fi
 
             echo "Found: $commit"
           done
@@ -75,13 +83,116 @@ jobs:
           COMMITS: ${{ inputs.commits }}
         run: |
           for commit in $COMMITS; do
-            echo "Cherry-picking $commit"
+            echo ""
+            echo "========================================"
+            echo "Processing commit: $commit"
+            echo "========================================"
 
-            git cherry-pick "$commit" || {
-              echo "::error::Conflict while cherry-picking $commit"
+            git log -1 --format=%B "$commit" > /tmp/commit_message
+
+            echo "Cherry-picking: $commit"
+
+            git cherry-pick --no-commit "$commit"
+
+            if [ $? -eq 0 ]; then
+
+              if git diff --cached --quiet && git diff --quiet; then
+                echo "SKIPPED: $commit"
+                echo "$commit | empty / changes already present" >> skipped.log
+                continue
+              fi
+
+              git add -A
+
+              git commit \
+                --author="${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>" \
+                --file=/tmp/commit_message
+
+              if [ $? -eq 0 ]; then
+                echo "APPLIED: $commit"
+                echo "$commit | applied" >> applied.log
+              else
+                echo "SKIPPED: $commit"
+                echo "$commit | failed to create commit" >> skipped.log
+                git reset --hard HEAD
+              fi
+
+              continue
+            fi
+
+            echo "Conflict detected."
+
+            CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
+
+            echo "Conflicted files:"
+            echo "$CONFLICTED_FILES"
+
+            NON_MD_CONFLICT=0
+            MD_CONFLICT=0
+
+            while IFS= read -r file; do
+              [ -z "$file" ] && continue
+
+              case "$file" in
+                *.md)
+                  echo "Markdown conflict: $file"
+                  echo "Keeping target branch version."
+
+                  git checkout --ours -- "$file"
+                  git add -- "$file"
+
+                  MD_CONFLICT=1
+                  ;;
+
+                *)
+                  echo "Non-markdown conflict: $file"
+                  NON_MD_CONFLICT=1
+                  ;;
+              esac
+            done <<< "$CONFLICTED_FILES"
+
+            # Any non-markdown conflict means the entire commit is skipped.
+            if [ "$NON_MD_CONFLICT" -eq 1 ]; then
+              echo "Skipping commit because of non-markdown conflict."
+
               git cherry-pick --abort
-              exit 1
-            }
+
+              echo "$commit | non-markdown conflict: $CONFLICTED_FILES" >> skipped.log
+
+              continue
+            fi
+
+            # Only .md files conflicted.
+            # Keep target versions of .md and apply everything else.
+            echo "Only markdown conflicts detected."
+            echo "Markdown changes will be excluded."
+
+            git add -A
+
+            if git diff --cached --quiet; then
+              echo "SKIPPED: $commit"
+
+              git cherry-pick --abort
+
+              echo "$commit | only .md changes conflicted; nothing else to apply" >> skipped.log
+
+              continue
+            fi
+
+            git commit \
+              --author="${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>" \
+              --file=/tmp/commit_message
+
+            if [ $? -eq 0 ]; then
+              echo "MODIFIED: $commit"
+              echo "$commit | applied with .md conflicts excluded" >> modified.log
+            else
+              echo "SKIPPED: $commit"
+
+              git reset --hard HEAD
+
+              echo "$commit | failed to create modified commit" >> skipped.log
+            fi
           done
 
       - name: Push
@@ -89,3 +200,40 @@ jobs:
           TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
           git push origin "$TARGET_BRANCH"
+
+      - name: Summary
+        run: |
+          echo "# Cherry-pick result" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Applied" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -s applied.log ]; then
+            while IFS= read -r line; do
+              echo "- $line" >> "$GITHUB_STEP_SUMMARY"
+            done < applied.log
+          else
+            echo "None" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Applied with modifications" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -s modified.log ]; then
+            while IFS= read -r line; do
+              echo "- $line" >> "$GITHUB_STEP_SUMMARY"
+            done < modified.log
+          else
+            echo "None" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Skipped" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -s skipped.log ]; then
+            while IFS= read -r line; do
+              echo "- $line" >> "$GITHUB_STEP_SUMMARY"
+            done < skipped.log
+          else
+            echo "None" >> "$GITHUB_STEP_SUMMARY"
+          fi

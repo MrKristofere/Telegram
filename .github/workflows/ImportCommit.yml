@@ -59,9 +59,9 @@ jobs:
 
       - name: Prepare logs
         run: |
-          : > applied.log
-          : > modified.log
-          : > skipped.log
+          : > /tmp/applied.log
+          : > /tmp/modified.log
+          : > /tmp/skipped.log
 
       - name: Import selected commits
         env:
@@ -75,67 +75,81 @@ jobs:
             echo "========================================"
 
             # --------------------------------------------------
-            # Try to get the exact commit from source repository.
-            # This also works if the commit is not in source_branch.
+            # Make sure the commit exists locally.
+            # If it does not, try to fetch this exact commit.
             # --------------------------------------------------
 
             if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
               echo "Commit is not available locally. Fetching..."
 
-              git fetch source "$commit" 2>/dev/null
+              git fetch source "$commit" 2>/dev/null || true
 
               if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
                 echo "SKIPPED: $commit"
-                echo "$commit | commit not found in source repository or cannot be fetched" >> skipped.log
+                echo "$commit | commit not found or cannot be fetched" >> /tmp/skipped.log
                 continue
               fi
             fi
 
             echo "Commit found: $commit"
 
+            # --------------------------------------------------
             # Save original commit message.
+            # --------------------------------------------------
+
             git log -1 --format=%B "$commit" > /tmp/commit_message
 
             # --------------------------------------------------
-            # Try to apply commit without creating a commit.
+            # Try to cherry-pick without creating a commit.
+            #
+            # IMPORTANT:
+            # Because this command is inside "if", a conflict
+            # does not terminate the GitHub Actions step.
             # --------------------------------------------------
 
-            git cherry-pick --no-commit "$commit"
+            if git cherry-pick --no-commit "$commit"; then
 
-            PICK_RESULT=$?
+              echo "Cherry-pick completed without conflicts."
 
-            # --------------------------------------------------
-            # Case 1: clean cherry-pick
-            # --------------------------------------------------
-
-            if [ $PICK_RESULT -eq 0 ]; then
+              # ------------------------------------------------
+              # Nothing changed.
+              # This usually means the changes are already
+              # present in the target branch.
+              # ------------------------------------------------
 
               if git diff --cached --quiet && git diff --quiet; then
                 echo "SKIPPED: $commit"
-                echo "$commit | empty / changes already present" >> skipped.log
+                echo "$commit | empty / changes already present" >> /tmp/skipped.log
                 continue
               fi
 
+              # Add only actual repository changes.
               git add -A
 
-              git commit \
+              # Create a new commit from the current user.
+              if git commit \
                 --author="${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>" \
                 --file=/tmp/commit_message
+              then
 
-              if [ $? -eq 0 ]; then
                 echo "APPLIED: $commit"
-                echo "$commit | applied" >> applied.log
+                echo "$commit | applied" >> /tmp/applied.log
+
               else
+
                 echo "SKIPPED: $commit"
-                echo "$commit | failed to create commit" >> skipped.log
+
                 git reset --hard HEAD
+
+                echo "$commit | failed to create commit" >> /tmp/skipped.log
               fi
 
               continue
             fi
 
             # --------------------------------------------------
-            # Case 2: conflict
+            # Cherry-pick failed.
+            # Git has left the repository in conflict state.
             # --------------------------------------------------
 
             echo "Conflict detected for $commit"
@@ -148,6 +162,10 @@ jobs:
             NON_MD_CONFLICT=0
             MD_CONFLICT_FILES=""
 
+            # --------------------------------------------------
+            # Analyze every conflicted file.
+            # --------------------------------------------------
+
             while IFS= read -r file; do
               [ -z "$file" ] && continue
 
@@ -157,10 +175,15 @@ jobs:
                   echo "Markdown conflict: $file"
                   echo "Keeping target branch version."
 
+                  # Keep target branch version of .md.
                   git checkout --ours -- "$file"
                   git add -- "$file"
 
-                  MD_CONFLICT_FILES="$MD_CONFLICT_FILES $file"
+                  if [ -n "$MD_CONFLICT_FILES" ]; then
+                    MD_CONFLICT_FILES="$MD_CONFLICT_FILES, $file"
+                  else
+                    MD_CONFLICT_FILES="$file"
+                  fi
                   ;;
 
                 *)
@@ -172,9 +195,8 @@ jobs:
             done <<< "$CONFLICTED_FILES"
 
             # --------------------------------------------------
-            # Case 2a:
-            # At least one non-.md file has a conflict.
-            # Reject the whole commit.
+            # If at least one non-.md file has a conflict,
+            # reject this entire commit.
             # --------------------------------------------------
 
             if [ "$NON_MD_CONFLICT" -eq 1 ]; then
@@ -185,16 +207,18 @@ jobs:
 
               REASON=$(echo "$CONFLICTED_FILES" | tr '\n' ',' | sed 's/,$//')
 
-              echo "$commit | non-markdown conflict: $REASON" >> skipped.log
+              echo "$commit | non-markdown conflict: $REASON" >> /tmp/skipped.log
 
               continue
             fi
 
             # --------------------------------------------------
-            # Case 2b:
             # Only .md files conflicted.
-            # Keep target versions of all .md files.
-            # Apply everything else.
+            #
+            # The target branch version of those files has
+            # already been restored above.
+            #
+            # All other changes from the original commit remain.
             # --------------------------------------------------
 
             echo "Only markdown conflicts detected."
@@ -202,24 +226,36 @@ jobs:
 
             git add -A
 
+            # --------------------------------------------------
+            # If nothing remains after removing .md changes,
+            # there is nothing useful to commit.
+            # --------------------------------------------------
+
             if git diff --cached --quiet; then
+
+              echo "Nothing remains to commit."
 
               git cherry-pick --abort
 
-              echo "SKIPPED: $commit"
-              echo "$commit | only .md changes conflicted; nothing else to apply" >> skipped.log
+              echo "$commit | only .md changes conflicted; nothing else to apply" >> /tmp/skipped.log
 
               continue
             fi
 
-            git commit \
+            # --------------------------------------------------
+            # Create a NEW commit.
+            # This commit is no longer the original commit.
+            # Its author is the user who started the workflow.
+            # --------------------------------------------------
+
+            if git commit \
               --author="${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>" \
               --file=/tmp/commit_message
-
-            if [ $? -eq 0 ]; then
+            then
 
               echo "MODIFIED: $commit"
-              echo "$commit | applied with .md conflicts excluded:$MD_CONFLICT_FILES" >> modified.log
+
+              echo "$commit | applied with .md conflicts excluded: $MD_CONFLICT_FILES" >> /tmp/modified.log
 
             else
 
@@ -227,8 +263,7 @@ jobs:
 
               git reset --hard HEAD
 
-              echo "$commit | failed to create modified commit" >> skipped.log
-
+              echo "$commit | failed to create modified commit" >> /tmp/skipped.log
             fi
 
           done
@@ -246,10 +281,10 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "## Applied" >> "$GITHUB_STEP_SUMMARY"
 
-          if [ -s applied.log ]; then
+          if [ -s /tmp/applied.log ]; then
             while IFS= read -r line; do
               echo "- $line" >> "$GITHUB_STEP_SUMMARY"
-            done < applied.log
+            done < /tmp/applied.log
           else
             echo "None" >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -257,10 +292,10 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "## Applied with modifications" >> "$GITHUB_STEP_SUMMARY"
 
-          if [ -s modified.log ]; then
+          if [ -s /tmp/modified.log ]; then
             while IFS= read -r line; do
               echo "- $line" >> "$GITHUB_STEP_SUMMARY"
-            done < modified.log
+            done < /tmp/modified.log
           else
             echo "None" >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -268,10 +303,10 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "## Skipped" >> "$GITHUB_STEP_SUMMARY"
 
-          if [ -s skipped.log ]; then
+          if [ -s /tmp/skipped.log ]; then
             while IFS= read -r line; do
               echo "- $line" >> "$GITHUB_STEP_SUMMARY"
-            done < skipped.log
+            done < /tmp/skipped.log
           else
             echo "None" >> "$GITHUB_STEP_SUMMARY"
           fi

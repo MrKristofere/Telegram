@@ -55,46 +55,60 @@ jobs:
           SOURCE_BRANCH: ${{ inputs.source_branch }}
         run: |
           git remote add source "https://github.com/$SOURCE_REPOSITORY.git"
-          git fetch source "$SOURCE_BRANCH"
+          git fetch source "$SOURCE_BRANCH" || true
 
       - name: Prepare logs
         run: |
-          touch applied.log
-          touch modified.log
-          touch skipped.log
+          : > applied.log
+          : > modified.log
+          : > skipped.log
 
-      - name: Validate commits
+      - name: Import selected commits
         env:
           COMMITS: ${{ inputs.commits }}
         run: |
           for commit in $COMMITS; do
-            echo "Validating: $commit"
 
-            if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
-              echo "::error::Commit not found: $commit"
-              exit 1
-            fi
-
-            echo "Found: $commit"
-          done
-
-      - name: Cherry-pick selected commits
-        env:
-          COMMITS: ${{ inputs.commits }}
-        run: |
-          for commit in $COMMITS; do
             echo ""
             echo "========================================"
-            echo "Processing commit: $commit"
+            echo "Processing: $commit"
             echo "========================================"
 
+            # --------------------------------------------------
+            # Try to get the exact commit from source repository.
+            # This also works if the commit is not in source_branch.
+            # --------------------------------------------------
+
+            if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
+              echo "Commit is not available locally. Fetching..."
+
+              git fetch source "$commit" 2>/dev/null
+
+              if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
+                echo "SKIPPED: $commit"
+                echo "$commit | commit not found in source repository or cannot be fetched" >> skipped.log
+                continue
+              fi
+            fi
+
+            echo "Commit found: $commit"
+
+            # Save original commit message.
             git log -1 --format=%B "$commit" > /tmp/commit_message
 
-            echo "Cherry-picking: $commit"
+            # --------------------------------------------------
+            # Try to apply commit without creating a commit.
+            # --------------------------------------------------
 
             git cherry-pick --no-commit "$commit"
 
-            if [ $? -eq 0 ]; then
+            PICK_RESULT=$?
+
+            # --------------------------------------------------
+            # Case 1: clean cherry-pick
+            # --------------------------------------------------
+
+            if [ $PICK_RESULT -eq 0 ]; then
 
               if git diff --cached --quiet && git diff --quiet; then
                 echo "SKIPPED: $commit"
@@ -120,7 +134,11 @@ jobs:
               continue
             fi
 
-            echo "Conflict detected."
+            # --------------------------------------------------
+            # Case 2: conflict
+            # --------------------------------------------------
+
+            echo "Conflict detected for $commit"
 
             CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
 
@@ -128,12 +146,13 @@ jobs:
             echo "$CONFLICTED_FILES"
 
             NON_MD_CONFLICT=0
-            MD_CONFLICT=0
+            MD_CONFLICT_FILES=""
 
             while IFS= read -r file; do
               [ -z "$file" ] && continue
 
               case "$file" in
+
                 *.md)
                   echo "Markdown conflict: $file"
                   echo "Keeping target branch version."
@@ -141,39 +160,53 @@ jobs:
                   git checkout --ours -- "$file"
                   git add -- "$file"
 
-                  MD_CONFLICT=1
+                  MD_CONFLICT_FILES="$MD_CONFLICT_FILES $file"
                   ;;
 
                 *)
                   echo "Non-markdown conflict: $file"
                   NON_MD_CONFLICT=1
                   ;;
+
               esac
             done <<< "$CONFLICTED_FILES"
 
-            # Any non-markdown conflict means the entire commit is skipped.
+            # --------------------------------------------------
+            # Case 2a:
+            # At least one non-.md file has a conflict.
+            # Reject the whole commit.
+            # --------------------------------------------------
+
             if [ "$NON_MD_CONFLICT" -eq 1 ]; then
-              echo "Skipping commit because of non-markdown conflict."
+
+              echo "Skipping $commit because of non-markdown conflict."
 
               git cherry-pick --abort
 
-              echo "$commit | non-markdown conflict: $CONFLICTED_FILES" >> skipped.log
+              REASON=$(echo "$CONFLICTED_FILES" | tr '\n' ',' | sed 's/,$//')
+
+              echo "$commit | non-markdown conflict: $REASON" >> skipped.log
 
               continue
             fi
 
+            # --------------------------------------------------
+            # Case 2b:
             # Only .md files conflicted.
-            # Keep target versions of .md and apply everything else.
+            # Keep target versions of all .md files.
+            # Apply everything else.
+            # --------------------------------------------------
+
             echo "Only markdown conflicts detected."
             echo "Markdown changes will be excluded."
 
             git add -A
 
             if git diff --cached --quiet; then
-              echo "SKIPPED: $commit"
 
               git cherry-pick --abort
 
+              echo "SKIPPED: $commit"
               echo "$commit | only .md changes conflicted; nothing else to apply" >> skipped.log
 
               continue
@@ -184,15 +217,20 @@ jobs:
               --file=/tmp/commit_message
 
             if [ $? -eq 0 ]; then
+
               echo "MODIFIED: $commit"
-              echo "$commit | applied with .md conflicts excluded" >> modified.log
+              echo "$commit | applied with .md conflicts excluded:$MD_CONFLICT_FILES" >> modified.log
+
             else
+
               echo "SKIPPED: $commit"
 
               git reset --hard HEAD
 
               echo "$commit | failed to create modified commit" >> skipped.log
+
             fi
+
           done
 
       - name: Push

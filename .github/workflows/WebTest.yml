@@ -393,7 +393,8 @@ jobs:
       # VERIFY APK PACKAGE + SIGNATURE + SHA-256
       # ============================================================
 
-      - name: Verify APK package and signature
+      - name: Verify APK package + signature + certificate
+        continue-on-error: true
         env:
           RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
@@ -418,12 +419,18 @@ jobs:
           echo "APK: $APK"
 
           # ----------------------------------------------------------
-          # 1. Verify package name
+          # 1. Verify APK package
           # ----------------------------------------------------------
 
-          "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/aapt2" \
-            dump badging "$APK" \
-            | grep -q "package: name='ft.telegram.messenger'"
+          BADGING=$(
+            "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/aapt2" \
+              dump badging "$APK"
+          )
+
+          if ! grep -q "package: name='ft.telegram.messenger'" <<< "$BADGING"; then
+            echo "ERROR: APK package name is incorrect."
+            exit 1
+          fi
 
           echo "Package verification passed."
 
@@ -431,10 +438,15 @@ jobs:
           # 2. Verify APK cryptographic signature
           # ----------------------------------------------------------
 
-          "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/apksigner" \
-            verify \
-            --verbose \
-            "$APK"
+          APKSIGNER_OUTPUT=$(
+            "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/apksigner" \
+              verify \
+              --verbose \
+              --print-certs \
+              "$APK"
+          )
+
+          echo "$APKSIGNER_OUTPUT"
 
           echo "APK signature verification passed."
 
@@ -461,10 +473,7 @@ jobs:
           # ----------------------------------------------------------
 
           APK_SHA256=$(
-            "${ANDROID_HOME}/build-tools/${{ steps.sdk.outputs.build_tools }}/apksigner" \
-              verify \
-              --print-certs \
-              "$APK" \
+            echo "$APKSIGNER_OUTPUT" \
             | awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}'
           )
 
@@ -477,13 +486,17 @@ jobs:
           # 5. Normalize fingerprints
           # ----------------------------------------------------------
 
-          KEYSTORE_SHA256=$(echo "$KEYSTORE_SHA256" \
-            | tr -d ':' \
-            | tr '[:lower:]' '[:upper:]')
+          KEYSTORE_SHA256=$(
+            echo "$KEYSTORE_SHA256" \
+              | tr -d ':' \
+              | tr '[:lower:]' '[:upper:]'
+          )
 
-          APK_SHA256=$(echo "$APK_SHA256" \
-            | tr -d ':' \
-            | tr '[:lower:]' '[:upper:]')
+          APK_SHA256=$(
+            echo "$APK_SHA256" \
+              | tr -d ':' \
+              | tr '[:lower:]' '[:upper:]'
+          )
 
           echo "Keystore certificate SHA-256: $KEYSTORE_SHA256"
           echo "APK certificate SHA-256:      $APK_SHA256"

@@ -1,10 +1,10 @@
-name: Cherry-pick commit to branch
+name: Cherry-pick commits to branch
 
 on:
   workflow_dispatch:
     inputs:
-      commit_sha:
-        description: "Commit SHA"
+      commits:
+        description: "Commit SHA via Space"
         required: true
         type: string
 
@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -32,20 +32,43 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Validate commit
+      - name: Validate commits
+        env:
+          COMMITS: ${{ inputs.commits }}
         run: |
-          git cat-file -e "${{ inputs.commit_sha }}^{commit}"
+          for commit in $COMMITS; do
+            echo "Validating: $commit"
+
+            git cat-file -e "$commit^{commit}" || {
+              echo "::error::Commit not found: $commit"
+              exit 1
+            }
+          done
 
       - name: Checkout target branch
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
-          git fetch origin "${{ inputs.target_branch }}"
-          git checkout -B "${{ inputs.target_branch }}" \
-            "origin/${{ inputs.target_branch }}"
+          git fetch origin "$TARGET_BRANCH"
+          git checkout -B "$TARGET_BRANCH" \
+            "origin/$TARGET_BRANCH"
 
-      - name: Cherry-pick commit
+      - name: Cherry-pick commits
+        env:
+          COMMITS: ${{ inputs.commits }}
         run: |
-          git cherry-pick "${{ inputs.commit_sha }}"
+          for commit in $COMMITS; do
+            echo "Cherry-picking: $commit"
+
+            git cherry-pick "$commit" || {
+              echo "::error::Cherry-pick failed for commit: $commit"
+              git cherry-pick --abort
+              exit 1
+            }
+          done
 
       - name: Push
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
-          git push origin "${{ inputs.target_branch }}"
+          git push origin "$TARGET_BRANCH"

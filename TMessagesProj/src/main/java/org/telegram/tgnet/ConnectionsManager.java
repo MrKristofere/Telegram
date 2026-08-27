@@ -45,6 +45,7 @@ import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
 import org.telegram.ui.Components.VideoPlayer;
 import org.telegram.ui.LoginActivity;
+import org.telegram.tgnet.tl.TL_stories;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -387,8 +388,8 @@ public class ConnectionsManager extends BaseController {
         return requestToken;
     }
     private static boolean isStoryViewRequest(TLObject object) {
-        return object instanceof TLRPC.TL_stories_readStories ||
-                object instanceof TLRPC.TL_stories_incrementStoryViews;
+        return object instanceof TL_stories.TL_stories_readStories ||
+                object instanceof TL_stories.TL_stories_incrementStoryViews;
     }
     private void sendRequestInternal(TLObject object, RequestDelegate onComplete, RequestDelegateTimestamp onCompleteTimestamp, QuickAckDelegate onQuickAck, WriteToSocketDelegate onWriteToSocket, int flags, int datacenterId, int connectionType, boolean immediate, int requestToken) {
         if (BuildVars.LOGS_ENABLED) {

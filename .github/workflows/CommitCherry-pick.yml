@@ -1,16 +1,22 @@
-name: Apply Commit changes
+name: Apply commits / branch changes
 
 on:
   workflow_dispatch:
     inputs:
+
       commits:
-        description: "Commit SHA(s), separated by spaces. With exclude_commits enabled, these SHA(s) are excluded from source_branch."
+        description: "Commit SHA(s), separated by spaces. With exclude_commits=true, these commits are excluded from source_branch."
         required: false
         type: string
 
       target_branch:
         description: "Target branch"
         required: true
+        type: string
+
+      source_branch:
+        description: "Source branch. Optional when commits are provided directly."
+        required: false
         type: string
 
       strategy:
@@ -27,29 +33,24 @@ on:
           - apply-patch
           - apply-diff
 
-      source_branch:
-        description: "Source branch. Optional for cherry-pick/squash/merge-selected."
-        required: false
-        type: string
-
       exclude_commits:
-        description: "With source_branch: treat commits as SHA(s) to EXCLUDE instead of include."
+        description: "If true, commits becomes an exclusion list for source_branch."
         required: false
         type: boolean
         default: false
 
       patch_file:
-        description: "Path to .patch or .diff file inside repository"
+        description: "Repository-relative path to .patch or .diff file"
         required: false
         type: string
 
       commit_message:
-        description: "Custom commit / merge message. Optional."
+        description: "Custom message for a newly created aggregate commit. Ignored by cherry-pick/rebase-branch."
         required: false
         type: string
 
       dry_run:
-        description: "Validate and show the planned operation without pushing"
+        description: "Validate and simulate the operation without pushing"
         required: false
         type: boolean
         default: false
@@ -62,6 +63,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+
   apply:
     runs-on: ubuntu-latest
 
@@ -78,10 +80,13 @@ jobs:
     steps:
 
       # ============================================================
-      # FAST INITIAL CHECKOUT
+      # INITIAL CHECKOUT
+      #
+      # Only one commit is downloaded initially.
+      # Additional history is fetched on demand.
       # ============================================================
 
-      - name: Checkout target branch
+      - name: Checkout target
         uses: actions/checkout@v7
         with:
           ref: ${{ inputs.target_branch }}
@@ -91,7 +96,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       # ============================================================
-      # GIT CONFIGURATION
+      # GIT CONFIG
       # ============================================================
 
       - name: Configure Git
@@ -106,6 +111,7 @@ jobs:
           git config core.quotePath false
           git config rerere.enabled true
 
+          echo "Git version:"
           git --version
 
       # ============================================================
@@ -118,12 +124,15 @@ jobs:
           set -Eeuo pipefail
 
           echo "========================================"
+          echo "INPUTS"
+          echo "========================================"
           echo "Strategy:        $STRATEGY"
           echo "Target branch:   $TARGET_BRANCH"
           echo "Source branch:   ${SOURCE_BRANCH:-<none>}"
           echo "Commits:         ${COMMITS_INPUT:-<none>}"
           echo "Exclude:         $EXCLUDE_COMMITS"
           echo "Patch:           ${PATCH_FILE:-<none>}"
+          echo "Commit message:  ${COMMIT_MESSAGE:-<auto>}"
           echo "Dry run:         $DRY_RUN"
           echo "========================================"
 
@@ -147,16 +156,22 @@ jobs:
             exit 1
           fi
 
-          if [[ "$EXCLUDE_COMMITS" == "true" && -z "$SOURCE_BRANCH" ]]; then
-            echo "::error::exclude_commits requires source_branch."
-            exit 1
-          fi
-
           case "$STRATEGY" in
 
-            cherry-pick|squash|merge-selected)
-              if [[ -z "$COMMITS_INPUT" && -z "$SOURCE_BRANCH" ]]; then
-                echo "::error::$STRATEGY requires commits or source_branch."
+            cherry-pick|squash|merge-selected|rebase-branch)
+
+              if [[ -z "$SOURCE_BRANCH" && -z "$COMMITS_INPUT" ]]; then
+                echo "::error::$STRATEGY requires source_branch or commits."
+                exit 1
+              fi
+
+              if [[ "$STRATEGY" == "rebase-branch" && -z "$SOURCE_BRANCH" ]]; then
+                echo "::error::rebase-branch requires source_branch."
+                exit 1
+              fi
+
+              if [[ "$EXCLUDE_COMMITS" == "true" && -z "$SOURCE_BRANCH" ]]; then
+                echo "::error::exclude_commits requires source_branch."
                 exit 1
               fi
 
@@ -164,45 +179,31 @@ jobs:
                 echo "::error::patch_file cannot be used with $STRATEGY."
                 exit 1
               fi
+
               ;;
 
             merge-branch)
+
               if [[ -z "$SOURCE_BRANCH" ]]; then
                 echo "::error::merge-branch requires source_branch."
                 exit 1
               fi
 
               if [[ -n "$COMMITS_INPUT" ]]; then
-                echo "::error::merge-branch does not use commits."
+                echo "::error::merge-branch does not accept commits."
                 exit 1
               fi
 
               if [[ "$EXCLUDE_COMMITS" == "true" ]]; then
-                echo "::error::exclude_commits is not supported with merge-branch."
-                echo "::error::Use merge-selected for selective branch merging."
-                exit 1
-              fi
-              ;;
-
-            rebase-branch)
-              if [[ -z "$SOURCE_BRANCH" ]]; then
-                echo "::error::rebase-branch requires source_branch."
+                echo "::error::merge-branch cannot use exclude_commits."
+                echo "::error::Use merge-selected instead."
                 exit 1
               fi
 
-              if [[ -n "$COMMITS_INPUT" ]]; then
-                echo "::error::rebase-branch does not use commits."
-                exit 1
-              fi
-
-              if [[ "$EXCLUDE_COMMITS" == "true" ]]; then
-                echo "::error::exclude_commits is not supported with rebase-branch."
-                echo "::error::Use merge-selected or squash for selective application."
-                exit 1
-              fi
               ;;
 
             apply-patch|apply-diff)
+
               if [[ -z "$PATCH_FILE" ]]; then
                 echo "::error::$STRATEGY requires patch_file."
                 exit 1
@@ -217,13 +218,26 @@ jobs:
                 echo "::error::exclude_commits cannot be used with patch/diff."
                 exit 1
               fi
+
               ;;
 
             *)
+
               echo "::error::Unknown strategy: $STRATEGY"
               exit 1
+
               ;;
           esac
+
+          if [[ -n "$COMMIT_MESSAGE" ]]; then
+
+            case "$STRATEGY" in
+              cherry-pick|rebase-branch)
+                echo "::notice::commit_message is ignored for $STRATEGY."
+                ;;
+            esac
+
+          fi
 
       # ============================================================
       # CLEAN WORKTREE
@@ -243,12 +257,10 @@ jobs:
       # ============================================================
       # SNAPSHOT TARGET
       #
-      # IMPORTANT:
-      # This SHA is the exact target version against which the whole
-      # operation will be calculated.
+      # This SHA is immutable for this workflow execution.
       # ============================================================
 
-      - name: Snapshot target branch
+      - name: Snapshot target
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -269,16 +281,13 @@ jobs:
           git reset --hard "$TARGET_SHA"
 
       # ============================================================
-      # SNAPSHOT SOURCE BRANCH
+      # SNAPSHOT SOURCE
       #
-      # IMPORTANT:
-      # Source is also frozen to one SHA.
-      #
-      # If source branch changes while workflow is running,
-      # those new commits are NOT silently included.
+      # Source is frozen as well.
+      # New commits pushed to source after this point are ignored.
       # ============================================================
 
-      - name: Snapshot source branch
+      - name: Snapshot source
         if: ${{ inputs.source_branch != '' }}
         shell: bash
         run: |
@@ -287,7 +296,6 @@ jobs:
           git fetch \
             --no-tags \
             --prune \
-            --depth=1 \
             origin \
             "+refs/heads/$SOURCE_BRANCH:refs/remotes/origin/$SOURCE_BRANCH"
 
@@ -303,7 +311,7 @@ jobs:
       # ============================================================
 
       - name: Fetch explicit commits
-        if: ${{ inputs.commits != '' && (inputs.strategy == 'cherry-pick' || inputs.strategy == 'squash' || inputs.strategy == 'merge-selected') }}
+        if: ${{ inputs.commits != '' && (inputs.strategy == 'cherry-pick' || inputs.strategy == 'squash' || inputs.strategy == 'merge-selected' || inputs.strategy == 'rebase-branch') }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -328,10 +336,9 @@ jobs:
           )
 
       # ============================================================
-      # RESOLVE MERGE BASE
+      # FIND MERGE BASE
       #
-      # The repository starts shallow.
-      # History is deepened only until the actual merge-base exists.
+      # History is deepened only when required.
       # ============================================================
 
       - name: Resolve merge base
@@ -342,15 +349,8 @@ jobs:
 
           MAX_DEPTH=1048576
           DEEPEN=32
-          ATTEMPTS=0
 
           while true; do
-
-            ATTEMPTS=$((ATTEMPTS + 1))
-
-            echo ""
-            echo "Merge-base attempt: $ATTEMPTS"
-            echo "Deepen: $DEEPEN"
 
             if MERGE_BASE="$(
               git merge-base \
@@ -359,19 +359,21 @@ jobs:
                 2>/dev/null
             )"; then
 
-              echo ""
-              echo "MERGE_BASE=$MERGE_BASE"
-
               echo "MERGE_BASE=$MERGE_BASE" >> "$GITHUB_ENV"
 
+              echo "Merge base:"
+              echo "$MERGE_BASE"
+
               break
+
             fi
 
             if [[ "$DEEPEN" -ge "$MAX_DEPTH" ]]; then
               echo "::error::Unable to find merge-base."
-              echo "::error::History limit reached."
               exit 1
             fi
+
+            echo "Merge base not available. Deepening history by $DEEPEN."
 
             git fetch \
               --no-tags \
@@ -385,173 +387,75 @@ jobs:
           done
 
       # ============================================================
-      # RESOLVE SELECTED COMMITS
+      # BUILD UNIFIED SELECTION
+      #
+      # This is the central part of the workflow.
+      #
+      # Result:
+      #
+      #   COMMITS_TO_APPLY
+      #
+      # Every strategy except merge-branch and patch/diff consumes
+      # this exact list.
       # ============================================================
 
-      - name: Resolve commits
-        if: ${{ inputs.strategy == 'cherry-pick' || inputs.strategy == 'squash' || inputs.strategy == 'merge-selected' }}
+      - name: Build commit selection
+        if: ${{ inputs.strategy == 'cherry-pick' || inputs.strategy == 'squash' || inputs.strategy == 'merge-selected' || inputs.strategy == 'rebase-branch' }}
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          ALL_SOURCE="/tmp/all_source_commits.txt"
-          INPUT_COMMITS="/tmp/input_commits.txt"
-          CANDIDATES="/tmp/candidates.txt"
-          FINAL="/tmp/final_commits.txt"
-          SORTED="/tmp/sorted_commits.txt"
+          ALL_SOURCE="/tmp/all_source_commits"
+          INPUT_COMMITS="/tmp/input_commits"
+          SELECTED="/tmp/selected_commits"
+          UNIQUE="/tmp/unique_commits"
+          SORTED="/tmp/sorted_commits"
+          FINAL="/tmp/final_commits"
 
           : > "$ALL_SOURCE"
           : > "$INPUT_COMMITS"
-          : > "$CANDIDATES"
-          : > "$FINAL"
+          : > "$SELECTED"
+          : > "$UNIQUE"
           : > "$SORTED"
+          : > "$FINAL"
 
           # ==========================================================
-          # SOURCE BRANCH MODE
+          # STEP 1
+          # Get all source commits that are not already present or
+          # patch-equivalent in target.
+          #
+          # --cherry-pick --right-only omits commits whose changes
+          # already exist on the target side.
           # ==========================================================
 
           if [[ -n "$SOURCE_BRANCH" ]]; then
 
-            echo "Source branch mode."
-
             git rev-list \
+              --reverse \
               --right-only \
               --cherry-pick \
               --no-merges \
-              --reverse \
               "$TARGET_SHA...$SOURCE_SHA" \
               > "$ALL_SOURCE"
 
-            echo ""
-            echo "All applicable source commits:"
-            cat "$ALL_SOURCE" || true
-
-            # --------------------------------------------------------
-            # Explicit SHA list
-            # --------------------------------------------------------
-
-            if [[ -n "$COMMITS_INPUT" ]]; then
-
-              while IFS= read -r commit; do
-
-                [[ -z "$commit" ]] && continue
-
-                if [[ ! "$commit" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
-                  echo "::error::Invalid commit SHA: $commit"
-                  exit 1
-                fi
-
-                if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
-                  echo "::error::Commit not found: $commit"
-                  exit 1
-                fi
-
-                FULL_SHA="$(git rev-parse "$commit^{commit}")"
-
-                if ! git merge-base \
-                  --is-ancestor \
-                  "$FULL_SHA" \
-                  "$SOURCE_SHA" \
-                  2>/dev/null; then
-
-                  echo "::error::Commit is not part of source branch:"
-                  echo "::error::$FULL_SHA"
-                  echo "::error::Source snapshot: $SOURCE_SHA"
-
-                  exit 1
-                fi
-
-                echo "$FULL_SHA" >> "$INPUT_COMMITS"
-
-              done < <(
-                printf '%s\n' "$COMMITS_INPUT" |
-                tr ' ' '\n'
-              )
-
-              # Remove duplicate SHA(s).
-              sort -u "$INPUT_COMMITS" -o "$INPUT_COMMITS"
-
-              # ------------------------------------------------------
-              # EXCLUSION MODE
-              # ------------------------------------------------------
-
-              if [[ "$EXCLUDE_COMMITS" == "true" ]]; then
-
-                echo ""
-                echo "Exclusion mode."
-
-                cp "$ALL_SOURCE" "$CANDIDATES"
-
-                while IFS= read -r excluded; do
-
-                  [[ -z "$excluded" ]] && continue
-
-                  if grep -Fxq "$excluded" "$CANDIDATES"; then
-
-                    echo "Excluding:"
-                    echo "$excluded"
-
-                    grep -Fxv \
-                      "$excluded" \
-                      "$CANDIDATES" \
-                      > "${CANDIDATES}.tmp"
-
-                    mv \
-                      "${CANDIDATES}.tmp" \
-                      "$CANDIDATES"
-
-                  else
-
-                    echo "::warning::Excluded commit is not in the applicable source set:"
-                    echo "::warning::$excluded"
-
-                  fi
-
-                done < "$INPUT_COMMITS"
-
-              # ------------------------------------------------------
-              # INCLUSION MODE
-              # ------------------------------------------------------
-
-              else
-
-                echo ""
-                echo "Inclusion mode."
-
-                cp "$INPUT_COMMITS" "$CANDIDATES"
-
-              fi
-
-            # --------------------------------------------------------
-            # No SHA:
-            #
-            # Use every applicable source commit.
-            # --------------------------------------------------------
-
-            else
-
-              echo ""
-              echo "No SHA supplied."
-              echo "Using all applicable source commits."
-
-              cp "$ALL_SOURCE" "$CANDIDATES"
-
-            fi
+          fi
 
           # ==========================================================
-          # EXPLICIT SHA MODE
+          # STEP 2
+          # Normalize explicit SHA input.
+          # Duplicate SHA values are removed.
           # ==========================================================
 
-          else
-
-            if [[ "$EXCLUDE_COMMITS" == "true" ]]; then
-              echo "::error::exclude_commits requires source_branch."
-              exit 1
-            fi
+          if [[ -n "$COMMITS_INPUT" ]]; then
 
             while IFS= read -r commit; do
 
               [[ -z "$commit" ]] && continue
+
+              if [[ ! "$commit" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+                echo "::error::Invalid commit SHA: $commit"
+                exit 1
+              fi
 
               if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
                 echo "::error::Commit not found: $commit"
@@ -560,51 +464,185 @@ jobs:
 
               FULL_SHA="$(git rev-parse "$commit^{commit}")"
 
-              echo "$FULL_SHA" >> "$CANDIDATES"
+              echo "$FULL_SHA" >> "$INPUT_COMMITS"
 
             done < <(
               printf '%s\n' "$COMMITS_INPUT" |
               tr ' ' '\n'
             )
 
+            sort -u "$INPUT_COMMITS" -o "$INPUT_COMMITS"
+
           fi
 
           # ==========================================================
-          # REMOVE DUPLICATES
+          # STEP 3
+          #
+          # Determine the requested selection.
           # ==========================================================
 
-          sort -u "$CANDIDATES" -o "$CANDIDATES"
+          if [[ -n "$SOURCE_BRANCH" ]]; then
 
-          if [[ ! -s "$CANDIDATES" ]]; then
-            echo "::error::No commits remain after filtering."
+            if [[ -z "$COMMITS_INPUT" ]]; then
+
+              if [[ "$EXCLUDE_COMMITS" == "true" ]]; then
+
+                echo "::error::exclude_commits=true requires at least one SHA."
+                exit 1
+
+              fi
+
+              # Whole source branch.
+              cp "$ALL_SOURCE" "$SELECTED"
+
+            else
+
+              if [[ "$EXCLUDE_COMMITS" == "true" ]]; then
+
+                # ----------------------------------------------------
+                # EXCLUSION MODE
+                #
+                # Source branch minus explicitly supplied commits.
+                # ----------------------------------------------------
+
+                cp "$ALL_SOURCE" "$SELECTED"
+
+                while IFS= read -r excluded; do
+
+                  [[ -z "$excluded" ]] && continue
+
+                  if grep -Fxq "$excluded" "$SELECTED"; then
+
+                    echo "Excluding:"
+                    echo "$excluded"
+
+                    grep -Fxv \
+                      "$excluded" \
+                      "$SELECTED" \
+                      > "${SELECTED}.tmp"
+
+                    mv \
+                      "${SELECTED}.tmp" \
+                      "$SELECTED"
+
+                  else
+
+                    # It may already be excluded because it is
+                    # patch-equivalent to a target commit.
+                    echo "::notice::Excluded commit is not in the currently applicable source set:"
+                    echo "$excluded"
+
+                  fi
+
+                done < "$INPUT_COMMITS"
+
+              else
+
+                # ----------------------------------------------------
+                # INCLUSION MODE
+                #
+                # Only explicitly selected commits.
+                # ----------------------------------------------------
+
+                cp "$INPUT_COMMITS" "$SELECTED"
+
+              fi
+
+            fi
+
+          else
+
+            # --------------------------------------------------------
+            # No source branch.
+            #
+            # Explicit commits are mandatory.
+            # --------------------------------------------------------
+
+            if [[ -z "$COMMITS_INPUT" ]]; then
+              echo "::error::No source_branch and no commits."
+              exit 1
+            fi
+
+            if [[ "$EXCLUDE_COMMITS" == "true" ]]; then
+              echo "::error::exclude_commits requires source_branch."
+              exit 1
+            fi
+
+            cp "$INPUT_COMMITS" "$SELECTED"
+
+          fi
+
+          # ==========================================================
+          # STEP 4
+          # Remove duplicates again after selection.
+          # ==========================================================
+
+          sort -u "$SELECTED" -o "$UNIQUE"
+
+          if [[ ! -s "$UNIQUE" ]]; then
+            echo "::error::No commits remain after selection."
             exit 1
           fi
 
           # ==========================================================
-          # REMOVE COMMITS ALREADY IN TARGET
+          # STEP 5
+          # Validate explicit commits belong to source branch.
+          # ==========================================================
+
+          if [[ -n "$SOURCE_BRANCH" ]]; then
+
+            while IFS= read -r commit; do
+
+              [[ -z "$commit" ]] && continue
+
+              if ! git merge-base \
+                --is-ancestor \
+                "$commit" \
+                "$SOURCE_SHA" \
+                2>/dev/null; then
+
+                echo "::error::Commit is not an ancestor of source_branch snapshot:"
+                echo "::error::$commit"
+                echo "::error::Source SHA: $SOURCE_SHA"
+
+                exit 1
+              fi
+
+              # Merge commits are deliberately rejected.
+              # They require a mainline selection and cannot be safely
+              # treated as an ordinary independent change.
+              PARENTS="$(
+                git rev-list \
+                  --parents \
+                  -n 1 \
+                  "$commit" |
+                awk '{print NF-1}'
+              )"
+
+              if [[ "$PARENTS" -gt 1 ]]; then
+
+                echo "::error::Merge commit is not supported as a selected commit:"
+                echo "::error::$commit"
+                echo "::error::Select its individual commits or use merge-branch."
+
+                exit 1
+              fi
+
+            done < "$UNIQUE"
+
+          fi
+
+          # ==========================================================
+          # STEP 6
+          # Remove commits that are already direct ancestors of target.
+          #
+          # Patch-equivalent commits are handled safely by
+          # cherry-pick/replay with --empty=drop as well.
           # ==========================================================
 
           while IFS= read -r commit; do
 
             [[ -z "$commit" ]] && continue
-
-            PARENT_COUNT="$(
-              git rev-list \
-                --parents \
-                -n 1 \
-                "$commit" |
-              awk '{print NF-1}'
-            )"
-
-            if [[ "$PARENT_COUNT" -gt 1 ]]; then
-
-              echo "::error::Merge commit is not supported:"
-              echo "::error::$commit"
-              echo "::error::Select its individual commits instead."
-
-              exit 1
-
-            fi
 
             if git merge-base \
               --is-ancestor \
@@ -612,7 +650,7 @@ jobs:
               "$TARGET_SHA" \
               2>/dev/null; then
 
-              echo "::warning::Already in target, skipping:"
+              echo "::warning::Commit already exists in target. Skipping:"
               echo "::warning::$commit"
 
               continue
@@ -621,20 +659,19 @@ jobs:
 
             echo "$commit" >> "$FINAL"
 
-          done < "$CANDIDATES"
-
-          sort -u "$FINAL" -o "$FINAL"
-
-          if [[ ! -s "$FINAL" ]]; then
-            echo "::error::No new commits remain after target filtering."
-            exit 1
-          fi
+          done < "$UNIQUE"
 
           # ==========================================================
-          # CHRONOLOGICAL ORDER
+          # STEP 7
+          # Chronological order.
           #
-          # Author timestamp first, committer timestamp second.
-          # Therefore input order is irrelevant.
+          # Author timestamp -> committer timestamp -> SHA.
+          #
+          # Thus:
+          #
+          #   input: C A B
+          #
+          # does not matter.
           # ==========================================================
 
           while IFS= read -r commit; do
@@ -653,23 +690,16 @@ jobs:
             uniq > "$SORTED"
 
           if [[ ! -s "$SORTED" ]]; then
-            echo "::error::Sorted commit list is empty."
+
+            echo "::error::No new commits remain after filtering."
             exit 1
+
           fi
 
-          echo ""
-          echo "========================================"
-          echo "COMMITS TO APPLY"
-          echo "========================================"
-
-          while IFS= read -r commit; do
-            git show \
-              -s \
-              --format='%aI | %H | %s' \
-              "$commit"
-          done < "$SORTED"
-
-          echo "========================================"
+          # ==========================================================
+          # STEP 8
+          # Save selection.
+          # ==========================================================
 
           {
             echo "COMMITS_TO_APPLY<<EOF"
@@ -677,8 +707,29 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_ENV"
 
+          # ==========================================================
+          # STEP 9
+          # Display final selection.
+          # ==========================================================
+
+          echo ""
+          echo "========================================"
+          echo "FINAL COMMIT SELECTION"
+          echo "========================================"
+
+          while IFS= read -r commit; do
+
+            git show \
+              -s \
+              --format='%aI | %H | %s' \
+              "$commit"
+
+          done < "$SORTED"
+
+          echo "========================================"
+
       # ============================================================
-      # PATCH / DIFF VALIDATION
+      # VALIDATE PATCH / DIFF
       # ============================================================
 
       - name: Validate patch or diff
@@ -688,24 +739,25 @@ jobs:
           set -Eeuo pipefail
 
           if [[ ! -f "$PATCH_FILE" ]]; then
-            echo "::error::Patch file does not exist:"
+            echo "::error::Patch/diff file does not exist:"
             echo "$PATCH_FILE"
             exit 1
           fi
 
           if [[ ! -s "$PATCH_FILE" ]]; then
-            echo "::error::Patch file is empty:"
+            echo "::error::Patch/diff file is empty:"
             echo "$PATCH_FILE"
             exit 1
           fi
-
-          echo "Patch file:"
-          echo "$PATCH_FILE"
 
           if [[ "$STRATEGY" == "apply-diff" ]]; then
 
             git apply \
               --stat \
+              "$PATCH_FILE"
+
+            git apply \
+              --check \
               "$PATCH_FILE"
 
           else
@@ -716,101 +768,96 @@ jobs:
               < "$PATCH_FILE" \
               >/dev/null 2>&1 || {
 
-                echo "::error::Invalid format-patch/mailbox file."
+                echo "::error::Invalid format-patch file."
                 exit 1
               }
 
           fi
 
       # ============================================================
-      # DRY RUN
+      # DISPLAY PLAN
       # ============================================================
 
-      - name: Dry run
-        if: ${{ inputs.dry_run == true }}
+      - name: Show plan
         shell: bash
         env:
           COMMITS_TO_APPLY: ${{ env.COMMITS_TO_APPLY }}
         run: |
           set -Eeuo pipefail
 
+          echo ""
           echo "========================================"
-          echo "DRY RUN"
+          echo "EXECUTION PLAN"
           echo "========================================"
 
           echo "Strategy:       $STRATEGY"
-          echo "Target:         $TARGET_BRANCH"
-          echo "Target SHA:     $TARGET_SHA"
-          echo "Source:         ${SOURCE_BRANCH:-<none>}"
-          echo "Source SHA:     ${SOURCE_SHA:-<none>}"
+          echo "Target branch:  $TARGET_BRANCH"
+          echo "Target SHA:      $TARGET_SHA"
+
+          if [[ -n "${SOURCE_BRANCH:-}" ]]; then
+            echo "Source branch:  $SOURCE_BRANCH"
+            echo "Source SHA:     $SOURCE_SHA"
+            echo "Merge base:     ${MERGE_BASE:-<none>}"
+          fi
+
           echo "Exclude mode:   $EXCLUDE_COMMITS"
-          echo ""
+          echo "Dry run:        $DRY_RUN"
 
-          case "$STRATEGY" in
+          if [[ -n "${COMMITS_TO_APPLY:-}" ]]; then
 
-            cherry-pick)
-              echo "Would cherry-pick:"
-              printf '%s\n' "$COMMITS_TO_APPLY"
-              ;;
+            echo ""
+            echo "Commits to apply:"
 
-            squash)
-              echo "Would squash:"
-              printf '%s\n' "$COMMITS_TO_APPLY"
-              ;;
+            while IFS= read -r commit; do
 
-            merge-selected)
-              echo "Would merge selected commits:"
-              printf '%s\n' "$COMMITS_TO_APPLY"
-              ;;
+              [[ -z "$commit" ]] && continue
 
-            merge-branch)
-              echo "Would merge:"
-              echo "$SOURCE_SHA"
-              ;;
+              git show \
+                -s \
+                --format='- %H | %aI | %s' \
+                "$commit"
 
-            rebase-branch)
-              echo "Would rebase source snapshot:"
-              echo "$SOURCE_SHA"
-              echo ""
-              echo "Onto target snapshot:"
-              echo "$TARGET_SHA"
-              echo ""
-              echo "Merge base:"
-              echo "$MERGE_BASE"
-              ;;
+            done <<< "$COMMITS_TO_APPLY"
 
-            apply-patch)
-              echo "Would apply patch:"
-              echo "$PATCH_FILE"
-              ;;
+          fi
 
-            apply-diff)
-              echo "Would apply diff:"
-              echo "$PATCH_FILE"
-              ;;
-
-          esac
-
-          echo ""
-          echo "No changes will be pushed."
+          echo "========================================"
 
       # ============================================================
-      # APPLY
+      # SIMULATE OPERATION
+      #
+      # For dry_run we actually execute the operation on a temporary
+      # branch, but never push it.
+      #
+      # This catches real conflicts instead of merely displaying
+      # what would happen.
       # ============================================================
 
-      - name: Apply changes
-        if: ${{ inputs.dry_run != true }}
+      - name: Simulate operation
+        if: ${{ inputs.dry_run == true && (inputs.strategy == 'cherry-pick' || inputs.strategy == 'squash' || inputs.strategy == 'merge-selected' || inputs.strategy == 'rebase-branch') }}
         shell: bash
         env:
           COMMITS_TO_APPLY: ${{ env.COMMITS_TO_APPLY }}
         run: |
           set -Eeuo pipefail
 
-          case "$STRATEGY" in
+          TEMP_BRANCH="dry-run-${GITHUB_RUN_ID}"
 
-            # ========================================================
-            # CHERRY-PICK
-            # ========================================================
+          git switch \
+            --create "$TEMP_BRANCH" \
+            "$TARGET_SHA"
+
+          cleanup() {
+            git cherry-pick --abort >/dev/null 2>&1 || true
+            git rebase --abort >/dev/null 2>&1 || true
+            git merge --abort >/dev/null 2>&1 || true
+            git switch --detach "$TARGET_SHA" >/dev/null 2>&1 || true
+            git branch -D "$TEMP_BRANCH" >/dev/null 2>&1 || true
+          }
+
+          trap cleanup EXIT
+
+          case "$STRATEGY" in
 
             cherry-pick)
 
@@ -818,31 +865,23 @@ jobs:
 
                 [[ -z "$commit" ]] && continue
 
-                echo "Cherry-picking: $commit"
-
                 if ! git cherry-pick \
                   --empty=drop \
                   "$commit"; then
 
-                  echo "::error::Cherry-pick failed: $commit"
+                  echo "::error::Dry-run cherry-pick conflict:"
+                  echo "$commit"
 
-                  if git rev-parse -q \
-                    --verify CHERRY_PICK_HEAD >/dev/null 2>&1; then
-                    git cherry-pick --abort
-                  fi
-
-                  git reset --hard "$TARGET_SHA"
+                  git status --short || true
+                  git cherry-pick --abort || true
 
                   exit 1
+
                 fi
 
               done <<< "$COMMITS_TO_APPLY"
 
               ;;
-
-            # ========================================================
-            # SQUASH
-            # ========================================================
 
             squash)
 
@@ -851,8 +890,6 @@ jobs:
               while IFS= read -r commit; do
 
                 [[ -z "$commit" ]] && continue
-
-                echo "Squash-applying: $commit"
 
                 if git cherry-pick \
                   --no-commit \
@@ -864,43 +901,299 @@ jobs:
 
                 fi
 
-                if git diff --quiet && git diff --cached --quiet; then
-
-                  if git rev-parse -q \
-                    --verify CHERRY_PICK_HEAD >/dev/null 2>&1; then
-                    git cherry-pick --abort
-                  fi
-
-                  echo "::warning::Commit produced no changes:"
-                  echo "::warning::$commit"
-
-                  continue
-
-                fi
-
-                echo "::error::Conflict while applying: $commit"
-
                 if git rev-parse -q \
                   --verify CHERRY_PICK_HEAD >/dev/null 2>&1; then
-                  git cherry-pick --abort
+
+                  echo "::error::Dry-run squash conflict:"
+                  echo "$commit"
+
+                  git status --short || true
+                  git cherry-pick --abort || true
+
+                  exit 1
+
                 fi
-
-                git reset --hard "$TARGET_SHA"
-
-                exit 1
 
               done <<< "$COMMITS_TO_APPLY"
 
-              if [[ "$APPLIED" -eq 0 ]]; then
-                echo "::error::Squash produced no changes."
-                exit 1
+              if ! git diff --quiet || ! git diff --cached --quiet; then
+
+                git add -A
+
+                MESSAGE="${COMMIT_MESSAGE:-Squash selected commits}"
+
+                git commit -m "$MESSAGE"
+
               fi
+
+              ;;
+
+            merge-selected)
+
+              TEMP_SELECTED="dry-run-selected-${GITHUB_RUN_ID}"
+
+              git switch \
+                --create "$TEMP_SELECTED" \
+                "$TARGET_SHA"
+
+              for commit in $COMMITS_TO_APPLY; do
+
+                if ! git cherry-pick \
+                  --empty=drop \
+                  "$commit"; then
+
+                  echo "::error::Dry-run selected merge conflict:"
+                  echo "$commit"
+
+                  git cherry-pick --abort || true
+
+                  exit 1
+
+                fi
+
+              done
+
+              SELECTED_SHA="$(git rev-parse HEAD)"
+
+              git switch "$TEMP_BRANCH"
+
+              MESSAGE="${COMMIT_MESSAGE:-Merge selected commits}"
+
+              if ! git merge \
+                --no-ff \
+                "$SELECTED_SHA" \
+                -m "$MESSAGE"; then
+
+                echo "::error::Dry-run merge-selected conflict."
+
+                git merge --abort || true
+
+                exit 1
+
+              fi
+
+              git branch -D "$TEMP_SELECTED"
+
+              ;;
+
+            rebase-branch)
+
+              # ------------------------------------------------------
+              # Unified selection is replayed one commit at a time.
+              #
+              # This gives rebase-branch the same selection semantics
+              # as cherry-pick/squash while retaining individual
+              # commits.
+              # ------------------------------------------------------
+
+              for commit in $COMMITS_TO_APPLY; do
+
+                if ! git cherry-pick \
+                  --empty=drop \
+                  "$commit"; then
+
+                  echo "::error::Dry-run rebase conflict:"
+                  echo "$commit"
+
+                  git status --short || true
+                  git cherry-pick --abort || true
+
+                  exit 1
+
+                fi
+
+              done
+
+              ;;
+
+          esac
+
+          echo ""
+          echo "========================================"
+          echo "DRY RUN RESULT"
+          echo "========================================"
+
+          echo "Operation completed successfully in temporary branch."
+
+          echo ""
+          echo "Resulting commits:"
+
+          git log \
+            --oneline \
+            --decorate \
+            "$TARGET_SHA..HEAD"
+
+          echo ""
+          echo "No push will be performed."
+
+      # ============================================================
+      # DRY RUN PATCH
+      # ============================================================
+
+      - name: Simulate patch or diff
+        if: ${{ inputs.dry_run == true && (inputs.strategy == 'apply-patch' || inputs.strategy == 'apply-diff') }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          TEMP_BRANCH="dry-run-${GITHUB_RUN_ID}"
+
+          git switch \
+            --create "$TEMP_BRANCH" \
+            "$TARGET_SHA"
+
+          cleanup() {
+            git am --abort >/dev/null 2>&1 || true
+            git switch --detach "$TARGET_SHA" >/dev/null 2>&1 || true
+            git branch -D "$TEMP_BRANCH" >/dev/null 2>&1 || true
+          }
+
+          trap cleanup EXIT
+
+          if [[ "$STRATEGY" == "apply-patch" ]]; then
+
+            if ! git am \
+              --3way \
+              --empty=drop \
+              "$PATCH_FILE"; then
+
+              echo "::error::Dry-run patch application failed."
+
+              git am --show-current-patch=raw || true
+              git am --abort || true
+
+              exit 1
+            fi
+
+          else
+
+            if ! git apply \
+              --3way \
+              "$PATCH_FILE"; then
+
+              echo "::error::Dry-run diff application failed."
+
+              git status --short || true
+
+              exit 1
+            fi
+
+            git add -A
+
+            if ! git diff --cached --quiet; then
+
+              MESSAGE="${COMMIT_MESSAGE:-Apply diff: $(basename "$PATCH_FILE")}"
+
+              git commit -m "$MESSAGE"
+
+            fi
+
+          fi
+
+          echo ""
+          echo "========================================"
+          echo "DRY RUN RESULT"
+          echo "========================================"
+
+          git log \
+            --oneline \
+            --decorate \
+            "$TARGET_SHA..HEAD"
+
+          echo ""
+          echo "No push will be performed."
+
+      # ============================================================
+      # APPLY REAL OPERATION
+      # ============================================================
+
+      - name: Apply operation
+        if: ${{ inputs.dry_run != true }}
+        shell: bash
+        env:
+          COMMITS_TO_APPLY: ${{ env.COMMITS_TO_APPLY }}
+        run: |
+          set -Eeuo pipefail
+
+          case "$STRATEGY" in
+
+            # ========================================================
+            # CHERRY-PICK
+            #
+            # Each source commit creates its own new commit.
+            # commit_message is deliberately ignored.
+            # ========================================================
+
+            cherry-pick)
+
+              while IFS= read -r commit; do
+
+                [[ -z "$commit" ]] && continue
+
+                echo "Cherry-picking:"
+                echo "$commit"
+
+                if ! git cherry-pick \
+                  --empty=drop \
+                  "$commit"; then
+
+                  echo "::error::Cherry-pick failed:"
+                  echo "$commit"
+
+                  git status --short || true
+                  git cherry-pick --abort || true
+                  git reset --hard "$TARGET_SHA"
+
+                  exit 1
+
+                fi
+
+              done <<< "$COMMITS_TO_APPLY"
+
+              ;;
+
+            # ========================================================
+            # SQUASH
+            #
+            # All selected changes become ONE commit.
+            # ========================================================
+
+            squash)
+
+              while IFS= read -r commit; do
+
+                [[ -z "$commit" ]] && continue
+
+                echo "Adding to squash:"
+                echo "$commit"
+
+                if ! git cherry-pick \
+                  --no-commit \
+                  --empty=drop \
+                  "$commit"; then
+
+                  echo "::error::Squash conflict:"
+                  echo "$commit"
+
+                  git status --short || true
+                  git cherry-pick --abort || true
+                  git reset --hard "$TARGET_SHA"
+
+                  exit 1
+
+                fi
+
+              done <<< "$COMMITS_TO_APPLY"
 
               git add -A
 
               if git diff --cached --quiet; then
-                echo "::error::Nothing to commit after squash."
+
+                echo "::error::Squash produced no changes."
+                git reset --hard "$TARGET_SHA"
+
                 exit 1
+
               fi
 
               if [[ -n "$COMMIT_MESSAGE" ]]; then
@@ -912,7 +1205,7 @@ jobs:
                 if [[ "$EXCLUDE_COMMITS" == "true" ]]; then
                   FINAL_MESSAGE="Squash $SOURCE_BRANCH excluding selected commits"
                 else
-                  FINAL_MESSAGE="Squash $SOURCE_BRANCH into $TARGET_BRANCH"
+                  FINAL_MESSAGE="Squash selected commits from $SOURCE_BRANCH"
                 fi
 
               else
@@ -921,17 +1214,21 @@ jobs:
 
               fi
 
-              git commit -m "$FINAL_MESSAGE"
+              git commit \
+                -m "$FINAL_MESSAGE"
 
               ;;
 
             # ========================================================
             # MERGE-SELECTED
+            #
+            # Selected commits are first replayed onto target on a
+            # temporary branch, then that result is merged with --no-ff.
             # ========================================================
 
             merge-selected)
 
-              TEMP_BRANCH="automation/merge-selected-${GITHUB_RUN_ID}"
+              TEMP_BRANCH="merge-selected-${GITHUB_RUN_ID}"
 
               git switch \
                 --create "$TEMP_BRANCH" \
@@ -941,23 +1238,25 @@ jobs:
 
                 [[ -z "$commit" ]] && continue
 
-                echo "Applying selected commit: $commit"
+                echo "Applying selected commit:"
+                echo "$commit"
 
                 if ! git cherry-pick \
                   --empty=drop \
                   "$commit"; then
 
-                  echo "::error::Unable to build selected branch."
+                  echo "::error::Selected commit could not be applied:"
+                  echo "$commit"
 
-                  if git rev-parse -q \
-                    --verify CHERRY_PICK_HEAD >/dev/null 2>&1; then
-                    git cherry-pick --abort
-                  fi
+                  git cherry-pick --abort || true
 
                   git switch "$TARGET_BRANCH" || true
+                  git reset --hard "$TARGET_SHA"
+
                   git branch -D "$TEMP_BRANCH" || true
 
                   exit 1
+
                 fi
 
               done <<< "$COMMITS_TO_APPLY"
@@ -973,9 +1272,9 @@ jobs:
               elif [[ -n "$SOURCE_BRANCH" ]]; then
 
                 if [[ "$EXCLUDE_COMMITS" == "true" ]]; then
-                  FINAL_MESSAGE="Merge $SOURCE_BRANCH excluding selected commits"
+                  FINAL_MESSAGE="Merge selected changes from $SOURCE_BRANCH excluding selected commits"
                 else
-                  FINAL_MESSAGE="Merge selected commits from $SOURCE_BRANCH"
+                  FINAL_MESSAGE="Merge selected changes from $SOURCE_BRANCH"
                 fi
 
               else
@@ -989,16 +1288,15 @@ jobs:
                 "$SELECTED_SHA" \
                 -m "$FINAL_MESSAGE"; then
 
-                echo "::error::Selected merge failed."
+                echo "::error::merge-selected failed."
 
-                if git rev-parse -q \
-                  --verify MERGE_HEAD >/dev/null 2>&1; then
-                  git merge --abort
-                fi
+                git merge --abort || true
+                git reset --hard "$TARGET_SHA"
 
                 git branch -D "$TEMP_BRANCH" || true
 
                 exit 1
+
               fi
 
               git branch -D "$TEMP_BRANCH"
@@ -1008,7 +1306,7 @@ jobs:
             # ========================================================
             # MERGE-BRANCH
             #
-            # Uses the SNAPSHOT source SHA.
+            # Entire frozen source snapshot is merged.
             # ========================================================
 
             merge-branch)
@@ -1024,16 +1322,13 @@ jobs:
                 "$SOURCE_SHA" \
                 -m "$FINAL_MESSAGE"; then
 
-                echo "::error::Branch merge failed."
+                echo "::error::merge-branch failed."
 
-                if git rev-parse -q \
-                  --verify MERGE_HEAD >/dev/null 2>&1; then
-                  git merge --abort
-                fi
-
+                git merge --abort || true
                 git reset --hard "$TARGET_SHA"
 
                 exit 1
+
               fi
 
               ;;
@@ -1041,257 +1336,126 @@ jobs:
             # ========================================================
             # REBASE-BRANCH
             #
-            # IMPORTANT:
+            # Unified selection:
             #
-            # Rebase is performed against immutable snapshots:
+            #   whole branch
+            #   selected commits
+            #   branch minus excluded commits
             #
-            #   SOURCE_SHA
-            #   TARGET_SHA
-            #   MERGE_BASE
+            # Each selected commit remains an individual commit.
             #
-            # It does NOT use origin/$SOURCE_BRANCH or
-            # origin/$TARGET_BRANCH here.
+            # This is intentionally replayed sequentially rather than
+            # using a blind:
             #
-            # Therefore new commits appearing on source during this
-            # workflow cannot unexpectedly enter the result.
+            #   git rebase --onto ...
+            #
+            # because the latter cannot express arbitrary exclusion.
             # ========================================================
 
             rebase-branch)
 
-              TEMP_BRANCH="automation/rebase-${GITHUB_RUN_ID}"
+              while IFS= read -r commit; do
 
-              echo "========================================"
-              echo "REBASE"
-              echo "========================================"
+                [[ -z "$commit" ]] && continue
 
-              echo "Source snapshot:"
-              echo "$SOURCE_SHA"
+                echo "Replaying for rebase:"
+                echo "$commit"
 
-              echo ""
-              echo "Target snapshot:"
-              echo "$TARGET_SHA"
+                if ! git cherry-pick \
+                  --empty=drop \
+                  "$commit"; then
 
-              echo ""
-              echo "Merge base:"
-              echo "$MERGE_BASE"
+                  echo "::error::Rebase/replay conflict:"
+                  echo "$commit"
 
-              # ------------------------------------------------------
-              # Create temporary branch from EXACT source snapshot.
-              # ------------------------------------------------------
+                  echo ""
+                  echo "Current patch:"
+                  git show \
+                    --format=fuller \
+                    "$commit" || true
 
-              git switch \
-                --create "$TEMP_BRANCH" \
-                "$SOURCE_SHA"
+                  echo ""
+                  echo "Working tree:"
+                  git status --short || true
 
-              # ------------------------------------------------------
-              # Rebase exactly the source commits after merge-base
-              # onto exactly the target snapshot.
-              # ------------------------------------------------------
+                  git cherry-pick --abort || true
+                  git reset --hard "$TARGET_SHA"
 
-              if ! git rebase \
-                --onto "$TARGET_SHA" \
-                "$MERGE_BASE" \
-                "$SOURCE_SHA" \
-                --empty=drop; then
+                  exit 1
 
-                echo "::error::Rebase failed."
+                fi
 
-                echo ""
-                echo "Current patch:"
-                git rebase --show-current-patch || true
-
-                echo ""
-                echo "Rebase status:"
-                git status --short || true
-
-                git rebase --abort || true
-
-                git switch "$TARGET_BRANCH" || true
-                git reset --hard "$TARGET_SHA" || true
-
-                git branch -D "$TEMP_BRANCH" || true
-
-                exit 1
-              fi
-
-              # ------------------------------------------------------
-              # Make absolutely sure rebase is finished.
-              # ------------------------------------------------------
-
-              if git rev-parse -q \
-                --verify REBASE_HEAD >/dev/null 2>&1; then
-
-                echo "::error::Rebase is still in progress."
-
-                git rebase --abort || true
-
-                git switch "$TARGET_BRANCH" || true
-                git reset --hard "$TARGET_SHA" || true
-
-                git branch -D "$TEMP_BRANCH" || true
-
-                exit 1
-              fi
-
-              REBASED_SHA="$(git rev-parse HEAD)"
-
-              echo ""
-              echo "Rebased SHA:"
-              echo "$REBASED_SHA"
-
-              # ------------------------------------------------------
-              # Ensure temporary branch actually contains changes.
-              # ------------------------------------------------------
-
-              if [[ "$REBASED_SHA" == "$TARGET_SHA" ]]; then
-
-                echo "::error::Rebase produced no commits."
-                echo "::error::All source commits may already exist in target."
-
-                git switch "$TARGET_BRANCH"
-                git reset --hard "$TARGET_SHA"
-
-                git branch -D "$TEMP_BRANCH" || true
-
-                exit 1
-              fi
-
-              # ------------------------------------------------------
-              # Switch back to local target branch.
-              # ------------------------------------------------------
-
-              git switch "$TARGET_BRANCH"
-
-              # ------------------------------------------------------
-              # Target must still be exactly the snapshot we started
-              # from.
-              # ------------------------------------------------------
-
-              CURRENT_LOCAL_TARGET="$(git rev-parse HEAD)"
-
-              if [[ "$CURRENT_LOCAL_TARGET" != "$TARGET_SHA" ]]; then
-
-                echo "::error::Local target changed unexpectedly."
-                echo "::error::Expected: $TARGET_SHA"
-                echo "::error::Actual:   $CURRENT_LOCAL_TARGET"
-
-                git reset --hard "$TARGET_SHA"
-
-                git branch -D "$TEMP_BRANCH" || true
-
-                exit 1
-              fi
-
-              # ------------------------------------------------------
-              # Fast-forward target to rebased history.
-              # ------------------------------------------------------
-
-              if ! git merge \
-                --ff-only \
-                "$REBASED_SHA"; then
-
-                echo "::error::Unable to fast-forward target."
-
-                git reset --hard "$TARGET_SHA"
-
-                git branch -D "$TEMP_BRANCH" || true
-
-                exit 1
-              fi
-
-              git branch -D "$TEMP_BRANCH"
+              done <<< "$COMMITS_TO_APPLY"
 
               ;;
 
             # ========================================================
-            # APPLY PATCH
+            # APPLY-PATCH
+            #
+            # format-patch/mailbox -> git am
             # ========================================================
 
             apply-patch)
-
-              BEFORE_PATCH_SHA="$(git rev-parse HEAD)"
 
               if ! git am \
                 --3way \
                 --empty=drop \
                 "$PATCH_FILE"; then
 
-                echo "::error::git am failed."
+                echo "::error::Patch application failed."
 
                 git am --show-current-patch=raw || true
                 git am --abort || true
-
                 git reset --hard "$TARGET_SHA"
 
                 exit 1
-              fi
 
-              AFTER_PATCH_SHA="$(git rev-parse HEAD)"
-
-              if [[ "$BEFORE_PATCH_SHA" == "$AFTER_PATCH_SHA" ]]; then
-                echo "::error::Patch produced no new commit."
-                exit 1
               fi
 
               ;;
 
             # ========================================================
-            # APPLY DIFF
+            # APPLY-DIFF
+            #
+            # Plain diff -> working tree -> one commit.
             # ========================================================
 
             apply-diff)
 
-              # ------------------------------------------------------
-              # Detect already-applied diff.
-              # ------------------------------------------------------
-
+              # Already-applied detection.
               if git apply \
                 --check \
                 --reverse \
                 "$PATCH_FILE" \
                 >/dev/null 2>&1; then
 
-                echo "::error::Patch appears to be already applied."
-                echo "::error::Refusing to apply it twice."
-
+                echo "::error::Diff appears to be already applied."
                 exit 1
+
               fi
-
-              # ------------------------------------------------------
-              # Verify forward applicability.
-              # ------------------------------------------------------
-
-              if ! git apply \
-                --check \
-                "$PATCH_FILE"; then
-
-                echo "::error::Patch cannot be applied cleanly."
-                exit 1
-              fi
-
-              # ------------------------------------------------------
-              # Apply.
-              # ------------------------------------------------------
 
               if ! git apply \
                 --3way \
                 "$PATCH_FILE"; then
 
-                echo "::error::git apply failed."
+                echo "::error::Diff application failed."
 
                 git reset --hard "$TARGET_SHA"
 
                 exit 1
+
               fi
 
               git add -A
 
               if git diff --cached --quiet; then
-                echo "::error::Patch produced no changes."
+
+                echo "::error::Diff produced no changes."
 
                 git reset --hard "$TARGET_SHA"
 
                 exit 1
+
               fi
 
               if [[ -n "$COMMIT_MESSAGE" ]]; then
@@ -1300,19 +1464,13 @@ jobs:
 
               else
 
-                PATCH_NAME="$(basename "$PATCH_FILE")"
-
-                FINAL_MESSAGE="Apply patch: $PATCH_NAME"
+                FINAL_MESSAGE="Apply diff: $(basename "$PATCH_FILE")"
 
               fi
 
-              git commit -m "$FINAL_MESSAGE"
+              git commit \
+                -m "$FINAL_MESSAGE"
 
-              ;;
-
-            *)
-              echo "::error::Unsupported strategy: $STRATEGY"
-              exit 1
               ;;
 
           esac
@@ -1321,7 +1479,7 @@ jobs:
       # FINAL LOCAL VALIDATION
       # ============================================================
 
-      - name: Validate final state
+      - name: Validate result
         if: ${{ inputs.dry_run != true }}
         shell: bash
         run: |
@@ -1336,6 +1494,7 @@ jobs:
 
             echo "::error::Unresolved cherry-pick state."
             exit 1
+
           fi
 
           if git rev-parse -q \
@@ -1343,6 +1502,7 @@ jobs:
 
             echo "::error::Unresolved merge state."
             exit 1
+
           fi
 
           if git rev-parse -q \
@@ -1350,6 +1510,7 @@ jobs:
 
             echo "::error::Unresolved rebase state."
             exit 1
+
           fi
 
           if [[ -n "$(git status --porcelain)" ]]; then
@@ -1358,40 +1519,32 @@ jobs:
             git status --short
 
             exit 1
+
           fi
 
           FINAL_SHA="$(git rev-parse HEAD)"
 
           if [[ "$FINAL_SHA" == "$TARGET_SHA" ]]; then
 
-            echo "::error::Operation produced no new commit."
+            echo "::error::Operation produced no changes."
             exit 1
+
           fi
 
-          echo ""
           echo "Initial target:"
           echo "$TARGET_SHA"
 
           echo ""
-          echo "Final HEAD:"
+          echo "Final:"
           echo "$FINAL_SHA"
-
-          echo ""
-          echo "Recent history:"
-
-          git log \
-            --oneline \
-            --decorate \
-            -10
 
       # ============================================================
       # REMOTE RACE CHECK
       #
-      # This is especially important for rebase because it rewrites
-      # target history.
+      # Must happen immediately before push.
       # ============================================================
 
-      - name: Verify target has not changed
+      - name: Verify remote target is unchanged
         if: ${{ inputs.dry_run != true }}
         shell: bash
         run: |
@@ -1402,24 +1555,24 @@ jobs:
             origin \
             "+refs/heads/$TARGET_BRANCH:refs/remotes/origin/$TARGET_BRANCH"
 
-          CURRENT_REMOTE_TARGET="$(
+          CURRENT_REMOTE_SHA="$(
             git rev-parse "origin/$TARGET_BRANCH"
           )"
 
-          echo "Original target:"
+          echo "Expected target:"
           echo "$TARGET_SHA"
 
           echo ""
           echo "Current remote target:"
-          echo "$CURRENT_REMOTE_TARGET"
+          echo "$CURRENT_REMOTE_SHA"
 
-          if [[ "$CURRENT_REMOTE_TARGET" != "$TARGET_SHA" ]]; then
+          if [[ "$CURRENT_REMOTE_SHA" != "$TARGET_SHA" ]]; then
 
             echo "::error::Target branch changed while workflow was running."
             echo "::error::Push cancelled."
-            echo "::error::Nothing will be overwritten."
 
             exit 1
+
           fi
 
       # ============================================================
@@ -1432,13 +1585,11 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          FINAL_SHA="$(git rev-parse HEAD)"
-
           case "$STRATEGY" in
 
             rebase-branch)
 
-              echo "Pushing rebased history with explicit lease."
+              echo "Pushing rebase result with explicit force-with-lease."
 
               git push \
                 --force-with-lease="refs/heads/$TARGET_BRANCH:$TARGET_SHA" \
@@ -1449,8 +1600,6 @@ jobs:
 
             *)
 
-              echo "Pushing normal update."
-
               git push \
                 origin \
                 "HEAD:refs/heads/$TARGET_BRANCH"
@@ -1459,10 +1608,6 @@ jobs:
 
           esac
 
-          echo ""
-          echo "Successfully pushed:"
-          echo "$FINAL_SHA"
-
       # ============================================================
       # SUMMARY
       # ============================================================
@@ -1470,6 +1615,8 @@ jobs:
       - name: Job summary
         if: always()
         shell: bash
+        env:
+          COMMITS_TO_APPLY: ${{ env.COMMITS_TO_APPLY }}
         run: |
           {
             echo "## Apply changes"
@@ -1488,7 +1635,23 @@ jobs:
               echo "| Merge base | \`${MERGE_BASE}\` |"
             fi
 
-            if git rev-parse HEAD >/dev/null 2>&1; then
-              echo "| Final SHA | \`$(git rev-parse HEAD)\` |"
+            echo ""
+            echo "### Selected commits"
+
+            if [[ -n "${COMMITS_TO_APPLY:-}" ]]; then
+
+              while IFS= read -r commit; do
+
+                [[ -z "$commit" ]] && continue
+
+                echo "- \`$commit\` — $(git show -s --format='%s' "$commit")"
+
+              done <<< "$COMMITS_TO_APPLY"
+
+            else
+
+              echo "No commit selection."
+
             fi
+
           } >> "$GITHUB_STEP_SUMMARY"

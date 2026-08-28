@@ -1281,30 +1281,7 @@ public class StoriesController {
     }
 
     public boolean markStoryAsRead(TL_stories.PeerStories userStories, TL_stories.StoryItem storyItem, boolean profile) {
-        if (storyItem == null || userStories == null) {
-            return false;
-        }
-        final long dialogId = DialogObject.getPeerDialogId(userStories.peer);
-        if (storyItem.justUploaded) {
-            storyItem.justUploaded = false;
-        }
-        int currentReadId = dialogIdToMaxReadId.get(dialogId);
-        int newReadId = Math.max(userStories.max_read_id, Math.max(currentReadId, storyItem.id));
-        NotificationsController.getInstance(currentAccount).processReadStories(dialogId, newReadId);
-        userStories.max_read_id = newReadId;
-        dialogIdToMaxReadId.put(dialogId, newReadId);
-        if (newReadId > currentReadId) {
-            if (!profile) {
-                storiesStorage.updateMaxReadId(dialogId, newReadId);
-            }
-            TL_stories.TL_stories_readStories req = new TL_stories.TL_stories_readStories();
-            req.peer = MessagesController.getInstance(currentAccount).getInputPeer(dialogId);
-            req.max_id = storyItem.id;
-            ConnectionsManager.getInstance(currentAccount).sendRequest(req, null);
-            NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.storiesReadUpdated);
-            return true;
-        }
-        return false;
+    return false;
     }
 
     public int getMaxStoriesReadId(long dialogId) {
@@ -3722,15 +3699,7 @@ public class StoriesController {
         }
 
         protected boolean markAsRead(int storyId) {
-            if (seenStories.contains(storyId)) return false;
-            seenStories.add(storyId);
-            saveCache();
-            TL_stories.TL_stories_incrementStoryViews req = new TL_stories.TL_stories_incrementStoryViews();
-            req.peer = MessagesController.getInstance(currentAccount).getInputPeer(dialogId);
-            req.id.add(storyId);
-            ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> {});
-            NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.storiesReadUpdated);
-            return true;
+    return false;
         }
 
         protected boolean canLoad() {

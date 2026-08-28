@@ -1,16 +1,16 @@
-name: Make patches
+name: Build Code Patches
 
 on:
   workflow_dispatch:
     inputs:
       base:
-        description: "Base branch or commit. Used as range start in reverse mode."
+        description: "Base branch or commit (used by Reverse mode)"
         required: true
         default: "main"
         type: string
 
       commits:
-        description: "Commit SHA list, separated by spaces"
+        description: "Commit SHA list separated by spaces"
         required: true
         type: string
 
@@ -19,6 +19,34 @@ on:
         required: true
         default: false
         type: boolean
+
+      author_mode:
+        description: "Author information"
+        required: true
+        default: "original"
+        type: choice
+        options:
+          - original
+          - none
+          - custom
+
+      custom_author:
+        description: 'Custom author, e.g. "John Doe <john@example.com>"'
+        required: false
+        default: ""
+        type: string
+
+      include_message:
+        description: "Include commit message"
+        required: true
+        default: true
+        type: boolean
+
+      context:
+        description: "Number of context lines around changes"
+        required: true
+        default: "3"
+        type: string
 
 jobs:
   build-patches:
@@ -31,15 +59,17 @@ jobs:
       # ============================================================
       # Initial shallow checkout
       # ============================================================
+
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v5
         with:
           fetch-depth: 1
           fetch-tags: false
 
       # ============================================================
-      # Prepare Git objects
+      # Prepare required Git history
       # ============================================================
+
       - name: Prepare Git history
         env:
           BASE: ${{ inputs.base }}
@@ -57,10 +87,10 @@ jobs:
           echo
 
           # --------------------------------------------------------
-          # NORMAL MODE
+          # Normal mode:
           #
-          # We don't need BASE at all.
-          # Fetch only the requested commits.
+          # Only selected commits are required.
+          # We fetch each commit with its parent.
           # --------------------------------------------------------
 
           if [[ "$REVERSE" != "true" ]]; then
@@ -78,10 +108,10 @@ jobs:
                 continue
               fi
 
-              # Fetch the commit and its parent.
+              # Parent is required because the patch is:
               #
-              # The parent is required because format-patch creates
-              # the patch from parent -> commit.
+              #     commit^ -> commit
+              #
               git fetch \
                 --no-tags \
                 --depth=2 \
@@ -95,22 +125,21 @@ jobs:
             done
 
           # --------------------------------------------------------
-          # REVERSE MODE
+          # Reverse mode:
           #
-          # We need all commits in:
-          #
-          #     BASE..HEAD
-          #
-          # and then remove the explicitly specified commits.
+          # We need BASE..HEAD.
+          # History is deepened gradually.
           # --------------------------------------------------------
 
           else
 
             echo "Mode: EXCLUDE"
             echo
-            echo "Preparing history from BASE to HEAD..."
 
+            # ------------------------------------------------------
             # Resolve BASE.
+            # ------------------------------------------------------
+
             if git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
 
               BASE_SHA="$(git rev-parse "${BASE}^{commit}")"
@@ -144,13 +173,22 @@ jobs:
 
             echo "BASE SHA: $BASE_SHA"
 
+            echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
+
+            # ------------------------------------------------------
+            # Current HEAD.
+            # ------------------------------------------------------
+
             HEAD_SHA="$(git rev-parse HEAD)"
 
             echo "HEAD SHA: $HEAD_SHA"
 
+            echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
+
             # ------------------------------------------------------
-            # Gradually deepen the current branch until BASE becomes
-            # reachable.
+            # Gradually deepen repository until BASE is reachable.
+            #
+            # 100 -> 200 -> 400 -> 800 -> ...
             # ------------------------------------------------------
 
             DEPTH=100
@@ -171,7 +209,7 @@ jobs:
               DEPTH=$((DEPTH * 2))
 
               if [[ "$DEPTH" -gt "$MAX_DEPTH" ]]; then
-                echo "::error::Unable to find BASE in current history."
+                echo "::error::Unable to find BASE in repository history."
                 echo "::error::BASE: $BASE_SHA"
                 echo "::error::HEAD: $HEAD_SHA"
                 exit 1
@@ -182,7 +220,7 @@ jobs:
             echo "BASE is reachable."
 
             # ------------------------------------------------------
-            # Fetch excluded commits that aren't already present.
+            # Make sure explicitly excluded commits are available.
             # ------------------------------------------------------
 
             for commit in $COMMITS; do
@@ -202,18 +240,21 @@ jobs:
 
               git rev-parse --verify "${commit}^{commit}" >/dev/null
             done
-
-            echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
           fi
 
       # ============================================================
-      # Generate independent patches
+      # Generate patches
       # ============================================================
-      - name: Generate independent patches
+
+      - name: Generate patches
         env:
           BASE: ${{ inputs.base }}
           COMMITS: ${{ inputs.commits }}
           REVERSE: ${{ inputs.reverse }}
+          AUTHOR_MODE: ${{ inputs.author_mode }}
+          CUSTOM_AUTHOR: ${{ inputs.custom_author }}
+          INCLUDE_MESSAGE: ${{ inputs.include_message }}
+          CONTEXT: ${{ inputs.context }}
         run: |
           set -euo pipefail
 
@@ -223,27 +264,35 @@ jobs:
           mkdir -p "$PATCH_DIR"
 
           # ========================================================
-          # Determine commit list
+          # Validate context
+          # ========================================================
+
+          if ! [[ "$CONTEXT" =~ ^[0-9]+$ ]]; then
+            echo "::error::Context must be a non-negative integer."
+            exit 1
+          fi
+
+          echo "Context lines: $CONTEXT"
+
+          # ========================================================
+          # Build commit list
           # ========================================================
 
           if [[ "$REVERSE" == "true" ]]; then
 
+            echo
             echo "Building reverse commit list..."
 
-            HEAD_SHA="$(git rev-parse HEAD)"
-
-            # Get commits in chronological order.
             mapfile -t ALL_COMMITS < <(
               git rev-list \
                 --reverse \
                 "${BASE_SHA}..${HEAD_SHA}"
             )
 
-            echo
-            echo "Total commits in range: ${#ALL_COMMITS[@]}"
+            echo "Commits in BASE..HEAD: ${#ALL_COMMITS[@]}"
 
             # ------------------------------------------------------
-            # Build exclusion map.
+            # Exclusion map
             # ------------------------------------------------------
 
             declare -A EXCLUDED=()
@@ -258,7 +307,7 @@ jobs:
             done
 
             # ------------------------------------------------------
-            # Filter commits.
+            # Remove excluded commits
             # ------------------------------------------------------
 
             SELECTED_COMMITS=()
@@ -275,6 +324,7 @@ jobs:
 
           else
 
+            echo
             echo "Using explicitly selected commits."
 
             read -ra SELECTED_COMMITS <<< "$COMMITS"
@@ -282,7 +332,7 @@ jobs:
           fi
 
           # ========================================================
-          # Validate
+          # Validate commit list
           # ========================================================
 
           if [[ ${#SELECTED_COMMITS[@]} -eq 0 ]]; then
@@ -292,7 +342,7 @@ jobs:
 
           echo
           echo "========================================"
-          echo "Commits to convert into patches"
+          echo "Commits to process"
           echo "========================================"
 
           printf '  %s\n' "${SELECTED_COMMITS[@]}"
@@ -304,13 +354,16 @@ jobs:
           {
             echo "base=$BASE"
             echo "reverse=$REVERSE"
+            echo "author_mode=$AUTHOR_MODE"
+            echo "include_message=$INCLUDE_MESSAGE"
+            echo "context=$CONTEXT"
             echo
             echo "commits:"
             printf '%s\n' "${SELECTED_COMMITS[@]}"
           } > "$PATCH_DIR/metadata.txt"
 
           # ========================================================
-          # Generate patches
+          # Generate one patch per commit
           # ========================================================
 
           NUMBER=1
@@ -326,8 +379,31 @@ jobs:
                 "$SHA"
             )"
 
+            MESSAGE="$(
+              git log \
+                -1 \
+                --format='%b' \
+                "$SHA"
+            )"
+
+            AUTHOR_NAME="$(
+              git log \
+                -1 \
+                --format='%an' \
+                "$SHA"
+            )"
+
+            AUTHOR_EMAIL="$(
+              git log \
+                -1 \
+                --format='%ae' \
+                "$SHA"
+            )"
+
+            ORIGINAL_AUTHOR="${AUTHOR_NAME} <${AUTHOR_EMAIL}>"
+
             # ------------------------------------------------------
-            # Generate a filesystem-safe filename.
+            # Safe filename
             # ------------------------------------------------------
 
             SAFE_SUBJECT="$(
@@ -340,8 +416,11 @@ jobs:
                   -e 's/-$//'
             )"
 
-            # Keep filenames reasonably short.
             SAFE_SUBJECT="${SAFE_SUBJECT:0:80}"
+
+            if [[ -z "$SAFE_SUBJECT" ]]; then
+              SAFE_SUBJECT="patch"
+            fi
 
             PATCH_FILE="$PATCH_DIR/$(printf '%04d' "$NUMBER")-${SAFE_SUBJECT}.patch"
 
@@ -353,34 +432,102 @@ jobs:
             echo "Subject: $SUBJECT"
             echo "Output:  $PATCH_FILE"
 
-            # ------------------------------------------------------
-            # Generate exactly ONE patch for exactly ONE commit.
-            #
-            # format-patch compares the commit with its parent.
-            #
-            # No cherry-pick is performed.
-            # No merge is performed.
-            # BASE is not used here.
-            # ------------------------------------------------------
+            # ======================================================
+            # Build patch header
+            # ======================================================
 
-            git format-patch \
-              -1 \
-              --binary \
-              --full-index \
-              --no-stat \
-              --no-numbered \
-              --output="$PATCH_FILE" \
-              "$SHA"
+            {
+              # ----------------------------------------------------
+              # Author
+              # ----------------------------------------------------
 
-            # ------------------------------------------------------
-            # Verify output.
-            # ------------------------------------------------------
+              case "$AUTHOR_MODE" in
+
+                original)
+                  printf 'Author: %s\n' "$ORIGINAL_AUTHOR"
+                  ;;
+
+                custom)
+                  if [[ -z "$CUSTOM_AUTHOR" ]]; then
+                    echo "::error::Custom author was selected but custom_author is empty."
+                    exit 1
+                  fi
+
+                  printf 'Author: %s\n' "$CUSTOM_AUTHOR"
+                  ;;
+
+                none)
+                  ;;
+
+                *)
+                  echo "::error::Unknown author mode: $AUTHOR_MODE"
+                  exit 1
+                  ;;
+              esac
+
+              # ----------------------------------------------------
+              # Commit message
+              # ----------------------------------------------------
+
+              if [[ "$INCLUDE_MESSAGE" == "true" ]]; then
+
+                if [[ "$AUTHOR_MODE" != "none" ]]; then
+                  echo
+                fi
+
+                printf '%s\n' "$SUBJECT"
+
+                if [[ -n "$MESSAGE" ]]; then
+                  echo
+                  printf '%s\n' "$MESSAGE"
+                fi
+              fi
+
+              # ----------------------------------------------------
+              # Separator
+              # ----------------------------------------------------
+
+              echo
+              echo "---"
+
+              # ----------------------------------------------------
+              # Actual code changes.
+              #
+              # IMPORTANT:
+              #
+              # We compare:
+              #
+              #     commit^ -> commit
+              #
+              # This produces ONLY the changes introduced by this
+              # particular commit.
+              #
+              # No cherry-pick is performed.
+              # ----------------------------------------------------
+
+              git diff \
+                --no-ext-diff \
+                --no-color \
+                --patch \
+                --binary=false \
+                "-U${CONTEXT}" \
+                "${SHA}^" \
+                "$SHA"
+
+            } > "$PATCH_FILE"
+
+            # ======================================================
+            # Verify patch
+            # ======================================================
 
             if [[ ! -s "$PATCH_FILE" ]]; then
-              echo "::error::Patch was not generated: $PATCH_FILE"
+              echo "::error::Generated patch is empty."
+              echo "::error::Commit: $SHA"
+              rm -f "$PATCH_FILE"
               exit 1
             fi
 
+            echo
             echo "Created:"
             ls -lh "$PATCH_FILE"
 
@@ -403,16 +550,23 @@ jobs:
             | sort
 
           echo
-          echo "Patch count:"
+          echo "Total patches:"
+
           find "$PATCH_DIR" \
             -maxdepth 1 \
-            -name '*.patch' \
             -type f \
-            | wc -l
+            -name '*.patch' |
+            wc -l
+
+          echo
+          echo "Total size:"
+
+          du -sh "$PATCH_DIR"
 
       # ============================================================
-      # Upload patches
+      # Upload artifact
       # ============================================================
+
       - name: Upload patches
         uses: actions/upload-artifact@v7
         with:

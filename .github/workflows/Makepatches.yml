@@ -885,7 +885,7 @@ jobs:
                   '^index [0-9a-f]\{40\}\.\.[0-9a-f]\{40\}' \
                   "$PATCH_FILE" ||
                   true
-              )
+              )"
 
 
               echo
@@ -898,7 +898,7 @@ jobs:
                   "$PARENT" \
                   "$SHA" |
                   awk '$1 == "-" && $2 == "-" {count++} END {print count+0}'
-              )
+              )"
 
 
               if [[ "$BINARY_COUNT" -gt 0 ]]; then

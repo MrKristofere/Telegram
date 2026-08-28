@@ -1,16 +1,16 @@
-name: Build patches
+name: Make patches
 
 on:
   workflow_dispatch:
     inputs:
       base:
-        description: "Base branch or commit"
+        description: "Base branch or commit. Used as range start in reverse mode."
         required: true
         default: "main"
         type: string
 
       commits:
-        description: "Commits to include/exclude, separated by spaces"
+        description: "Commit SHA list, separated by spaces"
         required: true
         type: string
 
@@ -28,20 +28,19 @@ jobs:
       contents: read
 
     steps:
+      # ============================================================
+      # Initial shallow checkout
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
           fetch-tags: false
 
-      # ------------------------------------------------------------
-      # Fetch selected commits.
-      #
-      # We don't cherry-pick them.
-      # We only need the commit objects and their parents so that
-      # git format-patch can generate independent patches.
-      # ------------------------------------------------------------
-      - name: Fetch selected commits
+      # ============================================================
+      # Prepare Git objects
+      # ============================================================
+      - name: Prepare Git history
         env:
           BASE: ${{ inputs.base }}
           COMMITS: ${{ inputs.commits }}
@@ -49,65 +48,40 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "========================================"
+          echo "Configuration"
+          echo "========================================"
           echo "BASE:    $BASE"
           echo "REVERSE: $REVERSE"
           echo "COMMITS: $COMMITS"
+          echo
 
-          # ----------------------------------------------------------
-          # Resolve BASE.
-          # ----------------------------------------------------------
-
-          if git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
-            BASE_SHA="$(git rev-parse "${BASE}^{commit}")"
-
-          elif git ls-remote --exit-code \
-              --heads origin "$BASE" >/dev/null 2>&1; then
-
-            echo "Fetching branch: $BASE"
-
-            git fetch \
-              --no-tags \
-              --depth=1 \
-              origin \
-              "refs/heads/${BASE}:refs/remotes/origin/${BASE}"
-
-            BASE_SHA="$(git rev-parse "refs/remotes/origin/${BASE}")"
-
-          else
-            echo "Fetching base commit: $BASE"
-
-            git fetch \
-              --no-tags \
-              --depth=2 \
-              origin \
-              "$BASE"
-
-            BASE_SHA="$(git rev-parse "${BASE}^{commit}")"
-          fi
-
-          echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
-
-          echo "Base SHA: $BASE_SHA"
-
-          # ----------------------------------------------------------
-          # Normal mode:
+          # --------------------------------------------------------
+          # NORMAL MODE
           #
-          # Fetch only the selected commits.
-          # ----------------------------------------------------------
+          # We don't need BASE at all.
+          # Fetch only the requested commits.
+          # --------------------------------------------------------
 
           if [[ "$REVERSE" != "true" ]]; then
 
-            echo
             echo "Mode: INCLUDE"
+            echo "Fetching selected commits..."
 
             for commit in $COMMITS; do
-              echo "Fetching $commit"
+
+              echo
+              echo "Fetching: $commit"
 
               if git cat-file -e "${commit}^{commit}" 2>/dev/null; then
                 echo "Already available."
                 continue
               fi
 
+              # Fetch the commit and its parent.
+              #
+              # The parent is required because format-patch creates
+              # the patch from parent -> commit.
               git fetch \
                 --no-tags \
                 --depth=2 \
@@ -115,23 +89,69 @@ jobs:
                 "$commit"
 
               git rev-parse --verify "${commit}^{commit}" >/dev/null
+
+              echo "Available:"
+              git rev-parse "${commit}^{commit}"
             done
 
-          # ----------------------------------------------------------
-          # Reverse mode:
+          # --------------------------------------------------------
+          # REVERSE MODE
           #
-          # Get all commits from BASE..HEAD and exclude selected ones.
-          # ----------------------------------------------------------
+          # We need all commits in:
+          #
+          #     BASE..HEAD
+          #
+          # and then remove the explicitly specified commits.
+          # --------------------------------------------------------
 
           else
 
-            echo
             echo "Mode: EXCLUDE"
+            echo
+            echo "Preparing history from BASE to HEAD..."
+
+            # Resolve BASE.
+            if git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
+
+              BASE_SHA="$(git rev-parse "${BASE}^{commit}")"
+
+            elif git ls-remote --exit-code \
+                --heads origin "$BASE" >/dev/null 2>&1; then
+
+              echo "Fetching base branch: $BASE"
+
+              git fetch \
+                --no-tags \
+                --depth=1 \
+                origin \
+                "refs/heads/${BASE}:refs/remotes/origin/${BASE}"
+
+              BASE_SHA="$(git rev-parse "refs/remotes/origin/${BASE}")"
+
+            else
+
+              echo "Fetching base commit: $BASE"
+
+              git fetch \
+                --no-tags \
+                --depth=2 \
+                origin \
+                "$BASE"
+
+              BASE_SHA="$(git rev-parse "${BASE}^{commit}")"
+
+            fi
+
+            echo "BASE SHA: $BASE_SHA"
 
             HEAD_SHA="$(git rev-parse HEAD)"
 
-            echo "HEAD: $HEAD_SHA"
-            echo "BASE: $BASE_SHA"
+            echo "HEAD SHA: $HEAD_SHA"
+
+            # ------------------------------------------------------
+            # Gradually deepen the current branch until BASE becomes
+            # reachable.
+            # ------------------------------------------------------
 
             DEPTH=100
             MAX_DEPTH=100000
@@ -139,7 +159,9 @@ jobs:
             while ! git merge-base \
                 --is-ancestor "$BASE_SHA" "$HEAD_SHA" 2>/dev/null; do
 
-              echo "Deepening history by $DEPTH..."
+              echo
+              echo "BASE is not reachable."
+              echo "Deepening history by $DEPTH commits..."
 
               git fetch \
                 --no-tags \
@@ -149,20 +171,28 @@ jobs:
               DEPTH=$((DEPTH * 2))
 
               if [[ "$DEPTH" -gt "$MAX_DEPTH" ]]; then
-                echo "::error::Unable to reach BASE from HEAD."
+                echo "::error::Unable to find BASE in current history."
+                echo "::error::BASE: $BASE_SHA"
+                echo "::error::HEAD: $HEAD_SHA"
                 exit 1
               fi
             done
 
-            # Fetch selected commits in case they aren't in the
-            # current branch history.
+            echo
+            echo "BASE is reachable."
+
+            # ------------------------------------------------------
+            # Fetch excluded commits that aren't already present.
+            # ------------------------------------------------------
+
             for commit in $COMMITS; do
 
               if git cat-file -e "${commit}^{commit}" 2>/dev/null; then
                 continue
               fi
 
-              echo "Fetching excluded commit $commit"
+              echo
+              echo "Fetching excluded commit: $commit"
 
               git fetch \
                 --no-tags \
@@ -172,12 +202,14 @@ jobs:
 
               git rev-parse --verify "${commit}^{commit}" >/dev/null
             done
+
+            echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
           fi
 
-      # ------------------------------------------------------------
-      # Generate independent patches.
-      # ------------------------------------------------------------
-      - name: Generate patches
+      # ============================================================
+      # Generate independent patches
+      # ============================================================
+      - name: Generate independent patches
         env:
           BASE: ${{ inputs.base }}
           COMMITS: ${{ inputs.commits }}
@@ -190,9 +222,9 @@ jobs:
           rm -rf "$PATCH_DIR"
           mkdir -p "$PATCH_DIR"
 
-          # ----------------------------------------------------------
-          # Build list of commits.
-          # ----------------------------------------------------------
+          # ========================================================
+          # Determine commit list
+          # ========================================================
 
           if [[ "$REVERSE" == "true" ]]; then
 
@@ -200,30 +232,58 @@ jobs:
 
             HEAD_SHA="$(git rev-parse HEAD)"
 
+            # Get commits in chronological order.
             mapfile -t ALL_COMMITS < <(
-              git rev-list --reverse "${BASE_SHA}..${HEAD_SHA}"
+              git rev-list \
+                --reverse \
+                "${BASE_SHA}..${HEAD_SHA}"
             )
+
+            echo
+            echo "Total commits in range: ${#ALL_COMMITS[@]}"
+
+            # ------------------------------------------------------
+            # Build exclusion map.
+            # ------------------------------------------------------
 
             declare -A EXCLUDED=()
 
             for commit in $COMMITS; do
+
               SHA="$(git rev-parse "${commit}^{commit}")"
+
               EXCLUDED["$SHA"]=1
+
+              echo "Exclude: $SHA"
             done
+
+            # ------------------------------------------------------
+            # Filter commits.
+            # ------------------------------------------------------
 
             SELECTED_COMMITS=()
 
             for commit in "${ALL_COMMITS[@]}"; do
-              if [[ -z "${EXCLUDED[$commit]+x}" ]]; then
+
+              if [[ -n "${EXCLUDED[$commit]+x}" ]]; then
+                echo "EXCLUDED: $commit"
+              else
                 SELECTED_COMMITS+=("$commit")
               fi
+
             done
 
           else
 
+            echo "Using explicitly selected commits."
+
             read -ra SELECTED_COMMITS <<< "$COMMITS"
 
           fi
+
+          # ========================================================
+          # Validate
+          # ========================================================
 
           if [[ ${#SELECTED_COMMITS[@]} -eq 0 ]]; then
             echo "::error::No commits selected."
@@ -231,58 +291,33 @@ jobs:
           fi
 
           echo
-          echo "Commits:"
+          echo "========================================"
+          echo "Commits to convert into patches"
+          echo "========================================"
+
           printf '  %s\n' "${SELECTED_COMMITS[@]}"
 
-          # ----------------------------------------------------------
-          # Generate one independent patch per commit.
-          # ----------------------------------------------------------
+          # ========================================================
+          # Metadata
+          # ========================================================
+
+          {
+            echo "base=$BASE"
+            echo "reverse=$REVERSE"
+            echo
+            echo "commits:"
+            printf '%s\n' "${SELECTED_COMMITS[@]}"
+          } > "$PATCH_DIR/metadata.txt"
+
+          # ========================================================
+          # Generate patches
+          # ========================================================
 
           NUMBER=1
 
           for commit in "${SELECTED_COMMITS[@]}"; do
 
-            echo
-            echo "========================================"
-            echo "Generating patch for:"
-            echo "$commit"
-            echo "========================================"
-
-            # Resolve full SHA.
             SHA="$(git rev-parse "${commit}^{commit}")"
-
-            # Show commit information.
-            git show \
-              --no-patch \
-              --format=fuller \
-              "$SHA"
-
-            # Generate one standalone Git patch.
-            #
-            # --binary:
-            #   preserve binary file changes.
-            #
-            # --full-index:
-            #   include complete blob IDs.
-            #
-            # -1:
-            #   generate exactly this commit.
-            #
-            # --numbered-files:
-            #   predictable filenames.
-            git format-patch \
-              -1 \
-              --binary \
-              --full-index \
-              --numbered-files \
-              --output-directory "$PATCH_DIR" \
-              "$SHA"
-
-            # Rename generated file to a deterministic name based
-            # on commit subject.
-            GENERATED="$(find "$PATCH_DIR" -maxdepth 1 -type f -name '*.patch' \
-              | sort \
-              | tail -n 1)"
 
             SUBJECT="$(
               git log \
@@ -291,45 +326,93 @@ jobs:
                 "$SHA"
             )"
 
-            # Make filename safe.
+            # ------------------------------------------------------
+            # Generate a filesystem-safe filename.
+            # ------------------------------------------------------
+
             SAFE_SUBJECT="$(
-              echo "$SUBJECT" \
-                | tr '[:upper:]' '[:lower:]' \
-                | sed 's/[^a-z0-9._-]/-/g' \
-                | sed 's/-\+/-/g' \
-                | sed 's/^-//; s/-$//'
+              printf '%s' "$SUBJECT" |
+                tr '[:upper:]' '[:lower:]' |
+                sed \
+                  -e 's/[^a-z0-9._-]/-/g' \
+                  -e 's/-\{2,\}/-/g' \
+                  -e 's/^-//' \
+                  -e 's/-$//'
             )"
 
-            TARGET="$PATCH_DIR/$(printf '%04d' "$NUMBER")-${SAFE_SUBJECT}.patch"
+            # Keep filenames reasonably short.
+            SAFE_SUBJECT="${SAFE_SUBJECT:0:80}"
 
-            mv "$GENERATED" "$TARGET"
+            PATCH_FILE="$PATCH_DIR/$(printf '%04d' "$NUMBER")-${SAFE_SUBJECT}.patch"
+
+            echo
+            echo "========================================"
+            echo "Patch #$NUMBER"
+            echo "========================================"
+            echo "Commit:  $SHA"
+            echo "Subject: $SUBJECT"
+            echo "Output:  $PATCH_FILE"
+
+            # ------------------------------------------------------
+            # Generate exactly ONE patch for exactly ONE commit.
+            #
+            # format-patch compares the commit with its parent.
+            #
+            # No cherry-pick is performed.
+            # No merge is performed.
+            # BASE is not used here.
+            # ------------------------------------------------------
+
+            git format-patch \
+              -1 \
+              --binary \
+              --full-index \
+              --no-stat \
+              --no-numbered \
+              --output="$PATCH_FILE" \
+              "$SHA"
+
+            # ------------------------------------------------------
+            # Verify output.
+            # ------------------------------------------------------
+
+            if [[ ! -s "$PATCH_FILE" ]]; then
+              echo "::error::Patch was not generated: $PATCH_FILE"
+              exit 1
+            fi
+
+            echo "Created:"
+            ls -lh "$PATCH_FILE"
 
             NUMBER=$((NUMBER + 1))
           done
 
-          # ----------------------------------------------------------
-          # Save metadata.
-          # ----------------------------------------------------------
-
-          {
-            echo "base=$BASE"
-            echo "base_sha=$BASE_SHA"
-            echo "reverse=$REVERSE"
-            echo
-            echo "commits:"
-            printf '%s\n' "${SELECTED_COMMITS[@]}"
-          } > "$PATCH_DIR/metadata.txt"
+          # ========================================================
+          # Summary
+          # ========================================================
 
           echo
           echo "========================================"
           echo "Generated patches"
           echo "========================================"
 
-          ls -lh "$PATCH_DIR"
+          find "$PATCH_DIR" \
+            -maxdepth 1 \
+            -type f \
+            -print \
+            | sort
 
-      # ------------------------------------------------------------
-      # Upload patches as artifact.
-      # ------------------------------------------------------------
+          echo
+          echo "Patch count:"
+          find "$PATCH_DIR" \
+            -maxdepth 1 \
+            -name '*.patch' \
+            -type f \
+            | wc -l
+
+      # ============================================================
+      # Upload patches
+      # ============================================================
       - name: Upload patches
         uses: actions/upload-artifact@v7
         with:

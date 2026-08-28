@@ -87,7 +87,6 @@ jobs:
       # ============================================================
       # CHECKOUT
       # ============================================================
-
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
@@ -98,7 +97,6 @@ jobs:
       # ============================================================
       # SHOW CONFIGURATION
       # ============================================================
-
       - name: Show configuration
         env:
           BASE: ${{ inputs.base }}
@@ -111,7 +109,6 @@ jobs:
           FUNCTION_CONTEXT: ${{ inputs.function_context }}
           DIFF_ALGORITHM: ${{ inputs.diff_algorithm }}
           DETECT_RENAMES: ${{ inputs.detect_renames }}
-
         run: |
           set -euo pipefail
 
@@ -150,7 +147,6 @@ jobs:
 
           MAX_DEPTH=100000
 
-
           # ========================================================
           # ENSURE COMMIT + PARENT
           # ========================================================
@@ -164,7 +160,6 @@ jobs:
             echo "Preparing commit"
             echo "========================================"
             echo "$SHA"
-
 
             # ------------------------------------------------------
             # Validate SHA
@@ -476,7 +471,6 @@ jobs:
             exit 1
           fi
 
-
           if [[ "$AUTHOR_MODE" == "custom" && -z "$CUSTOM_AUTHOR" ]]; then
             echo "::error::CUSTOM_AUTHOR is required when AUTHOR_MODE=custom."
             exit 1
@@ -591,7 +585,6 @@ jobs:
             echo "base=$BASE"
             echo
             echo "commits:"
-
             printf '%s\n' "${SELECTED_COMMITS[@]}"
 
           } > "$PATCH_DIR/metadata.txt"
@@ -639,6 +632,7 @@ jobs:
             if [[ "$PARENT_COUNT" -ne 1 ]]; then
 
               echo "::error::Commit $SHA is not a normal single-parent commit."
+
               exit 1
 
             fi
@@ -787,6 +781,18 @@ jobs:
 
 
               # ====================================================
+              # DIFF STAT
+              # ====================================================
+
+              git diff \
+                --stat \
+                "$PARENT" \
+                "$SHA"
+
+              echo
+
+
+              # ====================================================
               # DIFF OPTIONS
               # ====================================================
 
@@ -857,6 +863,7 @@ jobs:
                 "$PARENT" \
                 "$SHA"
 
+
             } > "$PATCH_FILE"
 
 
@@ -878,7 +885,7 @@ jobs:
                   '^index [0-9a-f]\{40\}\.\.[0-9a-f]\{40\}' \
                   "$PATCH_FILE" ||
                   true
-              )"
+              )
 
 
               echo
@@ -891,7 +898,7 @@ jobs:
                   "$PARENT" \
                   "$SHA" |
                   awk '$1 == "-" && $2 == "-" {count++} END {print count+0}'
-              )"
+              )
 
 
               if [[ "$BINARY_COUNT" -gt 0 ]]; then
@@ -904,6 +911,7 @@ jobs:
 
               echo
               echo "Created:"
+
               ls -lh "$PATCH_FILE"
 
             fi
@@ -942,8 +950,10 @@ jobs:
           echo
           echo "Patch count: $PATCH_COUNT"
 
+
           echo
           echo "Total size:"
+
           du -sh "$PATCH_DIR"
 
 

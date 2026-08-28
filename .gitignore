@@ -3,6 +3,7 @@
 build/
 obj/
 *.iml
+patches
 local.properties
 TMessagesProj/.cxx/
 TMessagesProj/jniLibs/

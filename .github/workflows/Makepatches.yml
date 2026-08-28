@@ -1,11 +1,11 @@
-name: Make Code Patches
+name: Build Independent Patches
 
 on:
   workflow_dispatch:
     inputs:
 
       base:
-        description: "Base branch or commit (used in Reverse mode)"
+        description: "Base branch or commit (used only in reverse/exclude mode)"
         required: true
         default: "main"
         type: string
@@ -38,7 +38,7 @@ on:
         type: string
 
       include_message:
-        description: "Include commit message"
+        description: "Include commit message in patch"
         required: true
         default: true
         type: boolean
@@ -50,10 +50,33 @@ on:
         type: string
 
       function_context:
-        description: "Use whole function as context instead of fixed line count"
+        description: "Use whole function as context"
         required: true
         default: false
         type: boolean
+
+      diff_algorithm:
+        description: "Diff algorithm"
+        required: true
+        default: "histogram"
+        type: choice
+        options:
+          - histogram
+          - myers
+          - patience
+          - minimal
+
+      detect_renames:
+        description: "Detect file renames"
+        required: true
+        default: true
+        type: boolean
+
+      rename_threshold:
+        description: "Rename similarity threshold (0-100)"
+        required: true
+        default: "50"
+        type: string
 
 
 jobs:
@@ -79,7 +102,7 @@ jobs:
 
 
       # ============================================================
-      # SHOW CONFIGURATION
+      # CONFIGURATION
       # ============================================================
 
       - name: Show configuration
@@ -92,19 +115,26 @@ jobs:
           INCLUDE_MESSAGE: ${{ inputs.include_message }}
           CONTEXT: ${{ inputs.context }}
           FUNCTION_CONTEXT: ${{ inputs.function_context }}
+          DIFF_ALGORITHM: ${{ inputs.diff_algorithm }}
+          DETECT_RENAMES: ${{ inputs.detect_renames }}
+          RENAME_THRESHOLD: ${{ inputs.rename_threshold }}
+
         run: |
           set -euo pipefail
 
           echo "========================================"
-          echo "Configuration"
+          echo "Patch generator configuration"
           echo "========================================"
-          echo "BASE:             $BASE"
-          echo "REVERSE:          $REVERSE"
-          echo "AUTHOR_MODE:      $AUTHOR_MODE"
-          echo "CUSTOM_AUTHOR:    $CUSTOM_AUTHOR"
-          echo "INCLUDE_MESSAGE:  $INCLUDE_MESSAGE"
-          echo "CONTEXT:          $CONTEXT"
-          echo "FUNCTION_CONTEXT: $FUNCTION_CONTEXT"
+          echo "BASE:              $BASE"
+          echo "REVERSE:           $REVERSE"
+          echo "AUTHOR_MODE:       $AUTHOR_MODE"
+          echo "CUSTOM_AUTHOR:     $CUSTOM_AUTHOR"
+          echo "INCLUDE_MESSAGE:   $INCLUDE_MESSAGE"
+          echo "CONTEXT:           $CONTEXT"
+          echo "FUNCTION_CONTEXT:  $FUNCTION_CONTEXT"
+          echo "DIFF_ALGORITHM:    $DIFF_ALGORITHM"
+          echo "DETECT_RENAMES:    $DETECT_RENAMES"
+          echo "RENAME_THRESHOLD:  $RENAME_THRESHOLD"
           echo
           echo "COMMITS:"
           for commit in $COMMITS; do
@@ -121,22 +151,12 @@ jobs:
           BASE: ${{ inputs.base }}
           COMMITS: ${{ inputs.commits }}
           REVERSE: ${{ inputs.reverse }}
+
         run: |
           set -euo pipefail
 
           # --------------------------------------------------------
-          # Helper:
-          #
-          # Make sure a commit AND its first parent are available.
-          #
-          # We need:
-          #
-          #     COMMIT^
-          #        |
-          #        v
-          #     COMMIT
-          #
-          # because the patch is generated from that diff.
+          # Validate commit SHA and make commit + parent available.
           # --------------------------------------------------------
 
           ensure_commit_with_parent() {
@@ -144,13 +164,13 @@ jobs:
             local SHA="$1"
 
             echo
-            echo "----------------------------------------"
-            echo "Preparing commit:"
+            echo "========================================"
+            echo "Preparing commit"
+            echo "========================================"
             echo "$SHA"
-            echo "----------------------------------------"
 
             # ------------------------------------------------------
-            # Validate SHA format.
+            # Validate SHA.
             # ------------------------------------------------------
 
             if ! [[ "$SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
@@ -159,7 +179,7 @@ jobs:
             fi
 
             # ------------------------------------------------------
-            # Fetch commit if it doesn't exist.
+            # Fetch commit if necessary.
             # ------------------------------------------------------
 
             if ! git cat-file -e "${SHA}^{commit}" 2>/dev/null; then
@@ -174,39 +194,50 @@ jobs:
                 "$SHA"
             fi
 
-            # ------------------------------------------------------
-            # Verify commit.
-            # ------------------------------------------------------
-
             if ! git cat-file -e "${SHA}^{commit}" 2>/dev/null; then
               echo "::error::Unable to fetch commit: $SHA"
               exit 1
             fi
 
             # ------------------------------------------------------
-            # Merge commits are not supported as independent
-            # patches by this workflow.
-            #
-            # COMMIT^ means first parent.
+            # Merge commits are intentionally unsupported.
+            # An independent patch needs one unambiguous parent.
             # ------------------------------------------------------
 
-            PARENT=""
+            local PARENT_COUNT
+
+            PARENT_COUNT="$(
+              git rev-list \
+                --parents \
+                -n 1 \
+                "$SHA" |
+                awk '{print NF-1}'
+            )"
+
+            if [[ "$PARENT_COUNT" -ne 1 ]]; then
+              echo "::error::Commit $SHA is not a normal single-parent commit."
+              echo "::error::Parent count: $PARENT_COUNT"
+              exit 1
+            fi
+
+            # ------------------------------------------------------
+            # Make parent available.
+            # ------------------------------------------------------
 
             if git rev-parse --verify "${SHA}^" >/dev/null 2>&1; then
 
-              PARENT="$(git rev-parse "${SHA}^")"
+              echo "Parent is already available."
 
             else
 
               echo "Parent is not available."
-              echo "Deepening history..."
+              echo "Deepening repository..."
 
               DEPTH=2
               MAX_DEPTH=100000
 
               while ! git rev-parse --verify "${SHA}^" >/dev/null 2>&1; do
 
-                echo
                 echo "Deepening by $DEPTH commits..."
 
                 git fetch \
@@ -220,19 +251,15 @@ jobs:
                   echo "::error::Unable to find parent of $SHA"
                   exit 1
                 fi
+
               done
 
-              PARENT="$(git rev-parse "${SHA}^")"
             fi
 
-            # ------------------------------------------------------
-            # Final verification.
-            # ------------------------------------------------------
+            local PARENT
 
-            git cat-file -e "${SHA}^{commit}"
-            git cat-file -e "${PARENT}^{commit}"
+            PARENT="$(git rev-parse "${SHA}^")"
 
-            echo
             echo "Commit: $SHA"
             echo "Parent: $PARENT"
           }
@@ -246,7 +273,7 @@ jobs:
 
             echo
             echo "========================================"
-            echo "Mode: INCLUDE"
+            echo "Mode: INCLUDE SELECTED COMMITS"
             echo "========================================"
 
             for commit in $COMMITS; do
@@ -264,7 +291,7 @@ jobs:
 
             echo
             echo "========================================"
-            echo "Mode: EXCLUDE"
+            echo "Mode: EXCLUDE SELECTED COMMITS"
             echo "========================================"
 
             # ------------------------------------------------------
@@ -273,68 +300,48 @@ jobs:
 
             BASE_SHA=""
 
-            # First try local revision.
-
-            if git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
+            if git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null 2>&1; then
 
               BASE_SHA="$(git rev-parse "${BASE}^{commit}")"
 
+            elif git ls-remote \
+                --exit-code \
+                --heads \
+                origin \
+                "$BASE" >/dev/null 2>&1; then
+
+              echo "Fetching base branch: $BASE"
+
+              git fetch \
+                --no-tags \
+                --depth=1 \
+                origin \
+                "refs/heads/${BASE}:refs/remotes/origin/${BASE}"
+
+              BASE_SHA="$(git rev-parse "refs/remotes/origin/${BASE}")"
+
             else
 
-              # ----------------------------------------------------
-              # Try remote branch.
-              # ----------------------------------------------------
+              echo "Fetching base commit: $BASE"
 
-              if git ls-remote \
-                  --exit-code \
-                  --heads \
-                  origin \
-                  "$BASE" >/dev/null 2>&1; then
+              git fetch \
+                --no-tags \
+                --depth=1 \
+                origin \
+                "$BASE"
 
-                echo "Fetching base branch: $BASE"
+              BASE_SHA="$(git rev-parse "${BASE}^{commit}")"
 
-                git fetch \
-                  --no-tags \
-                  --depth=1 \
-                  origin \
-                  "refs/heads/${BASE}:refs/remotes/origin/${BASE}"
-
-                BASE_SHA="$(git rev-parse "refs/remotes/origin/${BASE}")"
-
-              else
-
-                # --------------------------------------------------
-                # Try commit SHA.
-                # --------------------------------------------------
-
-                echo "Fetching base commit: $BASE"
-
-                git fetch \
-                  --no-tags \
-                  --depth=1 \
-                  origin \
-                  "$BASE"
-
-                BASE_SHA="$(git rev-parse "${BASE}^{commit}")"
-              fi
             fi
-
-            echo
-            echo "BASE SHA: $BASE_SHA"
-
-            # ------------------------------------------------------
-            # Current HEAD.
-            # ------------------------------------------------------
 
             HEAD_SHA="$(git rev-parse HEAD)"
 
-            echo "HEAD SHA: $HEAD_SHA"
+            echo
+            echo "BASE: $BASE_SHA"
+            echo "HEAD: $HEAD_SHA"
 
             # ------------------------------------------------------
             # Make BASE reachable from HEAD.
-            #
-            # This is the only place where the entire branch history
-            # may need to be progressively deepened.
             # ------------------------------------------------------
 
             DEPTH=100
@@ -344,11 +351,11 @@ jobs:
                 --is-ancestor \
                 "$BASE_SHA" \
                 "$HEAD_SHA" \
-                2>/dev/null; do
+                >/dev/null 2>&1; do
 
               echo
               echo "BASE is not reachable from HEAD."
-              echo "Deepening history by $DEPTH commits..."
+              echo "Deepening by $DEPTH commits..."
 
               git fetch \
                 --no-tags \
@@ -358,19 +365,16 @@ jobs:
               DEPTH=$((DEPTH * 2))
 
               if [[ "$DEPTH" -gt "$MAX_DEPTH" ]]; then
-                echo "::error::Unable to reach BASE from HEAD."
-                echo "::error::BASE: $BASE_SHA"
-                echo "::error::HEAD: $HEAD_SHA"
+                echo "::error::Unable to make BASE reachable from HEAD."
                 exit 1
               fi
+
             done
 
-            echo
             echo "BASE is reachable."
 
             # ------------------------------------------------------
-            # The selected commits are exclusions.
-            # They themselves also need to be available.
+            # Selected commits themselves must also be available.
             # ------------------------------------------------------
 
             for commit in $COMMITS; do
@@ -397,6 +401,10 @@ jobs:
           INCLUDE_MESSAGE: ${{ inputs.include_message }}
           CONTEXT: ${{ inputs.context }}
           FUNCTION_CONTEXT: ${{ inputs.function_context }}
+          DIFF_ALGORITHM: ${{ inputs.diff_algorithm }}
+          DETECT_RENAMES: ${{ inputs.detect_renames }}
+          RENAME_THRESHOLD: ${{ inputs.rename_threshold }}
+
         run: |
           set -euo pipefail
 
@@ -407,7 +415,7 @@ jobs:
 
 
           # ========================================================
-          # VALIDATE OPTIONS
+          # VALIDATION
           # ========================================================
 
           if ! [[ "$CONTEXT" =~ ^[0-9]+$ ]]; then
@@ -415,14 +423,24 @@ jobs:
             exit 1
           fi
 
+          if ! [[ "$RENAME_THRESHOLD" =~ ^[0-9]+$ ]]; then
+            echo "::error::RENAME_THRESHOLD must be an integer."
+            exit 1
+          fi
+
+          if (( RENAME_THRESHOLD < 0 || RENAME_THRESHOLD > 100 )); then
+            echo "::error::RENAME_THRESHOLD must be between 0 and 100."
+            exit 1
+          fi
+
           if [[ "$AUTHOR_MODE" == "custom" && -z "$CUSTOM_AUTHOR" ]]; then
-            echo "::error::Custom author mode selected but CUSTOM_AUTHOR is empty."
+            echo "::error::AUTHOR_MODE=custom requires CUSTOM_AUTHOR."
             exit 1
           fi
 
 
           # ========================================================
-          # BUILD COMMIT LIST
+          # BUILD SELECTED COMMIT LIST
           # ========================================================
 
           SELECTED_COMMITS=()
@@ -440,13 +458,13 @@ jobs:
 
 
           # --------------------------------------------------------
-          # REVERSE / EXCLUDE MODE
+          # EXCLUDE MODE
           # --------------------------------------------------------
 
           if [[ "$REVERSE" == "true" ]]; then
 
             echo
-            echo "Building BASE..HEAD commit list..."
+            echo "Building commit list from BASE..HEAD..."
 
             mapfile -t ALL_COMMITS < <(
               git rev-list \
@@ -454,13 +472,10 @@ jobs:
                 "${BASE_SHA}..${HEAD_SHA}"
             )
 
-            echo "Total commits in range: ${#ALL_COMMITS[@]}"
-
-            # ------------------------------------------------------
-            # Build exclusion map.
-            # ------------------------------------------------------
-
             declare -A EXCLUDED=()
+
+            echo
+            echo "Selected commits to exclude:"
 
             for commit in $COMMITS; do
 
@@ -468,12 +483,12 @@ jobs:
 
               EXCLUDED["$SHA"]=1
 
-              echo "Excluding: $SHA"
+              echo "  $SHA"
+
             done
 
-            # ------------------------------------------------------
-            # Select everything except excluded commits.
-            # ------------------------------------------------------
+            echo
+            echo "Building resulting list..."
 
             for commit in "${ALL_COMMITS[@]}"; do
 
@@ -486,13 +501,14 @@ jobs:
                 SELECTED_COMMITS+=("$commit")
 
               fi
+
             done
 
           fi
 
 
           # ========================================================
-          # CHECK RESULT
+          # RESULT CHECK
           # ========================================================
 
           if [[ ${#SELECTED_COMMITS[@]} -eq 0 ]]; then
@@ -510,16 +526,21 @@ jobs:
 
 
           # ========================================================
-          # SAVE METADATA
+          # METADATA
           # ========================================================
 
           {
-            echo "base=$BASE"
-            echo "reverse=$REVERSE"
-            echo "author_mode=$AUTHOR_MODE"
-            echo "include_message=$INCLUDE_MESSAGE"
+            echo "format=git-diff"
+            echo "full_index=true"
             echo "context=$CONTEXT"
             echo "function_context=$FUNCTION_CONTEXT"
+            echo "diff_algorithm=$DIFF_ALGORITHM"
+            echo "detect_renames=$DETECT_RENAMES"
+            echo "rename_threshold=$RENAME_THRESHOLD"
+            echo "author_mode=$AUTHOR_MODE"
+            echo "include_message=$INCLUDE_MESSAGE"
+            echo "reverse=$REVERSE"
+            echo "base=$BASE"
             echo
             echo "commits:"
             printf '%s\n' "${SELECTED_COMMITS[@]}"
@@ -527,25 +548,40 @@ jobs:
 
 
           # ========================================================
-          # GENERATE ONE PATCH PER COMMIT
+          # GENERATE PATCHES
           # ========================================================
 
           NUMBER=1
-
 
           for SHA_INPUT in "${SELECTED_COMMITS[@]}"; do
 
             SHA="$(git rev-parse "${SHA_INPUT}^{commit}")"
 
             # ------------------------------------------------------
-            # Parent MUST exist.
+            # Parent.
             # ------------------------------------------------------
 
             if ! PARENT="$(git rev-parse "${SHA}^" 2>/dev/null)"; then
-
-              echo "::error::Parent is unavailable for $SHA"
+              echo "::error::Unable to resolve parent of $SHA"
               exit 1
+            fi
 
+
+            # ------------------------------------------------------
+            # Verify single parent.
+            # ------------------------------------------------------
+
+            PARENT_COUNT="$(
+              git rev-list \
+                --parents \
+                -n 1 \
+                "$SHA" |
+                awk '{print NF-1}'
+            )"
+
+            if [[ "$PARENT_COUNT" -ne 1 ]]; then
+              echo "::error::Commit $SHA is a merge commit."
+              exit 1
             fi
 
 
@@ -585,26 +621,7 @@ jobs:
 
 
             # ------------------------------------------------------
-            # Check for merge commit.
-            # ------------------------------------------------------
-
-            PARENT_COUNT="$(
-              git rev-list \
-                --parents \
-                -n 1 \
-                "$SHA" |
-                awk '{print NF-1}'
-            )"
-
-            if [[ "$PARENT_COUNT" -gt 1 ]]; then
-              echo "::error::Commit $SHA is a merge commit."
-              echo "::error::Independent patch generation is not supported for merge commits."
-              exit 1
-            fi
-
-
-            # ------------------------------------------------------
-            # Filename.
+            # Safe filename.
             # ------------------------------------------------------
 
             SAFE_SUBJECT="$(
@@ -649,27 +666,21 @@ jobs:
               case "$AUTHOR_MODE" in
 
                 original)
-
                   printf 'Author: %s\n' "$ORIGINAL_AUTHOR"
-
                   ;;
 
                 custom)
-
                   printf 'Author: %s\n' "$CUSTOM_AUTHOR"
-
                   ;;
 
                 none)
-
                   ;;
 
                 *)
-
                   echo "::error::Invalid AUTHOR_MODE: $AUTHOR_MODE"
                   exit 1
-
                   ;;
+
               esac
 
 
@@ -678,9 +689,6 @@ jobs:
               # ----------------------------------------------------
 
               if [[ "$INCLUDE_MESSAGE" == "true" ]]; then
-
-                # Add a blank line before the message if anything
-                # precedes it.
 
                 if [[ "$AUTHOR_MODE" != "none" ]]; then
                   echo
@@ -696,54 +704,116 @@ jobs:
               fi
 
 
-              # ----------------------------------------------------
-              # Separator
-              # ----------------------------------------------------
-
               echo
               echo "---"
 
 
               # ====================================================
-              # ACTUAL CODE PATCH
+              # DIFF
               # ====================================================
 
-              if [[ "$FUNCTION_CONTEXT" == "true" ]]; then
+              DIFF_ARGS=(
+                "--no-ext-diff"
+                "--no-color"
+                "--patch"
+                "--full-index"
+                "--indent-heuristic"
+                "--diff-algorithm=${DIFF_ALGORITHM}"
+              )
 
-                git diff \
-                  --no-ext-diff \
-                  --no-color \
-                  --patch \
-                  --function-context \
-                  "$PARENT" \
-                  "$SHA"
+
+              # ----------------------------------------------------
+              # Rename detection.
+              # ----------------------------------------------------
+
+              if [[ "$DETECT_RENAMES" == "true" ]]; then
+
+                DIFF_ARGS+=(
+                  "-M${RENAME_THRESHOLD}%"
+                )
 
               else
 
-                git diff \
-                  --no-ext-diff \
-                  --no-color \
-                  --patch \
-                  "-U${CONTEXT}" \
-                  "$PARENT" \
-                  "$SHA"
+                DIFF_ARGS+=(
+                  "--no-renames"
+                )
 
               fi
+
+
+              # ----------------------------------------------------
+              # Context.
+              # ----------------------------------------------------
+
+              if [[ "$FUNCTION_CONTEXT" == "true" ]]; then
+
+                DIFF_ARGS+=(
+                  "--function-context"
+                )
+
+              else
+
+                DIFF_ARGS+=(
+                  "-U${CONTEXT}"
+                )
+
+              fi
+
+
+              # ----------------------------------------------------
+              # Generate actual patch.
+              # ----------------------------------------------------
+
+              git diff \
+                "${DIFF_ARGS[@]}" \
+                "$PARENT" \
+                "$SHA"
 
             } > "$PATCH_FILE"
 
 
             # ======================================================
-            # VALIDATE OUTPUT
+            # VALIDATION / INFORMATION
             # ======================================================
 
             if [[ ! -s "$PATCH_FILE" ]]; then
 
               echo "::warning::Patch is empty: $SHA"
-
               rm -f "$PATCH_FILE"
 
             else
+
+              # ----------------------------------------------------
+              # Check for binary changes.
+              # ----------------------------------------------------
+
+              BINARY_COUNT="$(
+                git diff \
+                  --numstat \
+                  "$PARENT" \
+                  "$SHA" |
+                  awk '$1 == "-" && $2 == "-" {count++} END {print count+0}'
+              )"
+
+              if [[ "$BINARY_COUNT" -gt 0 ]]; then
+
+                echo "::warning::Commit $SHA contains $BINARY_COUNT binary file change(s)."
+                echo "::warning::Binary data is intentionally NOT embedded in the patch."
+
+              fi
+
+
+              # ----------------------------------------------------
+              # Verify index lines exist.
+              # ----------------------------------------------------
+
+              INDEX_COUNT="$(
+                grep -c '^index [0-9a-f]\{40\}\.\.[0-9a-f]\{40\}' \
+                  "$PATCH_FILE" ||
+                  true
+              )"
+
+              echo "Full-index entries: $INDEX_COUNT"
 
               echo
               echo "Created:"
@@ -769,28 +839,28 @@ jobs:
           find "$PATCH_DIR" \
             -maxdepth 1 \
             -type f \
-            -print \
-            | sort
+            -print |
+            sort
 
+
+          PATCH_COUNT="$(
+            find "$PATCH_DIR" \
+              -maxdepth 1 \
+              -type f \
+              -name '*.patch' |
+              wc -l
+          )"
 
           echo
-          echo "Patch count:"
-
-          find "$PATCH_DIR" \
-            -maxdepth 1 \
-            -type f \
-            -name '*.patch' |
-            wc -l
-
+          echo "Patch count: $PATCH_COUNT"
 
           echo
           echo "Total size:"
-
           du -sh "$PATCH_DIR"
 
 
       # ============================================================
-      # UPLOAD ARTIFACT
+      # UPLOAD
       # ============================================================
 
       - name: Upload patches

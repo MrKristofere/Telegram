@@ -509,7 +509,6 @@ jobs:
                 --no-ext-diff \
                 --no-color \
                 --patch \
-                --binary=false \
                 "-U${CONTEXT}" \
                 "${SHA}^" \
                 "$SHA"

@@ -13,8 +13,6 @@ on:
           - merge-selected
           - merge-branch
           - rebase-branch
-          - apply-patch
-          - apply-diff
 
       target_branch:
         description: "Branch that receives the result"
@@ -53,11 +51,6 @@ on:
           - rerere
           - ours
           - theirs
-
-      patch_file:
-        description: "Repository-relative .patch or .diff file"
-        required: false
-        type: string
 
       commit_message:
         description: "Custom commit message"
@@ -142,7 +135,6 @@ jobs:
           EXCLUDE_COMMITS: ${{ inputs.exclude_commits }}
           MAINLINE_PARENT: ${{ inputs.mainline_parent }}
           CONFLICT_RESOLUTION: ${{ inputs.conflict_resolution }}
-          PATCH_FILE: ${{ inputs.patch_file }}
           COMMIT_MESSAGE: ${{ inputs.commit_message }}
           SKIP_REDUNDANT: ${{ inputs.skip_redundant }}
           DRY_RUN: ${{ inputs.dry_run }}
@@ -252,7 +244,7 @@ jobs:
           # ============================================================
 
           case "$STRATEGY" in
-            cherry-pick|squash|merge-selected|merge-branch|rebase-branch|apply-patch|apply-diff)
+            cherry-pick|squash|merge-selected|merge-branch|rebase-branch)
               ;;
             *)
               error "Unknown strategy: $STRATEGY"
@@ -296,23 +288,6 @@ jobs:
           fi
 
           case "$STRATEGY" in
-            apply-patch|apply-diff)
-              [[ -n "$PATCH_FILE" ]] ||
-                error "$STRATEGY requires patch_file"
-
-              [[ -f "$PATCH_FILE" ]] ||
-                error "Patch/diff file does not exist: $PATCH_FILE"
-
-              [[ -z "$SOURCE_BRANCH" ]] ||
-                error "$STRATEGY does not use source_branch"
-
-              [[ -z "$COMMITS_INPUT" ]] ||
-                error "$STRATEGY does not use commits"
-
-              [[ "$EXCLUDE_COMMITS" == "false" ]] ||
-                error "$STRATEGY does not support exclude_commits"
-              ;;
-
             merge-branch|rebase-branch)
               [[ -n "$SOURCE_BRANCH" ]] ||
                 error "$STRATEGY requires source_branch"
@@ -1010,49 +985,10 @@ jobs:
           FINAL_SHA="$TARGET_SHA"
 
           # ============================================================
-          # PATCH / DIFF
-          # ============================================================
-
-          if [[ "$STRATEGY" == "apply-patch" ||
-                "$STRATEGY" == "apply-diff" ]]; then
-
-            git apply \
-              --check \
-              --3way \
-              "$PATCH_FILE" ||
-              error \
-                "Patch/diff cannot be applied cleanly"
-
-            git apply \
-              --3way \
-              "$PATCH_FILE" ||
-              error \
-                "Patch/diff application failed"
-
-            git add -A
-
-            git diff \
-              --cached \
-              --quiet &&
-              error \
-                "Patch/diff produced no changes"
-
-            if [[ -n "$COMMIT_MESSAGE" ]]; then
-              PATCH_MESSAGE="$COMMIT_MESSAGE"
-            else
-              PATCH_MESSAGE="Apply $(basename "$PATCH_FILE")"
-            fi
-
-            git commit \
-              -m "$PATCH_MESSAGE"
-
-            FINAL_SHA=$(git rev-parse HEAD)
-
-          # ============================================================
           # CHERRY-PICK
           # ============================================================
 
-          elif [[ "$STRATEGY" == "cherry-pick" ]]; then
+          if [[ "$STRATEGY" == "cherry-pick" ]]; then
 
             if [[ "$EXECUTABLE_COUNT" -eq 0 ]]; then
 

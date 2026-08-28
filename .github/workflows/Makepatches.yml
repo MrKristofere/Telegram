@@ -1,16 +1,16 @@
-name: Make patches
+name: Build patches
 
 on:
   workflow_dispatch:
     inputs:
       base:
-        description: "Base branch or commit to apply patches onto"
+        description: "Base branch or commit"
         required: true
         default: "main"
         type: string
 
       commits:
-        description: "Commits to cherry-pick, separated by spaces"
+        description: "Commits to include/exclude, separated by spaces"
         required: true
         type: string
 
@@ -28,9 +28,6 @@ jobs:
       contents: read
 
     steps:
-      # ------------------------------------------------------------
-      # Initial shallow checkout.
-      # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
@@ -38,9 +35,13 @@ jobs:
           fetch-tags: false
 
       # ------------------------------------------------------------
-      # Prepare required Git objects.
+      # Fetch selected commits.
+      #
+      # We don't cherry-pick them.
+      # We only need the commit objects and their parents so that
+      # git format-patch can generate independent patches.
       # ------------------------------------------------------------
-      - name: Fetch required history
+      - name: Fetch selected commits
         env:
           BASE: ${{ inputs.base }}
           COMMITS: ${{ inputs.commits }}
@@ -48,31 +49,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "========================================"
-          echo "Preparing Git repository"
-          echo "========================================"
           echo "BASE:    $BASE"
           echo "REVERSE: $REVERSE"
           echo "COMMITS: $COMMITS"
-          echo
 
           # ----------------------------------------------------------
           # Resolve BASE.
-          #
-          # BASE can be:
-          #   - branch name
-          #   - tag
-          #   - commit SHA
           # ----------------------------------------------------------
 
           if git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
             BASE_SHA="$(git rev-parse "${BASE}^{commit}")"
-            echo "Base already available: $BASE_SHA"
 
           elif git ls-remote --exit-code \
               --heads origin "$BASE" >/dev/null 2>&1; then
 
-            echo "Fetching base branch: $BASE"
+            echo "Fetching branch: $BASE"
 
             git fetch \
               --no-tags \
@@ -82,21 +73,8 @@ jobs:
 
             BASE_SHA="$(git rev-parse "refs/remotes/origin/${BASE}")"
 
-          elif git ls-remote --exit-code \
-              --tags origin "refs/tags/${BASE}" >/dev/null 2>&1; then
-
-            echo "Fetching base tag: $BASE"
-
-            git fetch \
-              --no-tags \
-              --depth=1 \
-              origin \
-              "refs/tags/${BASE}:refs/tags/${BASE}"
-
-            BASE_SHA="$(git rev-parse "refs/tags/${BASE}^{commit}")"
-
           else
-            echo "Trying BASE as commit SHA: $BASE"
+            echo "Fetching base commit: $BASE"
 
             git fetch \
               --no-tags \
@@ -109,33 +87,26 @@ jobs:
 
           echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
 
-          echo
-          echo "Resolved base:"
-          echo "  $BASE -> $BASE_SHA"
+          echo "Base SHA: $BASE_SHA"
 
           # ----------------------------------------------------------
           # Normal mode:
           #
-          # We only need the selected commits.
-          #
-          # Fetch each commit with depth=2 so that its parent is also
-          # available. This is important for cherry-pick.
+          # Fetch only the selected commits.
           # ----------------------------------------------------------
 
           if [[ "$REVERSE" != "true" ]]; then
 
             echo
-            echo "Normal mode."
-            echo "Fetching selected commits only..."
+            echo "Mode: INCLUDE"
 
             for commit in $COMMITS; do
+              echo "Fetching $commit"
 
               if git cat-file -e "${commit}^{commit}" 2>/dev/null; then
-                echo "Already available: $commit"
+                echo "Already available."
                 continue
               fi
-
-              echo "Fetching: $commit"
 
               git fetch \
                 --no-tags \
@@ -143,46 +114,32 @@ jobs:
                 origin \
                 "$commit"
 
-              # Verify the commit is now available.
               git rev-parse --verify "${commit}^{commit}" >/dev/null
-
-              echo "  OK: $(git rev-parse "${commit}^{commit}")"
             done
 
           # ----------------------------------------------------------
           # Reverse mode:
           #
-          # We need all commits between BASE and the current HEAD,
-          # then exclude the commits supplied by the user.
-          #
-          # Instead of fetching the whole repository, deepen the
-          # current branch incrementally.
+          # Get all commits from BASE..HEAD and exclude selected ones.
           # ----------------------------------------------------------
 
           else
 
             echo
-            echo "Reverse mode."
-            echo "Fetching history required to calculate BASE..HEAD..."
+            echo "Mode: EXCLUDE"
 
             HEAD_SHA="$(git rev-parse HEAD)"
 
-            echo "Current HEAD: $HEAD_SHA"
-            echo "Base:         $BASE_SHA"
+            echo "HEAD: $HEAD_SHA"
+            echo "BASE: $BASE_SHA"
 
-            # If BASE is already an ancestor, no additional history
-            # may be necessary.
-            #
-            # Otherwise progressively deepen the current HEAD.
             DEPTH=100
             MAX_DEPTH=100000
 
             while ! git merge-base \
                 --is-ancestor "$BASE_SHA" "$HEAD_SHA" 2>/dev/null; do
 
-              echo
-              echo "Base is not reachable yet."
-              echo "Deepening current history by $DEPTH commits..."
+              echo "Deepening history by $DEPTH..."
 
               git fetch \
                 --no-tags \
@@ -192,32 +149,20 @@ jobs:
               DEPTH=$((DEPTH * 2))
 
               if [[ "$DEPTH" -gt "$MAX_DEPTH" ]]; then
-                echo
-                echo "::error::BASE is not reachable from current HEAD."
-                echo "::error::BASE: $BASE_SHA"
-                echo "::error::HEAD: $HEAD_SHA"
+                echo "::error::Unable to reach BASE from HEAD."
                 exit 1
               fi
             done
 
-            echo
-            echo "Base is reachable from HEAD."
-
-            # --------------------------------------------------------
-            # Selected commits must also be available.
-            # --------------------------------------------------------
-
-            echo
-            echo "Fetching excluded commits..."
-
+            # Fetch selected commits in case they aren't in the
+            # current branch history.
             for commit in $COMMITS; do
 
               if git cat-file -e "${commit}^{commit}" 2>/dev/null; then
-                echo "Already available: $commit"
                 continue
               fi
 
-              echo "Fetching: $commit"
+              echo "Fetching excluded commit $commit"
 
               git fetch \
                 --no-tags \
@@ -226,16 +171,13 @@ jobs:
                 "$commit"
 
               git rev-parse --verify "${commit}^{commit}" >/dev/null
-
-              echo "  OK: $(git rev-parse "${commit}^{commit}")"
             done
-
           fi
 
       # ------------------------------------------------------------
-      # Build patch.
+      # Generate independent patches.
       # ------------------------------------------------------------
-      - name: Build patch
+      - name: Generate patches
         env:
           BASE: ${{ inputs.base }}
           COMMITS: ${{ inputs.commits }}
@@ -248,66 +190,20 @@ jobs:
           rm -rf "$PATCH_DIR"
           mkdir -p "$PATCH_DIR"
 
-          echo "========================================"
-          echo "Building patch"
-          echo "========================================"
-
           # ----------------------------------------------------------
-          # Save information about the build.
+          # Build list of commits.
           # ----------------------------------------------------------
 
-          printf '%s\n' "$COMMITS" \
-            > "$PATCH_DIR/selected-commits.txt"
+          if [[ "$REVERSE" == "true" ]]; then
 
-          {
-            echo "base=$BASE"
-            echo "base_sha=$BASE_SHA"
-            echo "reverse=$REVERSE"
-          } > "$PATCH_DIR/metadata.txt"
+            echo "Building reverse commit list..."
 
-          # ----------------------------------------------------------
-          # Normal mode:
-          #
-          # Start from BASE and cherry-pick exactly the selected
-          # commits.
-          # ----------------------------------------------------------
-
-          if [[ "$REVERSE" != "true" ]]; then
-
-            echo "Mode: INCLUDE selected commits"
-
-            git switch --detach "$BASE_SHA"
-
-            ORIGINAL_HEAD="$(git rev-parse HEAD)"
-
-            read -ra CHERRY_PICK_COMMITS <<< "$COMMITS"
-
-          # ----------------------------------------------------------
-          # Reverse mode:
-          #
-          # Start from BASE.
-          #
-          # Find all commits in BASE..original HEAD.
-          #
-          # Remove the commits specified by the user.
-          # Cherry-pick everything else.
-          # ----------------------------------------------------------
-
-          else
-
-            echo "Mode: EXCLUDE selected commits"
-
-            ORIGINAL_HEAD="$(git rev-parse HEAD)"
+            HEAD_SHA="$(git rev-parse HEAD)"
 
             mapfile -t ALL_COMMITS < <(
-              git rev-list --reverse "${BASE_SHA}..${ORIGINAL_HEAD}"
+              git rev-list --reverse "${BASE_SHA}..${HEAD_SHA}"
             )
 
-            echo
-            echo "Commits in BASE..HEAD:"
-            printf '  %s\n' "${ALL_COMMITS[@]}"
-
-            # Normalize selected SHAs.
             declare -A EXCLUDED=()
 
             for commit in $COMMITS; do
@@ -315,101 +211,127 @@ jobs:
               EXCLUDED["$SHA"]=1
             done
 
-            CHERRY_PICK_COMMITS=()
+            SELECTED_COMMITS=()
 
             for commit in "${ALL_COMMITS[@]}"; do
-
-              if [[ -n "${EXCLUDED[$commit]+x}" ]]; then
-                echo "EXCLUDED: $commit"
-              else
-                CHERRY_PICK_COMMITS+=("$commit")
+              if [[ -z "${EXCLUDED[$commit]+x}" ]]; then
+                SELECTED_COMMITS+=("$commit")
               fi
-
             done
 
-            # We must start from BASE, not from original HEAD.
-            git switch --detach "$BASE_SHA"
+          else
+
+            read -ra SELECTED_COMMITS <<< "$COMMITS"
+
           fi
 
-          # ----------------------------------------------------------
-          # Validate list.
-          # ----------------------------------------------------------
-
-          if [[ ${#CHERRY_PICK_COMMITS[@]} -eq 0 ]]; then
-            echo
-            echo "::error::No commits left after filtering."
+          if [[ ${#SELECTED_COMMITS[@]} -eq 0 ]]; then
+            echo "::error::No commits selected."
             exit 1
           fi
 
           echo
-          echo "========================================"
-          echo "Commits to cherry-pick"
-          echo "========================================"
-
-          printf '  %s\n' "${CHERRY_PICK_COMMITS[@]}"
-
-          printf '%s\n' "${CHERRY_PICK_COMMITS[@]}" \
-            > "$PATCH_DIR/cherry-picked-commits.txt"
+          echo "Commits:"
+          printf '  %s\n' "${SELECTED_COMMITS[@]}"
 
           # ----------------------------------------------------------
-          # Apply commits without creating commits.
+          # Generate one independent patch per commit.
           # ----------------------------------------------------------
 
-          echo
-          echo "Cherry-picking..."
+          NUMBER=1
 
-          if ! git cherry-pick --no-commit \
-              "${CHERRY_PICK_COMMITS[@]}"; then
+          for commit in "${SELECTED_COMMITS[@]}"; do
 
             echo
-            echo "::error::Cherry-pick failed."
+            echo "========================================"
+            echo "Generating patch for:"
+            echo "$commit"
+            echo "========================================"
+
+            # Resolve full SHA.
+            SHA="$(git rev-parse "${commit}^{commit}")"
+
+            # Show commit information.
+            git show \
+              --no-patch \
+              --format=fuller \
+              "$SHA"
+
+            # Generate one standalone Git patch.
+            #
+            # --binary:
+            #   preserve binary file changes.
+            #
+            # --full-index:
+            #   include complete blob IDs.
+            #
+            # -1:
+            #   generate exactly this commit.
+            #
+            # --numbered-files:
+            #   predictable filenames.
+            git format-patch \
+              -1 \
+              --binary \
+              --full-index \
+              --numbered-files \
+              --output-directory "$PATCH_DIR" \
+              "$SHA"
+
+            # Rename generated file to a deterministic name based
+            # on commit subject.
+            GENERATED="$(find "$PATCH_DIR" -maxdepth 1 -type f -name '*.patch' \
+              | sort \
+              | tail -n 1)"
+
+            SUBJECT="$(
+              git log \
+                -1 \
+                --format='%s' \
+                "$SHA"
+            )"
+
+            # Make filename safe.
+            SAFE_SUBJECT="$(
+              echo "$SUBJECT" \
+                | tr '[:upper:]' '[:lower:]' \
+                | sed 's/[^a-z0-9._-]/-/g' \
+                | sed 's/-\+/-/g' \
+                | sed 's/^-//; s/-$//'
+            )"
+
+            TARGET="$PATCH_DIR/$(printf '%04d' "$NUMBER")-${SAFE_SUBJECT}.patch"
+
+            mv "$GENERATED" "$TARGET"
+
+            NUMBER=$((NUMBER + 1))
+          done
+
+          # ----------------------------------------------------------
+          # Save metadata.
+          # ----------------------------------------------------------
+
+          {
+            echo "base=$BASE"
+            echo "base_sha=$BASE_SHA"
+            echo "reverse=$REVERSE"
             echo
-            echo "Git status:"
-            git status --short
-
-            echo
-            echo "The workflow stopped because of a cherry-pick conflict."
-
-            git cherry-pick --abort || true
-
-            exit 1
-          fi
-
-          # ----------------------------------------------------------
-          # Generate patch.
-          #
-          # --binary preserves binary file changes.
-          # ----------------------------------------------------------
-
-          echo
-          echo "Generating patch..."
-
-          git diff \
-            --binary \
-            "$BASE_SHA" \
-            > "$PATCH_DIR/cherry-picked.patch"
-
-          # ----------------------------------------------------------
-          # Statistics.
-          # ----------------------------------------------------------
+            echo "commits:"
+            printf '%s\n' "${SELECTED_COMMITS[@]}"
+          } > "$PATCH_DIR/metadata.txt"
 
           echo
           echo "========================================"
-          echo "Patch created"
+          echo "Generated patches"
           echo "========================================"
 
-          wc -l "$PATCH_DIR/cherry-picked.patch"
-          du -h "$PATCH_DIR/cherry-picked.patch"
-
-          echo
-          echo "Files:"
           ls -lh "$PATCH_DIR"
 
       # ------------------------------------------------------------
-      # Upload artifact.
+      # Upload patches as artifact.
       # ------------------------------------------------------------
       - name: Upload patches
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: patches
           path: patches/

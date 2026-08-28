@@ -1,0 +1,171 @@
+name: Make patches
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Base commit or branch"
+        required: true
+        default: "main"
+        type: string
+
+      commits:
+        description: "Commits to cherry-pick, separated by spaces"
+        required: true
+        type: string
+
+      reverse:
+        description: "Exclude selected commits instead of including them"
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  build-patches:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          fetch-tags: false
+
+      - name: Deepen repository history
+        env:
+          BASE: ${{ inputs.base }}
+          COMMITS: ${{ inputs.commits }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Initial depth.
+          DEPTH=50
+
+          # Maximum depth before giving up.
+          MAX_DEPTH=100000
+
+          # Resolve the base branch/commit if possible.
+          # We only need the selected commits and base to be available.
+          while true; do
+            echo "Checking repository history (depth: $DEPTH)..."
+
+            BASE_OK=true
+
+            if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
+              BASE_OK=false
+            fi
+
+            COMMITS_OK=true
+
+            for commit in $COMMITS; do
+              if ! git rev-parse --verify --quiet "${commit}^{commit}" >/dev/null; then
+                COMMITS_OK=false
+                break
+              fi
+            done
+
+            if [[ "$BASE_OK" == "true" && "$COMMITS_OK" == "true" ]]; then
+              echo "Required commits are available."
+              break
+            fi
+
+            if [[ "$DEPTH" -ge "$MAX_DEPTH" ]]; then
+              echo "::error::Unable to find required commits within depth $MAX_DEPTH"
+              exit 1
+            fi
+
+            echo "Required history is not available."
+            echo "Deepening repository to $DEPTH commits..."
+
+            git fetch \
+              --no-tags \
+              --deepen="$DEPTH" \
+              origin
+
+            DEPTH=$((DEPTH * 2))
+          done
+
+      - name: Create patches
+        env:
+          BASE: ${{ inputs.base }}
+          COMMITS: ${{ inputs.commits }}
+          REVERSE: ${{ inputs.reverse }}
+        run: |
+          set -euo pipefail
+
+          PATCH_DIR="patches"
+
+          rm -rf "$PATCH_DIR"
+          mkdir -p "$PATCH_DIR"
+
+          echo "Base: $BASE"
+          echo "Reverse: $REVERSE"
+
+          # Checkout base.
+          git switch --detach "$BASE"
+
+          ORIGINAL_HEAD="$(git rev-parse HEAD)"
+
+          if [[ "$REVERSE" == "true" ]]; then
+            echo "Mode: exclude selected commits"
+
+            # Get all commits between BASE and the current HEAD.
+            mapfile -t ALL_COMMITS < <(
+              git rev-list --reverse "$BASE"..HEAD
+            )
+
+            declare -A EXCLUDED
+
+            for commit in $COMMITS; do
+              SHA="$(git rev-parse "$commit^{commit}")"
+              EXCLUDED["$SHA"]=1
+            done
+
+            CHERRY_PICK_COMMITS=()
+
+            for commit in "${ALL_COMMITS[@]}"; do
+              if [[ -z "${EXCLUDED[$commit]+x}" ]]; then
+                CHERRY_PICK_COMMITS+=("$commit")
+              fi
+            done
+
+          else
+            echo "Mode: include selected commits"
+
+            read -ra CHERRY_PICK_COMMITS <<< "$COMMITS"
+          fi
+
+          if [[ ${#CHERRY_PICK_COMMITS[@]} -eq 0 ]]; then
+            echo "::error::No commits to cherry-pick"
+            exit 1
+          fi
+
+          echo "Commits to cherry-pick:"
+          printf '  %s\n' "${CHERRY_PICK_COMMITS[@]}"
+
+          # Apply commits without creating commits.
+          git cherry-pick --no-commit \
+            "${CHERRY_PICK_COMMITS[@]}"
+
+          # Create patch.
+          git diff --binary "$ORIGINAL_HEAD" \
+            > "$PATCH_DIR/cherry-picked.patch"
+
+          # Save commit list.
+          printf '%s\n' "${CHERRY_PICK_COMMITS[@]}" \
+            > "$PATCH_DIR/commits.txt"
+
+          echo
+          echo "Generated patch:"
+          ls -lh "$PATCH_DIR"
+
+      - name: Upload patches
+        uses: actions/upload-artifact@v7
+        with:
+          name: patches
+          path: patches/
+          if-no-files-found: error

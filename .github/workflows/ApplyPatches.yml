@@ -1,0 +1,1123 @@
+name: Apply patches
+
+run-name: >-
+  Apply patches to ${{ inputs.target_branch }}
+  (${{ inputs.commit_mode }})
+
+on:
+  workflow_dispatch:
+    inputs:
+
+      source:
+        description: >
+          Patch URL, GitHub directory URL, GitHub PR/commit URL,
+          or local directory.
+        required: true
+        type: string
+
+      target_branch:
+        description: "Branch to which the changes will be applied"
+        required: true
+        default: "main"
+        type: string
+
+      commit_mode:
+        description: "How the resulting changes should be committed"
+        required: true
+        default: "as-is"
+        type: choice
+        options:
+          - as-is
+          - squash
+          - merge
+          - cherry-pick
+
+      commit_message:
+        description: >
+          Commit message. Used for squash/merge and for plain diff.
+          Ignored by cherry-pick when source contains commits.
+        required: true
+        default: "Apply external patch"
+        type: string
+
+      strip:
+        description: "Leading path components to strip (-pN)"
+        required: true
+        default: "1"
+        type: string
+
+      push:
+        description: "Push the result to the target branch"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: read
+
+# Do not allow two instances of this workflow to modify
+# the same target branch simultaneously.
+concurrency:
+  group: apply-patches-${{ github.repository }}-${{ inputs.target_branch }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Apply changes
+    runs-on: ubuntu-latest
+
+    env:
+      TARGET_BRANCH: ${{ inputs.target_branch }}
+      COMMIT_MODE: ${{ inputs.commit_mode }}
+      COMMIT_MESSAGE: ${{ inputs.commit_message }}
+      STRIP: ${{ inputs.strip }}
+
+    steps:
+
+      # ============================================================
+      # CHECKOUT TARGET BRANCH
+      # ============================================================
+
+      - name: Checkout target branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.target_branch }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      # ============================================================
+      # CONFIGURE GIT
+      # ============================================================
+
+      - name: Configure Git
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # ============================================================
+      # FETCH TARGET BRANCH
+      # ============================================================
+
+      - name: Fetch target branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch \
+            --no-tags \
+            --prune \
+            origin \
+            "$TARGET_BRANCH"
+
+          git checkout "$TARGET_BRANCH"
+
+          git reset \
+            --hard \
+            "origin/$TARGET_BRANCH"
+
+      # ============================================================
+      # REMEMBER ORIGINAL TARGET HEAD
+      #
+      # MUST happen before any patch/cherry-pick is applied.
+      # ============================================================
+
+      - name: Remember target HEAD
+        id: base
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_SHA="$(git rev-parse HEAD)"
+
+          echo "sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+
+          echo "Target branch:"
+          echo "  $TARGET_BRANCH"
+
+          echo
+          echo "Base commit:"
+          echo "  $BASE_SHA"
+
+      # ============================================================
+      # PREPARE SOURCE
+      #
+      # Possible source types:
+      #
+      #   1. Direct .diff/.patch URL
+      #   2. GitHub directory
+      #   3. GitHub PR URL
+      #   4. GitHub PR .patch URL
+      #   5. GitHub commit URL
+      #   6. Local directory
+      #
+      # For cherry-pick:
+      #
+      #   PR URL       -> obtain PR commits
+      #   commit URL   -> obtain single commit
+      #
+      # Other source types are rejected for cherry-pick.
+      # ============================================================
+
+      - name: Prepare source
+        id: prepare
+        env:
+          SOURCE: ${{ inputs.source }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PATCH_DIR="$RUNNER_TEMP/patches"
+          MANIFEST="$PATCH_DIR/.manifest"
+          CHERRY_PICK_MANIFEST="$PATCH_DIR/.cherry-pick-manifest"
+
+          rm -rf "$PATCH_DIR"
+
+          mkdir -p "$PATCH_DIR"
+
+          : > "$MANIFEST"
+          : > "$CHERRY_PICK_MANIFEST"
+
+          # --------------------------------------------------------
+          # Helpers
+          # --------------------------------------------------------
+
+          download_file() {
+            local url="$1"
+            local output="$2"
+
+            echo "Downloading:"
+            echo "  $url"
+
+            curl \
+              --fail \
+              --location \
+              --silent \
+              --show-error \
+              --retry 3 \
+              --retry-delay 1 \
+              "$url" \
+              --output "$output"
+          }
+
+          github_api() {
+            local url="$1"
+
+            curl \
+              --fail \
+              --location \
+              --silent \
+              --show-error \
+              --retry 3 \
+              --retry-delay 1 \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "$url"
+          }
+
+          # --------------------------------------------------------
+          # Detect GitHub PR URL.
+          #
+          # Supported:
+          #
+          # https://github.com/OWNER/REPO/pull/123
+          # https://github.com/OWNER/REPO/pull/123.patch
+          # https://github.com/OWNER/REPO/pull/123.diff
+          # --------------------------------------------------------
+
+          parse_github_pr() {
+            local url="$1"
+
+            if [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/pull/([0-9]+)(\.(patch|diff))?/?$ ]]; then
+              echo "${BASH_REMATCH[1]}"
+              echo "${BASH_REMATCH[2]}"
+              echo "${BASH_REMATCH[3]}"
+              return 0
+            fi
+
+            return 1
+          }
+
+          # --------------------------------------------------------
+          # Detect GitHub commit URL.
+          #
+          # https://github.com/OWNER/REPO/commit/SHA
+          # --------------------------------------------------------
+
+          parse_github_commit() {
+            local url="$1"
+
+            if [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/commit/([0-9a-fA-F]{7,64})/?$ ]]; then
+              echo "${BASH_REMATCH[1]}"
+              echo "${BASH_REMATCH[2]}"
+              echo "${BASH_REMATCH[3]}"
+              return 0
+            fi
+
+            return 1
+          }
+
+          # --------------------------------------------------------
+          # GitHub directory
+          #
+          # https://github.com/OWNER/REPO/tree/REF/path
+          # --------------------------------------------------------
+
+          download_github_directory() {
+            local url="$1"
+
+            local path_without_prefix
+            path_without_prefix="${url#https://github.com/}"
+
+            local owner
+            local repo
+            local rest
+            local ref
+            local path
+
+            owner="$(cut -d/ -f1 <<< "$path_without_prefix")"
+            repo="$(cut -d/ -f2 <<< "$path_without_prefix")"
+
+            rest="$(cut -d/ -f4- <<< "$path_without_prefix")"
+
+            ref="$(cut -d/ -f1 <<< "$rest")"
+            path="$(cut -d/ -f2- <<< "$rest")"
+
+            if [[ "$path" == "$rest" ]]; then
+              path=""
+            fi
+
+            echo
+            echo "GitHub source:"
+            echo "  owner: $owner"
+            echo "  repo:  $repo"
+            echo "  ref:   $ref"
+            echo "  path:  ${path:-/}"
+            echo
+
+            local api_url
+
+            if [[ -n "$path" ]]; then
+              api_url="https://api.github.com/repos/$owner/$repo/contents/$path?ref=$ref"
+            else
+              api_url="https://api.github.com/repos/$owner/$repo/contents?ref=$ref"
+            fi
+
+            local response
+
+            response="$(
+              github_api "$api_url"
+            )"
+
+            if ! jq -e 'type == "array"' >/dev/null <<< "$response"; then
+              echo "ERROR: GitHub URL does not point to a directory."
+              echo "$response" | jq .
+              exit 1
+            fi
+
+            echo "$response" |
+              jq -r '
+                .[]
+                | select(.type == "file")
+                | select(.name | test("\\.(diff|patch)$"; "i"))
+                | [.name, .download_url]
+                | @tsv
+              ' |
+              sort -V |
+              while IFS=$'\t' read -r name download_url; do
+
+                [[ -z "$name" ]] && continue
+
+                local output="$PATCH_DIR/$name"
+
+                download_file \
+                  "$download_url" \
+                  "$output"
+
+                echo "$output" >> "$MANIFEST"
+
+              done
+          }
+
+          # ========================================================
+          # CHERRY-PICK SOURCE
+          # ========================================================
+
+          if [[ "$COMMIT_MODE" == "cherry-pick" ]]; then
+
+            # ------------------------------------------------------
+            # PR
+            # ------------------------------------------------------
+
+            if readarray -t PR_INFO < <(parse_github_pr "$SOURCE"); then
+
+              OWNER="${PR_INFO[0]}"
+              REPO="${PR_INFO[1]}"
+              PR_NUMBER="${PR_INFO[2]}"
+
+              echo
+              echo "Cherry-pick source: GitHub PR"
+              echo "  repository: $OWNER/$REPO"
+              echo "  PR:         #$PR_NUMBER"
+              echo
+
+              # ----------------------------------------------------
+              # Get PR commits.
+              #
+              # GitHub documents a maximum of 250 commits through
+              # this endpoint.
+              # ----------------------------------------------------
+
+              commits_json="$(
+                github_api \
+                  "https://api.github.com/repos/$OWNER/$REPO/pulls/$PR_NUMBER/commits?per_page=100&page=1"
+              )"
+
+              all_commits="$commits_json"
+
+              count="$(jq 'length' <<< "$commits_json")"
+
+              page=2
+
+              while [[ "$count" -eq 100 ]]; do
+
+                page_json="$(
+                  github_api \
+                    "https://api.github.com/repos/$OWNER/$REPO/pulls/$PR_NUMBER/commits?per_page=100&page=$page"
+                )"
+
+                page_count="$(jq 'length' <<< "$page_json")"
+
+                all_commits="$(
+                  jq -s 'add' \
+                    <(
+                      printf '%s\n' "$all_commits"
+                    ) \
+                    <(
+                      printf '%s\n' "$page_json"
+                    )
+                )"
+
+                count="$page_count"
+                page=$((page + 1))
+
+                total="$(jq 'length' <<< "$all_commits")"
+
+                if [[ "$total" -gt 250 ]]; then
+                  echo
+                  echo "ERROR: PR contains more than 250 commits."
+                  echo "Cherry-pick mode currently limits PRs to 250 commits."
+                  exit 1
+                fi
+
+              done
+
+              total="$(jq 'length' <<< "$all_commits")"
+
+              if [[ "$total" -eq 0 ]]; then
+                echo "ERROR: PR contains no commits."
+                exit 1
+              fi
+
+              # GitHub returns commits newest-first in the API.
+              # Cherry-pick must replay them oldest-first.
+              echo "$all_commits" |
+                jq -r 'reverse | .[].sha' \
+                > "$CHERRY_PICK_MANIFEST"
+
+              SOURCE_REPO="$OWNER/$REPO"
+
+            # ------------------------------------------------------
+            # Commit
+            # ------------------------------------------------------
+
+            elif readarray -t COMMIT_INFO < <(parse_github_commit "$SOURCE"); then
+
+              OWNER="${COMMIT_INFO[0]}"
+              REPO="${COMMIT_INFO[1]}"
+              COMMIT_SHA="${COMMIT_INFO[2]}"
+
+              echo
+              echo "Cherry-pick source: GitHub commit"
+              echo "  repository: $OWNER/$REPO"
+              echo "  commit:     $COMMIT_SHA"
+              echo
+
+              # Validate the commit through GitHub API.
+              github_api \
+                "https://api.github.com/repos/$OWNER/$REPO/commits/$COMMIT_SHA" \
+                > "$RUNNER_TEMP/commit.json"
+
+              REAL_SHA="$(jq -r '.sha' "$RUNNER_TEMP/commit.json")"
+
+              if [[ -z "$REAL_SHA" || "$REAL_SHA" == "null" ]]; then
+                echo "ERROR: Could not resolve commit."
+                exit 1
+              fi
+
+              printf '%s\n' "$REAL_SHA" \
+                > "$CHERRY_PICK_MANIFEST"
+
+              SOURCE_REPO="$OWNER/$REPO"
+
+            else
+
+              echo
+              echo "ERROR: cherry-pick mode requires a GitHub PR or commit URL."
+              echo
+              echo "Supported:"
+              echo
+              echo "  https://github.com/OWNER/REPO/pull/123"
+              echo "  https://github.com/OWNER/REPO/pull/123.patch"
+              echo "  https://github.com/OWNER/REPO/commit/SHA"
+              echo
+              echo "A .diff/.patch file cannot be cherry-picked because it"
+              echo "does not contain a Git commit object."
+
+              exit 1
+            fi
+
+            echo
+            echo "Commits to cherry-pick:"
+            cat "$CHERRY_PICK_MANIFEST"
+
+            echo
+            echo "source_repo=$SOURCE_REPO" >> "$GITHUB_OUTPUT"
+            echo "mode=cherry-pick" >> "$GITHUB_OUTPUT"
+            echo "patch_dir=$PATCH_DIR" >> "$GITHUB_OUTPUT"
+
+          else
+
+            # ======================================================
+            # NORMAL PATCH SOURCE
+            # ======================================================
+
+            if [[ "$SOURCE" =~ ^https?:// ]]; then
+
+              # ----------------------------------------------------
+              # GitHub directory
+              # ----------------------------------------------------
+
+              if [[ "$SOURCE" =~ ^https://github\.com/[^/]+/[^/]+/tree/ ]]; then
+
+                echo "Source type: GitHub directory"
+
+                download_github_directory "$SOURCE"
+
+              # ----------------------------------------------------
+              # Direct .diff / .patch
+              # ----------------------------------------------------
+
+              elif [[ "$SOURCE" =~ \.(diff|patch)(\?.*)?$ ]]; then
+
+                echo "Source type: patch URL"
+
+                filename="$(basename "${SOURCE%%\?*}")"
+
+                filename="${filename//[^a-zA-Z0-9._-]/_}"
+
+                output="$PATCH_DIR/$filename"
+
+                download_file \
+                  "$SOURCE" \
+                  "$output"
+
+                echo "$output" >> "$MANIFEST"
+
+              else
+
+                echo "ERROR: Unsupported URL:"
+                echo "$SOURCE"
+                echo
+                echo "Supported examples:"
+                echo
+                echo "  https://github.com/owner/repo/pull/123.diff"
+                echo "  https://github.com/owner/repo/pull/123.patch"
+                echo "  https://github.com/owner/repo/tree/main/patches"
+
+                exit 1
+              fi
+
+            # ------------------------------------------------------
+            # Local directory
+            # ------------------------------------------------------
+
+            else
+
+              echo "Source type: local directory"
+
+              if [[ ! -d "$SOURCE" ]]; then
+                echo "ERROR: Directory does not exist:"
+                echo "$SOURCE"
+                exit 1
+              fi
+
+              find "$SOURCE" \
+                -maxdepth 1 \
+                -type f \
+                \( \
+                  -iname "*.diff" \
+                  -o \
+                  -iname "*.patch" \
+                \) \
+                -print |
+                sort -V |
+                while read -r file; do
+
+                  cp \
+                    "$file" \
+                    "$PATCH_DIR/"
+
+                  echo \
+                    "$PATCH_DIR/$(basename "$file")" \
+                    >> "$MANIFEST"
+
+                done
+            fi
+
+            if [[ ! -s "$MANIFEST" ]]; then
+              echo
+              echo "ERROR: No .diff or .patch files found."
+              exit 1
+            fi
+
+            echo
+            echo "Patches:"
+            while read -r patch; do
+              echo "  - $(basename "$patch")"
+            done < "$MANIFEST"
+
+            echo "patch_dir=$PATCH_DIR" >> "$GITHUB_OUTPUT"
+            echo "mode=patch" >> "$GITHUB_OUTPUT"
+
+          fi
+
+      # ============================================================
+      # CREATE TEMPORARY BRANCH
+      #
+      # Only merge mode needs this.
+      # ============================================================
+
+      - name: Create temporary patch branch
+        if: ${{ inputs.commit_mode == 'merge' }}
+        id: patch_branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PATCH_BRANCH="patch/apply-${GITHUB_RUN_ID}"
+
+          git checkout \
+            -b \
+            "$PATCH_BRANCH"
+
+          echo "name=$PATCH_BRANCH" >> "$GITHUB_OUTPUT"
+
+          echo "Created temporary branch:"
+          echo "  $PATCH_BRANCH"
+
+      # ============================================================
+      # APPLY NORMAL PATCHES
+      #
+      # Skipped in cherry-pick mode.
+      # ============================================================
+
+      - name: Apply patches
+        if: ${{ inputs.commit_mode != 'cherry-pick' }}
+        id: apply
+        env:
+          PATCH_DIR: ${{ steps.prepare.outputs.patch_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MANIFEST="$PATCH_DIR/.manifest"
+
+          cleanup() {
+            if [[ -d ".git/rebase-apply" ]]; then
+              echo "Aborting unfinished git am..."
+              git am --abort || true
+            fi
+          }
+
+          trap cleanup ERR
+
+          while IFS= read -r patch; do
+
+            [[ -z "$patch" ]] && continue
+
+            echo
+            echo "========================================"
+            echo "Applying:"
+            echo "  $(basename "$patch")"
+            echo "========================================"
+
+            # ------------------------------------------------------
+            # Plain unified diff
+            # ------------------------------------------------------
+
+            if git apply \
+                --check \
+                "-p${STRIP}" \
+                "$patch"; then
+
+              echo "Detected: unified diff"
+
+              git apply \
+                --verbose \
+                "-p${STRIP}" \
+                "$patch"
+
+              continue
+            fi
+
+            # ------------------------------------------------------
+            # Git format-patch
+            # ------------------------------------------------------
+
+            echo "Detected: Git mailbox/format-patch"
+
+            git am \
+              --3way \
+              --no-verify \
+              --keep-cr \
+              "$patch"
+
+          done < "$MANIFEST"
+
+          trap - ERR
+
+          echo
+          echo "All patches applied successfully."
+
+      # ============================================================
+      # CHERRY-PICK SOURCE COMMITS
+      #
+      # We fetch the source commits first.
+      #
+      # For the current repository we use the authenticated origin.
+      # For a different public GitHub repository we fetch anonymously.
+      #
+      # Private external repositories require a separate PAT/GitHub
+      # App token and are intentionally not accessed using the
+      # current repository's GITHUB_TOKEN.
+      # ============================================================
+
+      - name: Fetch cherry-pick source
+        if: ${{ inputs.commit_mode == 'cherry-pick' }}
+        env:
+          SOURCE_REPO: ${{ steps.prepare.outputs.source_repo }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MANIFEST="${{ steps.prepare.outputs.patch_dir }}/.cherry-pick-manifest"
+
+          if [[ ! -s "$MANIFEST" ]]; then
+            echo "ERROR: Cherry-pick manifest is empty."
+            exit 1
+          fi
+
+          mapfile -t COMMITS < "$MANIFEST"
+
+          if [[ "${#COMMITS[@]}" -eq 0 ]]; then
+            echo "ERROR: No commits to cherry-pick."
+            exit 1
+          fi
+
+          echo "Source repository:"
+          echo "  $SOURCE_REPO"
+
+          echo
+          echo "Current repository:"
+          echo "  $GITHUB_REPOSITORY"
+
+          # --------------------------------------------------------
+          # Current repository.
+          #
+          # GITHUB_TOKEN has access to this repository.
+          # --------------------------------------------------------
+
+          if [[ "$SOURCE_REPO" == "$GITHUB_REPOSITORY" ]]; then
+
+            echo
+            echo "Fetching commits from current repository..."
+
+            git fetch \
+              --no-tags \
+              origin \
+              "${COMMITS[@]}"
+
+          else
+
+            # ------------------------------------------------------
+            # External repository.
+            #
+            # Use public HTTPS fetch without putting a token into
+            # the command line.
+            #
+            # Private external repositories will fail here instead
+            # of accidentally sending the current repository token
+            # to another repository.
+            # ------------------------------------------------------
+
+            echo
+            echo "Fetching commits from external GitHub repository..."
+
+            git fetch \
+              --no-tags \
+              "https://github.com/${SOURCE_REPO}.git" \
+              "${COMMITS[@]}"
+
+          fi
+
+      # ============================================================
+      # CHERRY-PICK
+      #
+      # One source commit -> one new commit.
+      #
+      # Source commit messages are preserved.
+      #
+      # COMMIT_MESSAGE is intentionally not used here.
+      # If a single custom commit message is required for all changes,
+      # use "squash" mode.
+      # ============================================================
+
+      - name: Cherry-pick commits
+        if: ${{ inputs.commit_mode == 'cherry-pick' }}
+        env:
+          PATCH_DIR: ${{ steps.prepare.outputs.patch_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MANIFEST="$PATCH_DIR/.cherry-pick-manifest"
+
+          cleanup() {
+            if git rev-parse --verify CHERRY_PICK_HEAD >/dev/null 2>&1; then
+              echo "Aborting unfinished cherry-pick..."
+              git cherry-pick --abort || true
+            fi
+
+            if [[ -d ".git/sequencer" ]]; then
+              git cherry-pick --abort || true
+            fi
+          }
+
+          trap cleanup ERR
+
+          while IFS= read -r commit; do
+
+            [[ -z "$commit" ]] && continue
+
+            echo
+            echo "========================================"
+            echo "Cherry-picking:"
+            echo "  $commit"
+            echo "========================================"
+
+            git cherry-pick \
+              --no-edit \
+              "$commit"
+
+          done < "$MANIFEST"
+
+          trap - ERR
+
+          echo
+          echo "All commits cherry-picked successfully."
+
+      # ============================================================
+      # AS-IS
+      #
+      # format-patch:
+      #     commits remain as created by git am
+      #
+      # plain diff:
+      #     create one commit using COMMIT_MESSAGE
+      # ============================================================
+
+      - name: Commit as-is
+        if: ${{ inputs.commit_mode == 'as-is' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_SHA="${{ steps.base.outputs.sha }}"
+          CURRENT_SHA="$(git rev-parse HEAD)"
+
+          # git am already created commits.
+          if [[ "$CURRENT_SHA" != "$BASE_SHA" ]]; then
+
+            echo "Patch created Git commits."
+            echo "Keeping commits as-is."
+
+          # git apply changed only the working tree.
+          elif ! git diff --quiet; then
+
+            echo "Creating commit for plain diff."
+
+            git add -A
+
+            git commit \
+              -m "$COMMIT_MESSAGE"
+
+          else
+
+            echo "No changes."
+
+          fi
+
+      # ============================================================
+      # SQUASH
+      #
+      # Everything introduced after BASE_SHA becomes ONE commit.
+      #
+      # This works both for:
+      #
+      #   git apply
+      #   git am
+      #
+      # and therefore does not depend on the number of source commits.
+      # ============================================================
+
+      - name: Squash all changes
+        if: ${{ inputs.commit_mode == 'squash' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_SHA="${{ steps.base.outputs.sha }}"
+
+          echo "Base:"
+          echo "  $BASE_SHA"
+
+          echo
+          echo "Current:"
+          git rev-parse HEAD
+
+          # --------------------------------------------------------
+          # Create a complete binary patch from the original target
+          # state to the resulting state.
+          #
+          # git diff BASE_SHA includes:
+          #
+          #   - commits created by git am
+          #   - uncommitted changes from git apply
+          # --------------------------------------------------------
+
+          git diff \
+            --binary \
+            "$BASE_SHA" \
+            > "$RUNNER_TEMP/squashed.patch"
+
+          # --------------------------------------------------------
+          # Return to original target state.
+          # --------------------------------------------------------
+
+          git reset \
+            --hard \
+            "$BASE_SHA"
+
+          # --------------------------------------------------------
+          # Re-apply everything as one index change.
+          # --------------------------------------------------------
+
+          if [[ -s "$RUNNER_TEMP/squashed.patch" ]]; then
+
+            git apply \
+              --index \
+              "$RUNNER_TEMP/squashed.patch"
+
+            git commit \
+              -m "$COMMIT_MESSAGE"
+
+          else
+
+            echo "No changes to squash."
+
+          fi
+
+      # ============================================================
+      # MERGE
+      #
+      # Patch was applied to:
+      #
+      #   patch/apply-${GITHUB_RUN_ID}
+      #
+      # Now merge that branch into target.
+      # ============================================================
+
+      - name: Create merge commit
+        if: ${{ inputs.commit_mode == 'merge' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PATCH_BRANCH="${{ steps.patch_branch.outputs.name }}"
+
+          git checkout \
+            "$TARGET_BRANCH"
+
+          git merge \
+            --no-ff \
+            --no-edit \
+            -m "$COMMIT_MESSAGE" \
+            "$PATCH_BRANCH"
+
+      # ============================================================
+      # VERIFY RESULT
+      # ============================================================
+
+      - name: Verify result
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo
+          echo "========================================"
+          echo "RESULT"
+          echo "========================================"
+
+          echo
+          echo "Branch:"
+          git branch --show-current
+
+          echo
+          echo "HEAD:"
+          git log \
+            -1 \
+            --oneline \
+            --decorate
+
+          echo
+          echo "Recent commits:"
+          git log \
+            -5 \
+            --oneline \
+            --decorate
+
+          echo
+          echo "Status:"
+          git status --short
+
+          # --------------------------------------------------------
+          # No uncommitted changes may remain.
+          # --------------------------------------------------------
+
+          if ! git diff --quiet; then
+            echo
+            echo "ERROR: Working tree is not clean."
+            exit 1
+          fi
+
+          if ! git diff --cached --quiet; then
+            echo
+            echo "ERROR: Index is not clean."
+            exit 1
+          fi
+
+      # ============================================================
+      # RACE CONDITION PROTECTION
+      #
+      # Check that the target branch still points to the same commit
+      # we checked out before doing any work.
+      #
+      # If somebody pushed to the branch while this workflow was
+      # running, refuse to push.
+      # ============================================================
+
+      - name: Verify target branch has not changed
+        if: ${{ inputs.push }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_SHA="${{ steps.base.outputs.sha }}"
+
+          echo "Expected target base:"
+          echo "  $BASE_SHA"
+
+          git fetch \
+            --no-tags \
+            origin \
+            "$TARGET_BRANCH"
+
+          REMOTE_SHA="$(
+            git rev-parse \
+              "origin/$TARGET_BRANCH"
+          )"
+
+          echo
+          echo "Current remote target:"
+          echo "  $REMOTE_SHA"
+
+          if [[ "$REMOTE_SHA" != "$BASE_SHA" ]]; then
+
+            echo
+            echo "ERROR: Target branch changed while workflow was running."
+            echo
+            echo "Expected:"
+            echo "  $BASE_SHA"
+            echo
+            echo "Remote:"
+            echo "  $REMOTE_SHA"
+            echo
+            echo "Nothing was pushed."
+
+            exit 1
+          fi
+
+      # ============================================================
+      # PUSH
+      # ============================================================
+
+      - name: Push target branch
+        if: ${{ inputs.push }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Pushing:"
+          echo "  $TARGET_BRANCH"
+
+          git push \
+            origin \
+            "HEAD:$TARGET_BRANCH"
+
+          echo
+          echo "Push completed."
+
+      # ============================================================
+      # JOB SUMMARY
+      # ============================================================
+
+      - name: Write job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "# Patch application"
+            echo
+            echo "| Parameter | Value |"
+            echo "|---|---|"
+            echo "| Target branch | \`$TARGET_BRANCH\` |"
+            echo "| Commit mode | \`$COMMIT_MODE\` |"
+            echo "| Push | \`${{ inputs.push }}\` |"
+            echo "| Commit message | \`$COMMIT_MESSAGE\` |"
+            echo
+            echo "## Result"
+            echo
+            git log \
+              -1 \
+              --pretty=format:'%h — %s'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"

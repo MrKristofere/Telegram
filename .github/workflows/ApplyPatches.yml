@@ -20,7 +20,7 @@ on:
         default: "Apply patch"
 
       strategy:
-        description: "How to create the resulting commit"
+        description: "How to create the resulting history"
         required: true
         type: choice
         options:
@@ -36,12 +36,17 @@ on:
         type: boolean
         default: true
 
+concurrency:
+  group: apply-patch-${{ github.repository }}-${{ inputs.target_branch }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
 jobs:
   apply-patch:
+    name: Apply patch
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
 
     steps:
 
@@ -67,19 +72,48 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          echo "Current branch:"
+          echo "========================================"
+          echo "TARGET BRANCH"
+          echo "========================================"
           git branch --show-current
 
           echo
-          echo "Current commit:"
-          git log -1 --oneline
+          echo "========================================"
+          echo "CURRENT HEAD"
+          echo "========================================"
+          git log -1 --oneline --decorate
 
           echo
-          echo "Working tree:"
+          echo "========================================"
+          echo "GIT VERSION"
+          echo "========================================"
+          git --version
+
+          echo
+          echo "========================================"
+          echo "WORKING TREE"
+          echo "========================================"
           git status --short
 
       # ============================================================
-      # 3. Download patch
+      # 3. Make sure working tree is clean
+      # ============================================================
+
+      - name: Verify clean working tree
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Working tree is not clean."
+            git status --short
+            exit 1
+          fi
+
+          echo "Working tree is clean."
+
+      # ============================================================
+      # 4. Download patch
       # ============================================================
 
       - name: Download patch
@@ -89,9 +123,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/patch"
+          PATCH_DIR="$RUNNER_TEMP/patch"
 
-          echo "Downloading patch..."
+          mkdir -p "$PATCH_DIR"
+
+          echo "Downloading:"
+          echo "$PATCH_URL"
 
           curl \
             --fail \
@@ -100,21 +137,24 @@ jobs:
             --retry-delay 2 \
             --connect-timeout 20 \
             --max-time 300 \
-            "$PATCH_URL" \
-            --output "$RUNNER_TEMP/patch/input.patch"
+            --output "$PATCH_DIR/input.patch" \
+            "$PATCH_URL"
 
-          if [ ! -s "$RUNNER_TEMP/patch/input.patch" ]; then
+          if [ ! -s "$PATCH_DIR/input.patch" ]; then
             echo "::error::Downloaded patch is empty."
             exit 1
           fi
 
           echo
-          echo "Patch information:"
-          wc -l "$RUNNER_TEMP/patch/input.patch"
-          file "$RUNNER_TEMP/patch/input.patch"
+          echo "Downloaded patch:"
+          wc -l "$PATCH_DIR/input.patch"
+
+          echo
+          echo "File type:"
+          file "$PATCH_DIR/input.patch"
 
       # ============================================================
-      # 4. Detect patch format
+      # 5. Detect mailbox / normal diff
       # ============================================================
 
       - name: Detect patch format
@@ -126,27 +166,35 @@ jobs:
 
           if grep -qE '^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$' "$PATCH"; then
             echo "PATCH_FORMAT=mailbox" >> "$GITHUB_ENV"
-            echo "Detected format: Git mailbox / format-patch"
+
+            echo "Detected:"
+            echo "Git mailbox / format-patch"
 
           elif grep -qE '^diff --git ' "$PATCH"; then
             echo "PATCH_FORMAT=diff" >> "$GITHUB_ENV"
-            echo "Detected format: Git diff"
+
+            echo "Detected:"
+            echo "Git unified diff"
 
           else
-            echo "::error::Unable to detect patch format."
+            echo "::error::The downloaded file is not recognized as a Git patch."
             exit 1
           fi
 
       # ============================================================
-      # 5. Extract diff from mailbox
+      # 6. Extract diff from mailbox
       #
-      # We intentionally don't use git am.
+      # IMPORTANT:
       #
-      # This allows us to work with patches containing:
+      # We intentionally don't use:
+      #
+      #   git am
+      #
+      # because the supplied patch has fake blob indexes such as:
       #
       #   index 0000000..0000000
       #
-      # and malformed format-patch metadata.
+      # We only need the diff payload.
       # ============================================================
 
       - name: Extract patch payload
@@ -176,78 +224,49 @@ jobs:
           fi
 
           if [ ! -s "$OUTPUT" ]; then
-            echo "::error::Could not extract a Git diff from the patch."
+            echo "::error::No diff payload was found."
             exit 1
           fi
 
-          echo "Extracted diff:"
-          echo "----------------------------------------"
-          head -n 30 "$OUTPUT"
-          echo "----------------------------------------"
+          echo "Patch payload extracted."
 
       # ============================================================
-      # 6. Basic patch validation
+      # 7. Show patch structure
       # ============================================================
 
-      - name: Validate patch structure
+      - name: Inspect patch
         shell: bash
         run: |
           set -euo pipefail
 
           PATCH="$RUNNER_TEMP/patch/patch.diff"
 
-          if ! grep -qE '^diff --git ' "$PATCH"; then
-            echo "::error::Patch does not contain any Git diff sections."
-            exit 1
-          fi
+          echo "========================================"
+          echo "PATCH FILES"
+          echo "========================================"
 
-          echo "Patch contains Git diff sections."
+          grep '^diff --git ' "$PATCH" || true
 
           echo
-          echo "Files referenced by patch:"
-          grep -E '^diff --git ' "$PATCH" || true
+          echo "========================================"
+          echo "PATCH HEADERS"
+          echo "========================================"
+
+          grep -nE '^(diff --git |new file mode |deleted file mode |old mode |new mode |--- |\+\+\+ |index |@@ )' "$PATCH" || true
+
+          echo
+          echo "========================================"
+          echo "PATCH SIZE"
+          echo "========================================"
+
+          wc -l "$PATCH"
 
       # ============================================================
-      # 7. Validate paths
+      # 8. Inspect fake indexes
       #
-      # Don't allow absolute paths or ../ traversal.
-      # ============================================================
-
-      - name: Validate patch paths
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PATCH="$RUNNER_TEMP/patch/patch.diff"
-
-          if grep -nE '^--- (/[A-Za-z]|[A-Za-z]:[/\\])' "$PATCH"; then
-            echo "::error::Patch contains an absolute path."
-            exit 1
-          fi
-
-          if grep -nE '^\+\+\+ (/[A-Za-z]|[A-Za-z]:[/\\])' "$PATCH"; then
-            echo "::error::Patch contains an absolute path."
-            exit 1
-          fi
-
-          if grep -nE '^--- .*(^|/)\.\.(/|$)' "$PATCH"; then
-            echo "::error::Patch contains parent-directory traversal."
-            exit 1
-          fi
-
-          if grep -nE '^\+\+\+ .*(^|/)\.\.(/|$)' "$PATCH"; then
-            echo "::error::Patch contains parent-directory traversal."
-            exit 1
-          fi
-
-          echo "Patch paths look safe."
-
-      # ============================================================
-      # 8. Detect fake indexes
+      # Informational only.
       #
-      # This is informational only.
-      #
-      # We do NOT attempt a 3-way merge with these indexes.
+      # We don't modify them.
       # ============================================================
 
       - name: Inspect patch indexes
@@ -257,43 +276,25 @@ jobs:
 
           PATCH="$RUNNER_TEMP/patch/patch.diff"
 
-          if grep -qE '^index 0+\.0+ ' "$PATCH"; then
-            echo "WARNING: patch contains zero/fake blob indexes."
+          echo "Index lines:"
+          grep -n '^index ' "$PATCH" || true
+
+          if grep -qE '^index 0+\.0+([[:space:]]|$)' "$PATCH"; then
             echo
-            grep -nE '^index ' "$PATCH" || true
-            echo
-            echo "3-way application will NOT be used."
-          else
-            echo "Patch contains normal index information."
-            grep -nE '^index ' "$PATCH" || true
+            echo "WARNING:"
+            echo "Patch contains zero/fake blob indexes."
+            echo "3-way application will not be attempted."
           fi
 
       # ============================================================
-      # 9. Check current working tree
-      # ============================================================
-
-      - name: Verify clean working tree
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "::error::Working tree is not clean."
-            echo
-            git status --short
-            exit 1
-          fi
-
-          echo "Working tree is clean."
-
-      # ============================================================
-      # 10. Test patch applicability
+      # 9. Strict dry-run
+      #
+      # This does NOT modify the working tree.
       #
       # --recount:
-      #   Recalculate hunk line counts.
+      #   Ignore incorrect hunk counters.
       #
-      # We don't use --3way because the supplied patch has fake
-      # indexes.
+      # We intentionally don't use --reject here.
       # ============================================================
 
       - name: Check patch applicability
@@ -318,31 +319,32 @@ jobs:
             )
           fi
 
-          echo "Running strict patch check..."
+          echo "Running git apply --check..."
 
           if git apply "${ARGS[@]}" "$PATCH"; then
             echo
-            echo "Patch can be applied cleanly."
+            echo "Patch passed strict applicability check."
 
           else
             echo
-            echo "::warning::Strict patch check failed."
-            echo "Trying partial application with --reject."
+            echo "Strict check failed."
+            echo "This does not necessarily mean that nothing can be applied."
+            echo "The next step will use --reject."
           fi
 
       # ============================================================
-      # 11. Apply patch
-      #
-      # --reject:
-      #   Apply everything possible and write rejected hunks
-      #   to .rej files.
+      # 10. Apply patch
       #
       # --recount:
-      #   Ignore incorrect hunk counters.
+      #   Recalculate hunk sizes.
       #
-      # IMPORTANT:
-      # We don't hide errors. The command result is recorded and
-      # rejected hunks are checked immediately afterwards.
+      # --reject:
+      #   Apply applicable hunks and write failed hunks to .rej.
+      #
+      # --whitespace=nowarn:
+      #   Don't turn whitespace warnings into failures.
+      #
+      # No --3way.
       # ============================================================
 
       - name: Apply patch
@@ -373,18 +375,23 @@ jobs:
           git apply "${ARGS[@]}" "$PATCH"
           APPLY_EXIT=$?
 
+          echo
           echo "git apply exit code: $APPLY_EXIT"
 
           echo
-          echo "Working tree after applying patch:"
+          echo "Working tree:"
           git status --short
 
-          # Don't immediately fail here.
-          # The next step gives a much better diagnostic.
+          # Store the result for the next step.
+          echo "PATCH_APPLY_EXIT=$APPLY_EXIT" >> "$GITHUB_ENV"
+
+          # Don't fail yet.
+          #
+          # We first inspect .rej files and give a useful error.
           exit 0
 
       # ============================================================
-      # 12. Check rejected hunks
+      # 11. Detect rejected hunks
       # ============================================================
 
       - name: Check rejected hunks
@@ -392,38 +399,75 @@ jobs:
         run: |
           set -euo pipefail
 
-          REJECTS="$(find . \
-            -type f \
-            -name '*.rej' \
-            -not -path './.git/*' \
-            -print)"
+          REJECTS="$(
+            find . \
+              -type f \
+              -name '*.rej' \
+              -not -path './.git/*' \
+              -print
+          )"
 
           if [ -n "$REJECTS" ]; then
 
-            echo "::error::Patch was only partially applied."
+            echo "::error::Some patch hunks were rejected."
 
             echo
-            echo "Rejected files:"
+            echo "========================================"
+            echo "REJECTED FILES"
+            echo "========================================"
+
             echo "$REJECTS"
 
             while IFS= read -r FILE; do
+
               echo
               echo "========================================"
               echo "REJECTED HUNKS: $FILE"
               echo "========================================"
+
               cat "$FILE"
+
             done <<< "$REJECTS"
 
             echo
-            echo "No commit will be created."
+            echo "Patch was NOT committed."
 
             exit 1
           fi
 
-          echo "No rejected hunks."
+          echo "No .rej files found."
 
       # ============================================================
-      # 13. Verify resulting changes
+      # 12. Check git apply exit code
+      #
+      # If git apply failed for a reason other than rejected hunks,
+      # don't silently continue.
+      # ============================================================
+
+      - name: Verify patch application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${PATCH_APPLY_EXIT:-1}" -ne 0 ]; then
+
+            echo "::error::git apply returned exit code ${PATCH_APPLY_EXIT}."
+
+            echo
+            echo "Current working tree:"
+            git status --short
+
+            echo
+            echo "Diff:"
+            git diff --stat
+
+            exit "$PATCH_APPLY_EXIT"
+          fi
+
+          echo "git apply completed successfully."
+
+      # ============================================================
+      # 13. Verify that patch actually changed something
       # ============================================================
 
       - name: Verify resulting changes
@@ -431,32 +475,35 @@ jobs:
         run: |
           set -euo pipefail
 
-          if git diff --quiet && \
-             [ -z "$(git ls-files --others --exclude-standard)" ]; then
+          MODIFIED="$(git diff --name-only)"
+          UNTRACKED="$(git ls-files --others --exclude-standard)"
 
-            echo "::error::Patch produced no changes."
+          if [ -z "$MODIFIED" ] && [ -z "$UNTRACKED" ]; then
+            echo "::error::Patch produced no working tree changes."
             exit 1
           fi
 
-          echo "Patch produced changes."
+          echo "========================================"
+          echo "CHANGED FILES"
+          echo "========================================"
 
-          echo
-          echo "Changed files:"
           git status --short
 
           echo
-          echo "Diff stat:"
+          echo "========================================"
+          echo "DIFF STAT"
+          echo "========================================"
+
           git diff --stat
 
       # ============================================================
-      # 14. Commit / Squash
+      # 14. Direct commit / squash
       #
-      # For this workflow, both commit and squash produce one
-      # resulting commit because the patch is applied as one
-      # working-tree operation.
+      # Since the patch is applied as one working-tree change,
+      # both modes produce one resulting commit.
       # ============================================================
 
-      - name: Create direct commit
+      - name: Commit patch
         if: inputs.strategy == 'commit' || inputs.strategy == 'squash'
         shell: bash
         env:
@@ -467,21 +514,26 @@ jobs:
           git add -A
 
           if git diff --cached --quiet; then
-            echo "::error::Nothing to commit."
+            echo "::error::Nothing is staged."
             exit 1
           fi
 
           git commit \
             -m "$COMMIT_MESSAGE"
 
+          echo
           echo "Created commit:"
-          git log -1 --oneline
+          git log -1 --oneline --decorate
 
       # ============================================================
-      # 15. Prepare temporary branch for merge/cherry-pick
+      # 15. Create temporary local branch
+      #
+      # Used only for merge/cherry-pick.
+      #
+      # The temporary branch is NOT pushed to origin.
       # ============================================================
 
-      - name: Create patch branch
+      - name: Create temporary patch branch
         if: inputs.strategy == 'merge' || inputs.strategy == 'cherry-pick'
         shell: bash
         env:
@@ -489,7 +541,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          TEMP_BRANCH="patch/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          TEMP_BRANCH="patch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           echo "TEMP_BRANCH=$TEMP_BRANCH" >> "$GITHUB_ENV"
 
@@ -498,7 +550,7 @@ jobs:
           git add -A
 
           if git diff --cached --quiet; then
-            echo "::error::Nothing to commit."
+            echo "::error::Nothing is staged."
             exit 1
           fi
 
@@ -509,7 +561,8 @@ jobs:
 
           echo "PATCH_COMMIT=$PATCH_COMMIT" >> "$GITHUB_ENV"
 
-          echo "Temporary patch branch:"
+          echo
+          echo "Temporary branch:"
           echo "$TEMP_BRANCH"
 
           echo
@@ -517,7 +570,7 @@ jobs:
           echo "$PATCH_COMMIT"
 
       # ============================================================
-      # 16. Merge
+      # 16. Merge strategy
       # ============================================================
 
       - name: Merge patch branch
@@ -538,10 +591,10 @@ jobs:
           echo
           echo "Merge completed."
 
-          git log -2 --oneline --decorate
+          git log -3 --oneline --decorate
 
       # ============================================================
-      # 17. Cherry-pick
+      # 17. Cherry-pick strategy
       # ============================================================
 
       - name: Cherry-pick patch commit
@@ -559,10 +612,10 @@ jobs:
           echo
           echo "Cherry-pick completed."
 
-          git log -2 --oneline --decorate
+          git log -3 --oneline --decorate
 
       # ============================================================
-      # 18. Final verification
+      # 18. Final sanity check
       # ============================================================
 
       - name: Final verification
@@ -571,28 +624,40 @@ jobs:
           set -euo pipefail
 
           echo "========================================"
-          echo "FINAL STATE"
+          echo "FINAL BRANCH"
           echo "========================================"
 
-          echo
-          echo "Branch:"
           git branch --show-current
 
           echo
-          echo "HEAD:"
+          echo "========================================"
+          echo "FINAL HEAD"
+          echo "========================================"
+
           git log -1 --oneline --decorate
 
           echo
-          echo "Working tree:"
+          echo "========================================"
+          echo "FINAL STATUS"
+          echo "========================================"
+
           git status --short
 
           if [ -n "$(git status --porcelain)" ]; then
-            echo "::error::Working tree is not clean after operation."
+            echo "::error::Working tree is not clean."
             exit 1
           fi
 
+          echo
+          echo "Working tree is clean."
+
       # ============================================================
       # 19. Push target branch
+      #
+      # Normal push is intentional.
+      #
+      # If someone changed the target branch after checkout,
+      # the push fails instead of overwriting their work.
       # ============================================================
 
       - name: Push target branch
@@ -605,22 +670,6 @@ jobs:
           git push origin \
             "HEAD:$TARGET_BRANCH"
 
-          echo "Pushed $TARGET_BRANCH."
-
-      # ============================================================
-      # 20. Cleanup temporary remote branch
-      # ============================================================
-
-      - name: Delete temporary remote branch
-        if: inputs.strategy == 'merge' || inputs.strategy == 'cherry-pick'
-        shell: bash
-        env:
-          TEMP_BRANCH: ${{ env.TEMP_BRANCH }}
-        run: |
-          set -euo pipefail
-
-          git push origin \
-            --delete "$TEMP_BRANCH" \
-            2>/dev/null || true
-
-          echo "Temporary branch cleanup completed."
+          echo
+          echo "Successfully pushed:"
+          echo "$TARGET_BRANCH"

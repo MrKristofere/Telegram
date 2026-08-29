@@ -171,7 +171,7 @@ index 0000000..0000000 100644
                  }
              }
 -            if (!isCommunity && (!ChatObject.isChannel(currentChat) && currentChat.creator || currentChat.megagroup && !currentChat.gigagroup && ChatObject.canBlockUsers(currentChat))) {
-+            if (!isCommunity && (!ChatObject.isChannel(currentChat) && currentChat.creator || currentChat.megagroup && !currentChat.gigagroup)) {
++            if (!isCommunity && (!ChatObject.isChannel(currentChat) && currentChat.creator || currentChat.megagroup && !currentChat.gigagroup /* && ChatObject.canBlockUsers(currentChat)*/)) {
                  if (participantsDivider2Row == -1) {
                      participantsDivider2Row = rowCount++;
                  }
@@ -490,7 +490,6 @@ new file mode 100644
 diff --git a/TMessagesProj/src/main/res/values-pt-rBR/chat_editor_strings.xml b/TMessagesProj/src/main/res/values-pt-rBR/chat_editor_strings.xml
 new file mode 100644
 --- /dev/null
-+++ b/TMessagesProj/src/main/res/values-pt-rBR/chat_editor_strings.xml
 +++ b/TMessagesProj/src/main/res/values-pt-rBR/chat_editor_strings.xml
 @@ -0,0 +1,6 @@
 +<?xml version="1.0" encoding="utf-8"?>

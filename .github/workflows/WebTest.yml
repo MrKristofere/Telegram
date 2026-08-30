@@ -387,6 +387,7 @@ jobs:
 
           ./gradlew \
             --build-cache \
+            --configuration-cache \
             :TMessagesProj_AppStandalone:assembleAfatStandalone
 
       # ============================================================
@@ -507,6 +508,7 @@ jobs:
           name: telegram-standalone-ft-web
           path: TMessagesProj_AppStandalone/build/outputs/**/*.apk
           if-no-files-found: error
+          archive: false
 
       # ============================================================
       # CLEANUP

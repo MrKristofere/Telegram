@@ -387,7 +387,6 @@ jobs:
 
           ./gradlew \
             --build-cache \
-            --configuration-cache \
             :TMessagesProj_AppStandalone:assembleAfatStandalone
 
       # ============================================================

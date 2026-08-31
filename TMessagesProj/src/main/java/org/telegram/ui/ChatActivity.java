@@ -24905,7 +24905,7 @@ public class ChatActivity extends BaseFragment implements
     private Pattern sponsoredUrlPattern;
     private MessageObject botSponsoredMessage;
     private void addSponsoredMessages(boolean animated) {
-        if (sponsoredMessagesAdded || chatMode != 0 || !ChatObject.isChannel(currentChat) && !UserObject.isBot(currentUser) || !forwardEndReached[0] || getUserConfig().isPremium() && getMessagesController().isSponsoredDisabled() || isReport()) {
+        if (sponsoredMessagesAdded || chatMode != 0 || !ChatObject.isChannel(currentChat) && !UserObject.isBot(currentUser) || !forwardEndReached[0] || true && getMessagesController().isSponsoredDisabled() || isReport()) {
             return;
         }
         MessagesController.SponsoredMessagesInfo res = getMessagesController().getSponsoredMessages(dialog_id);
@@ -29254,7 +29254,7 @@ public class ChatActivity extends BaseFragment implements
                         o.add(R.drawable.msg_cancel, getString(R.string.HideAd), () -> {
                             o.dismiss();
                             if (sheet[0] != null) sheet[0].dismiss();
-                            if (getUserConfig().isPremium()) {
+                            if (true) {
                                 botSponsoredMessage = null;
                                 updateTopPanel(true);
                                 BulletinFactory.of(this)
@@ -29268,7 +29268,7 @@ public class ChatActivity extends BaseFragment implements
                         o.setGravity(Gravity.RIGHT).show();
                     });
                 }, () -> {
-                    if (getUserConfig().isPremium()) {
+                    if (true) {
                         botSponsoredMessage = null;
                         updateTopPanel(true);
                         BulletinFactory.of(this)
@@ -34343,7 +34343,7 @@ public class ChatActivity extends BaseFragment implements
     }
 
     private void hideAds() {
-        if (getUserConfig().isPremium()) {
+        if (true) {
             BulletinFactory.of(ChatActivity.this)
                     .createAdReportedBulletin(LocaleController.getString(R.string.AdHidden))
                     .show();
@@ -45733,7 +45733,7 @@ public class ChatActivity extends BaseFragment implements
             allowChatActions = false;
         }
 
-        if (message.isSponsored() && !getUserConfig().isPremium() && !getMessagesController().premiumFeaturesBlocked() && !message.sponsoredCanReport) {
+        if (message.isSponsored() && !true && !false && !message.sponsoredCanReport) {
             items.add(LocaleController.getString(R.string.HideAd));
             options.add(OPTION_HIDE_SPONSORED_MESSAGE);
             icons.add(R.drawable.msg_block2);
@@ -45748,7 +45748,7 @@ public class ChatActivity extends BaseFragment implements
             options.add(OPTION_REPORT_AD);
             icons.add(R.drawable.msg_block2);
 
-            if (!getMessagesController().premiumFeaturesBlocked()) {
+            if (!false) {
                 items.add(getString(R.string.RemoveAds));
                 options.add(OPTION_REMOVE_ADS);
                 icons.add(R.drawable.msg_cancel);

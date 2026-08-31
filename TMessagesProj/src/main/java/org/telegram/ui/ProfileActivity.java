@@ -657,6 +657,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
     private int userInfoRow;
     private int channelInfoRow;
     private int usernameRow;
+    private int idRow;
     private int notificationsDividerRow;
     private int notificationsRow;
     private int bizHoursRow;
@@ -4663,6 +4664,12 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
 
             @Override
             public boolean onItemClick(View view, int position) {
+                if (position == idRow) {
+                    long id = currentChat != null ? currentChat.id : userId;
+                    AndroidUtilities.addToClipboard(Long.toString(id));
+                    return true;
+                }
+
                 if (position == versionRow) {
                     pressCount++;
                     if (pressCount >= 2 || BuildVars.DEBUG_PRIVATE_VERSION) {
@@ -10521,6 +10528,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
         locationRow = -1;
         channelInfoRow = -1;
         usernameRow = -1;
+        idRow = -1;
         settingsTimerRow = -1;
         settingsKeyRow = -1;
         notificationsDividerRow = -1;
@@ -10713,6 +10721,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                 if (user != null && username != null) {
                     usernameRow = rowCount++;
                 }
+                idRow = rowCount++;
                 if (userInfo != null) {
                     if (userInfo.birthday != null) {
                         birthdayRow = rowCount++;
@@ -10872,6 +10881,11 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                     usernameRow = rowCount++;
                 }
             }
+
+            if (chatId != 0 && currentChat != null) {
+                idRow = rowCount++;
+            }
+
             if (emptyRow < 0 && emptyRow2 < 0) {
                 if (hasMusic || peerColor != null || actionsView == null) {
                     emptyRow2 = rowCount++;
@@ -13456,7 +13470,21 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                     TextDetailCell detailCell = (TextDetailCell) holder.itemView;
                     boolean containsQr = false;
                     boolean containsGift = false;
-                    if (position == birthdayRow) {
+                    if (position == idRow) {
+                        long id;
+
+                        if (currentChat != null) {
+                            id = currentChat.id;
+                        } else {
+                            id = userId;
+                        }
+
+                        detailCell.setTextAndValue(
+                                Long.toString(id),
+                                "ID",
+                                false
+                        );
+                    } else if (position == birthdayRow) {
                         TLRPC.UserFull userFull = getMessagesController().getUserFull(userId);
                         if (userFull != null && userFull.birthday != null) {
                             final boolean today = BirthdayController.isToday(userFull);
@@ -14314,7 +14342,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
             if (position == infoHeaderRow || position == membersHeaderRow || position == settingsSectionRow2 ||
                     position == numberSectionRow || position == helpHeaderRow || position == debugHeaderRow || position == botPermissionsHeader) {
                 return VIEW_TYPE_HEADER;
-            } else if (position == phoneRow || position == locationRow || position == numberRow || position == birthdayRow) {
+            } else if (position == phoneRow || position == locationRow || position == numberRow || position == birthdayRow || position == idRow) {
                 return VIEW_TYPE_TEXT_DETAIL;
             } else if (position == usernameRow || position == setUsernameRow) {
                 return VIEW_TYPE_TEXT_DETAIL_MULTILINE;
@@ -15753,6 +15781,7 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
             put(++pointer, bizHoursRow, sparseIntArray);
             put(++pointer, bizLocationRow, sparseIntArray);
             put(++pointer, birthdayRow, sparseIntArray);
+            put(++pointer, idRow, sparseIntArray);
             put(++pointer, channelRow, sparseIntArray);
             put(++pointer, botStarsBalanceRow, sparseIntArray);
             put(++pointer, botTonBalanceRow, sparseIntArray);

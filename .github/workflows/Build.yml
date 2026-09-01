@@ -63,8 +63,16 @@ jobs:
 
       - name: Configure Gradle optimizations
         run: |
-          sed -i '/^org.gradle.caching=/d' gradle.properties
+          sed -i \
+            -e '/^org.gradle.caching=/d' \
+            -e '/^org.gradle.configuration-cache=/d' \
+            -e '/^org.gradle.configuration-cache.problems=/d' \
+             gradle.properties
+
           printf "\norg.gradle.caching=true\n" >> gradle.properties
+          printf "org.gradle.configuration-cache=true\n" >> gradle.properties
+          printf "org.gradle.configuration-cache.problems=warn\n" >> gradle.properties
+
           echo "Gradle properties:"
           cat gradle.properties
           
@@ -143,7 +151,6 @@ jobs:
       - name: Build APK
         run: |
           ./gradlew \
-            --build-cache \
             :TMessagesProj_App${{ inputs.app-type }}:assembleAfat${{ inputs.release-type }}
 
       - name: Upload APK

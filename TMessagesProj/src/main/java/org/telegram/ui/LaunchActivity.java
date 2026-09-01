@@ -5953,31 +5953,6 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     private boolean firstAppUpdateCheck = true;
     public void checkAppUpdate(boolean force, Browser.Progress progress) {
-        if (!ApplicationLoader.isStandaloneBuild() && !ApplicationLoader.isBetaBuild()) {
-            return;
-        }
-        if (!force && !BuildVars.CHECK_UPDATES) {
-            return;
-        }
-        if (ApplicationLoader.applicationLoaderInstance.isCustomUpdate()) {
-            final BetaUpdate prevUpdate = ApplicationLoader.applicationLoaderInstance.getUpdate();
-            final boolean first = firstAppUpdateCheck;
-            firstAppUpdateCheck = false;
-            ApplicationLoader.applicationLoaderInstance.checkUpdate(force, () -> {
-                final BetaUpdate pendingUpdate = ApplicationLoader.applicationLoaderInstance.getUpdate();
-                if (progress != null) {
-                    progress.end();
-                    if (pendingUpdate == null) {
-                        BaseFragment fragment = getLastFragment();
-                        if (fragment != null) {
-                            BulletinFactory.of(fragment).createSimpleBulletin(R.raw.chats_infotip, LocaleController.getString(R.string.YourVersionIsLatest)).show();
-                        }
-                    }
-                }
-                if (pendingUpdate != null && !ApplicationLoader.applicationLoaderInstance.isDownloadingUpdate() && (first || prevUpdate == null || pendingUpdate.higherThan(prevUpdate))) {
-                    ApplicationLoader.applicationLoaderInstance.showCustomUpdateAppPopup(LaunchActivity.this, pendingUpdate, currentAccount);
-                }
-            });
             return;
         }
         if (!force && Math.abs(System.currentTimeMillis() - SharedConfig.lastUpdateCheckTime) < MessagesController.getInstance(0).updateCheckDelay * 1000) {
@@ -7024,8 +6999,6 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         }
         if (UserConfig.getInstance(UserConfig.selectedAccount).unacceptedTermsOfService != null) {
             showTosActivity(UserConfig.selectedAccount, UserConfig.getInstance(UserConfig.selectedAccount).unacceptedTermsOfService);
-        } else if (SharedConfig.pendingAppUpdate != null && SharedConfig.pendingAppUpdate.can_not_skip) {
-            showUpdateActivity(UserConfig.selectedAccount, SharedConfig.pendingAppUpdate, true);
         }
         checkAppUpdate(false, null);
 

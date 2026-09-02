@@ -216,15 +216,7 @@ public class StoriesViewPager extends ViewPager {
     }
 
     public void checkAllowScreenshots() {
-        boolean allowScreenshots = true;
-        for (int i = 0; i < getChildCount(); i++) {
-            PageLayout layout = (PageLayout) getChildAt(i);
-            if (layout.isVisible && !layout.peerStoryView.currentStory.allowScreenshots()) {
-                allowScreenshots = false;
-                break;
-            }
-        }
-        storyViewer.allowScreenshots(allowScreenshots);
+        storyViewer.allowScreenshots(true);
     }
 
     public void onStateChanged() {

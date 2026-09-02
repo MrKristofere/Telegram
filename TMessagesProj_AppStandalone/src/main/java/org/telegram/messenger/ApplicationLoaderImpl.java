@@ -24,9 +24,6 @@ import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.Components.AlertsCreator;
 import org.telegram.ui.Components.BulletinFactory;
 import org.telegram.ui.Components.ItemOptions;
-import org.telegram.ui.Components.UpdateAppAlertDialog;
-import org.telegram.ui.Components.UpdateLayout;
-import org.telegram.ui.IUpdateLayout;
 import org.telegram.ui.LaunchActivity;
 import org.telegram.ui.SMSStatsActivity;
 import org.telegram.ui.SMSSubscribeSheet;
@@ -96,11 +93,6 @@ public class ApplicationLoaderImpl extends ApplicationLoader {
             FileLog.e(e);
         }
         return exists;
-    }
-
-    @Override
-    public IUpdateLayout takeUpdateLayout(Activity activity, ViewGroup sideMenuContainer) {
-        return new UpdateLayout(activity, sideMenuContainer);
     }
 
     @Override

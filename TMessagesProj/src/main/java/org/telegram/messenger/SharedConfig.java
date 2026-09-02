@@ -546,42 +546,7 @@ public class SharedConfig {
                 passcodeSalt = new byte[0];
             }
             lastUpdateCheckTime = preferences.getLong("appUpdateCheckTime", System.currentTimeMillis());
-            try {
-                String update = preferences.getString("appUpdate", null);
-                if (update != null) {
-                    pendingAppUpdateBuildVersion = preferences.getInt("appUpdateBuild", buildVersion());
-                    byte[] arr = Base64.decode(update, Base64.DEFAULT);
-                    if (arr != null) {
-                        SerializedData data = new SerializedData(arr);
-                        pendingAppUpdate = (TLRPC.TL_help_appUpdate) TLRPC.help_AppUpdate.TLdeserialize(data, data.readInt32(false), false);
-                        data.cleanup();
-                    }
-                }
-                if (pendingAppUpdate != null) {
-                    long updateTime = 0;
-                    int updateVersion = 0;
-                    String updateVersionString = null;
-                    try {
-                        PackageInfo packageInfo = ApplicationLoader.applicationContext.getPackageManager().getPackageInfo(ApplicationLoader.applicationContext.getPackageName(), 0);
-                        updateVersion = packageInfo.versionCode;
-                        updateVersionString = packageInfo.versionName;
-                    } catch (Exception e) {
-                        FileLog.e(e);
-                    }
-                    if (updateVersion == 0) {
-                        updateVersion = buildVersion();
-                    }
-                    if (updateVersionString == null) {
-                        updateVersionString = BuildVars.BUILD_VERSION_STRING;
-                    }
-                    if (pendingAppUpdateBuildVersion != updateVersion || pendingAppUpdate.version == null || updateVersionString.compareTo(pendingAppUpdate.version) >= 0 || BuildVars.DEBUG_PRIVATE_VERSION) {
-                        pendingAppUpdate = null;
-                        AndroidUtilities.runOnUIThread(SharedConfig::saveConfig);
-                    }
-                }
-            } catch (Exception e) {
-                FileLog.e(e);
-            }
+            pendingAppUpdate = null;
 
             preferences = ApplicationLoader.applicationContext.getSharedPreferences("mainconfig", Activity.MODE_PRIVATE);
             SaveToGallerySettingsHelper.load(preferences);
@@ -613,6 +578,7 @@ public class SharedConfig {
             if (useSystemBoldFont) {
                 AndroidUtilities.mediumTypeface = null;
             }
+
             streamMedia = preferences.getBoolean("streamMedia", true);
             saveStreamMedia = preferences.getBoolean("saveStreamMedia", true);
             pauseMusicOnRecord = preferences.getBoolean("pauseMusicOnRecord", true);
@@ -768,43 +734,11 @@ public class SharedConfig {
     }
 
     public static boolean isAppUpdateAvailable() {
-        if (pendingAppUpdate == null || pendingAppUpdate.document == null || !ApplicationLoader.isStandaloneBuild()) {
-            return false;
-        }
-        int currentVersion;
-        try {
-            PackageInfo pInfo = ApplicationLoader.applicationContext.getPackageManager().getPackageInfo(ApplicationLoader.applicationContext.getPackageName(), 0);
-            currentVersion = pInfo.versionCode;
-        } catch (Exception e) {
-            FileLog.e(e);
-            currentVersion = buildVersion();
-        }
-        return pendingAppUpdateBuildVersion == currentVersion;
+        return false;
     }
 
     public static boolean setNewAppVersionAvailable(TLRPC.TL_help_appUpdate update) {
-        String updateVersionString = null;
-        int versionCode = 0;
-        try {
-            PackageInfo packageInfo = ApplicationLoader.applicationContext.getPackageManager().getPackageInfo(ApplicationLoader.applicationContext.getPackageName(), 0);
-            versionCode = packageInfo.versionCode;
-            updateVersionString = packageInfo.versionName;
-        } catch (Exception e) {
-            FileLog.e(e);
-        }
-        if (versionCode == 0) {
-            versionCode = buildVersion();
-        }
-        if (updateVersionString == null) {
-            updateVersionString = BuildVars.BUILD_VERSION_STRING;
-        }
-        if (update.version == null || versionBiggerOrEqual(updateVersionString, update.version)) {
-            return false;
-        }
-        pendingAppUpdate = update;
-        pendingAppUpdateBuildVersion = versionCode;
-        saveConfig();
-        return true;
+        return false;
     }
 
     // returns a >= b

@@ -361,16 +361,8 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
                         try {
                             progressDialog.dismiss();
                             if ("APP_VERSION_OUTDATED".equals(error.text)) {
-                                AlertDialog dialog = AlertsCreator.showUpdateAppAlert(ExternalActionActivity.this, LocaleController.getString(R.string.UpdateAppAlert), true);
-                                if (dialog != null) {
-                                    dialog.setOnDismissListener(dialog1 -> {
-                                        setResult(RESULT_FIRST_USER, new Intent().putExtra("error", error.text));
-                                        finish();
-                                    });
-                                } else {
                                     setResult(RESULT_FIRST_USER, new Intent().putExtra("error", error.text));
                                     finish();
-                                }
                             } else if (("BOT_INVALID".equals(error.text) ||
                                     "PUBLIC_KEY_REQUIRED".equals(error.text) ||
                                     "PUBLIC_KEY_INVALID".equals(error.text)

@@ -1901,7 +1901,7 @@ public class PassportActivity extends BaseFragment implements NotificationCenter
                                             openRequestInterface();
                                         } else {
                                             if ("APP_VERSION_OUTDATED".equals(error1.text)) {
-                                                AlertsCreator.showUpdateAppAlert(getParentActivity(), LocaleController.getString(R.string.UpdateAppAlert), true);
+
                                             } else {
                                                 showAlertWithText(LocaleController.getString(R.string.AppName), error1.text);
                                             }
@@ -2392,7 +2392,7 @@ public class PassportActivity extends BaseFragment implements NotificationCenter
                 } else {
                     showEditDoneProgress(false, false);
                     if ("APP_VERSION_OUTDATED".equals(error.text)) {
-                        AlertsCreator.showUpdateAppAlert(getParentActivity(), LocaleController.getString(R.string.UpdateAppAlert), true);
+
                     } else {
                         showAlertWithText(LocaleController.getString(R.string.AppName), error.text);
                     }

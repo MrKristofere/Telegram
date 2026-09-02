@@ -6921,6 +6921,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         if (UserConfig.getInstance(UserConfig.selectedAccount).unacceptedTermsOfService != null) {
             showTosActivity(UserConfig.selectedAccount, UserConfig.getInstance(UserConfig.selectedAccount).unacceptedTermsOfService);
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            ApplicationLoader.canDrawOverlays = Settings.canDrawOverlays(this);
+        }
         if (VoIPFragment.getInstance() != null) {
             VoIPFragment.onResume();
         }

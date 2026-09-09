@@ -41120,7 +41120,7 @@ public class ChatActivity extends BaseFragment implements
                         msg.attachPath = omsg.attachPath;
                     }
                     msg.media = emedia.media;
-                    msg.noforwards = true;
+                    msg.noforwards = false;
                     MessageObject msgObj = new MessageObject(message.currentAccount, msg, false, true);
                     messages.add(msgObj);
                 }

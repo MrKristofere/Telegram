@@ -1,0 +1,43 @@
+name: Generate release.keystore
+
+on:
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate release.keystore
+        env:
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+        run: |
+          keytool -genkeypair \
+            -v \
+            -keystore release.keystore \
+            -storepass "$STORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            -alias "$KEY_ALIAS" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=ECZTG,OU=TelegramNoStock,O=TelegramNoStock"
+
+      - name: Verify keystore
+        env:
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+        run: |
+          keytool -list \
+            -keystore release.keystore \
+            -storepass "$STORE_PASSWORD" \
+            -alias "$KEY_ALIAS"
+
+      - name: Upload release.keystore
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-keystore
+          path: release.keystore
+          retention-days: 1

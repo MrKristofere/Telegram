@@ -1,0 +1,33 @@
+name: Inspect
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    name: Inspect
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: true
+          
+      - name: Check Firebase usage
+        run: |
+          echo "=== Firebase imports ==="
+          grep -RIn \
+            --include='*.java' \
+            --include='*.kt' \
+            'com.google.firebase' \
+            TMessagesProj TMessagesProj_AppStandalone \
+            || true
+
+          echo "=== Google Services plugins ==="
+          grep -RIn \
+            --include='*.gradle' \
+            --include='*.gradle.kts' \
+            'google-services\|firebase-crashlytics' \
+            . \
+            || true

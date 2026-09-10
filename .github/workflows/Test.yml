@@ -1,0 +1,323 @@
+name: Test Telegram APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch name"
+        type: string
+        default: master
+      app-type:
+        description: "App type"
+        type: choice
+        options:
+          - ""
+          - "Standalone"
+        default: ""
+      release-type:
+        description: "Release type"
+        type: choice
+        options:
+          - Release
+          - Debug
+          - Standalone
+        default: Debug
+
+env:
+  CCACHE_DIR: ~/.ccache
+  CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+  CCACHE_HARDLINK: "true"
+  CCACHE_NOHASHDIR: "true"
+  CCACHE_MAXSIZE: "10G"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.branch }}
+          submodules: recursive
+
+      - name: Configure jlatexmath Gradle module
+        if: false
+        run: |
+          grep -qF "include ':jlatexmath'" settings.gradle || \
+            echo "include ':jlatexmath'" >> settings.gradle
+
+          grep -qF "project(':jlatexmath').projectDir = file('TMessagesProj/lib/jlatexmath/jlatexmath')" settings.gradle || \
+            echo "project(':jlatexmath').projectDir = file('TMessagesProj/lib/jlatexmath/jlatexmath')" >> settings.gradle
+
+      - name: Configure Gradle optimizations
+        run: |
+          sed -i '/^org.gradle.caching=/d' gradle.properties
+          printf "\norg.gradle.caching=true\n" >> gradle.properties
+
+          echo "===== gradle.properties ====="
+          cat gradle.properties
+          echo "============================="
+
+      - name: Extract Android SDK versions
+        id: sdk
+        run: |
+          BUILD_GRADLE=TMessagesProj_App/build.gradle
+
+          echo "build_tools=$(grep -oP "buildToolsVersion ['\"]\\K[^'\"]+" "$BUILD_GRADLE")" >> "$GITHUB_OUTPUT"
+          echo "compile_sdk=$(grep -oP "compileSdk(?:Version)?\s*=?\s*\K\d+" "$BUILD_GRADLE")" >> "$GITHUB_OUTPUT"
+          echo "ndk=$(grep -oP "ndkVersion ['\"]\\K[^'\"]+" "$BUILD_GRADLE")" >> "$GITHUB_OUTPUT"
+
+          echo "===== Android versions ====="
+          echo "Build tools: $(grep -oP "buildToolsVersion ['\"]\\K[^'\"]+" "$BUILD_GRADLE")"
+          echo "Compile SDK: $(grep -oP "compileSdk(?:Version)?\s*=?\s*\K\d+" "$BUILD_GRADLE")"
+          echo "NDK:         $(grep -oP "ndkVersion ['\"]\\K[^'\"]+" "$BUILD_GRADLE")"
+          echo "============================"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            build-tools;${{ steps.sdk.outputs.build_tools }}
+            ndk;${{ steps.sdk.outputs.ndk }}
+            platforms;android-${{ steps.sdk.outputs.compile_sdk }}
+
+      - name: Configure Android SDK Path
+        run: |
+          echo "sdk.dir=${ANDROID_HOME}" >> local.properties
+
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+      - name: Inspect build tools
+        run: |
+          echo "===== JAVA ====="
+          java -version
+
+          echo
+          echo "===== GRADLE ====="
+          ./gradlew --version || true
+
+          echo
+          echo "===== CMAKE ====="
+          CMAKE_BIN=$(find "$ANDROID_HOME/cmake" -type f -name cmake -print -quit 2>/dev/null || true)
+
+          if [ -n "$CMAKE_BIN" ]; then
+            echo "CMake: $CMAKE_BIN"
+            "$CMAKE_BIN" --version
+          else
+            echo "CMake binary not found"
+          fi
+
+          echo
+          echo "===== NINJA ====="
+          find "$ANDROID_HOME" -type f -name ninja -print 2>/dev/null | while read -r ninja; do
+            echo "Ninja: $ninja"
+            "$ninja" --version
+          done
+
+          echo
+          echo "===== SAMU ====="
+          if command -v samu >/dev/null 2>&1; then
+            which samu
+            samu --version
+          else
+            echo "samu: not installed"
+          fi
+
+          echo
+          echo "===== CPU / MEMORY ====="
+          nproc
+          free -h
+
+      - name: Modify Gradle JVM Args
+        run: |
+          MEMORY_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+          MEMORY_GB=$((MEMORY_KB / 1024 / 1024))
+
+          echo "Detected memory size: ${MEMORY_GB}GB"
+
+          if [ "$MEMORY_GB" -ge 12 ]; then
+            sed -i '/^org\.gradle\.jvmargs=/d' gradle.properties
+
+            echo "org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" \
+              >> gradle.properties
+          fi
+
+          echo "===== gradle.properties ====="
+          cat gradle.properties
+          echo "============================="
+
+      - name: Fill BuildVars
+        run: |
+          sed -i -E 's/public static int APP_ID = [0-9]+;/public static int APP_ID = 6;/' \
+            TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+
+          sed -i -E 's/public static String APP_HASH = "[^"]*";/public static String APP_HASH = "eb06d4abfb49dc3eeb1aeb98ae0f581e";/' \
+            TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2.23
+        with:
+          key: android-ndk-${{ steps.sdk.outputs.ndk }}
+
+      - name: Show ccache statistics before build
+        run: |
+          echo "===== CCACHE BEFORE ====="
+          ccache -s || true
+          echo "========================="
+
+      - name: Cache native CMake / NDK build
+        uses: actions/cache@v6
+        with:
+          path: |
+            TMessagesProj/.cxx
+            TMessagesProj/build/intermediates/cxx
+            TMessagesProj/build/intermediates/cmake
+            TMessagesProj/build/intermediates/ndkBuild
+          key: ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-${{ hashFiles('TMessagesProj/jni/**', 'TMessagesProj/**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-
+            ${{ runner.os }}-ndk-
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
+
+      - name: Clean native build logs
+        run: |
+          rm -f cmake.log
+          rm -f gradle-build.log
+          rm -f native-build.log
+
+      - name: Build APK with verbose logs
+        run: |
+          echo "===== BUILD START ====="
+          date
+
+          START_TIME=$(date +%s)
+
+          ./gradlew \
+            --build-cache \
+            --console=plain \
+            --info \
+            :TMessagesProj_App${{ inputs.app-type }}:assembleAfat${{ inputs.release-type }} \
+            2>&1 | tee gradle-build.log
+
+          EXIT_CODE=${PIPESTATUS[0]}
+
+          END_TIME=$(date +%s)
+          ELAPSED=$((END_TIME - START_TIME))
+
+          echo
+          echo "===== BUILD FINISHED ====="
+          echo "Exit code: $EXIT_CODE"
+          echo "Build time: ${ELAPSED}s"
+          date
+
+          exit "$EXIT_CODE"
+
+      - name: Inspect generated CMake / Ninja files
+        if: always()
+        run: |
+          echo "===== .CXX TREE ====="
+
+          if [ -d TMessagesProj/.cxx ]; then
+            find TMessagesProj/.cxx -maxdepth 6 -type f \
+              \( \
+                -name 'build.ninja' \
+                -o -name 'CMakeCache.txt' \
+                -o -name 'cmake_install.cmake' \
+                -o -name 'build_command.txt' \
+              \) \
+              -print
+          else
+            echo "TMessagesProj/.cxx does not exist"
+          fi
+
+          echo
+          echo "===== BUILD.NINJA ====="
+
+          find TMessagesProj/.cxx -type f -name build.ninja -print 2>/dev/null
+
+          echo
+          echo "===== CMAKE GENERATOR / NINJA ====="
+
+          grep -RniE \
+            --include='CMakeCache.txt' \
+            --include='*.txt' \
+            --include='*.log' \
+            --include='build.ninja' \
+            'GNinja|CMAKE_MAKE_PROGRAM|ninja_required_version' \
+            TMessagesProj/.cxx 2>/dev/null || true
+
+      - name: Extract CMake and Ninja lines from Gradle log
+        if: always()
+        run: |
+          echo "===== CMAKE / NINJA FROM GRADLE LOG ====="
+
+          if [ -f gradle-build.log ]; then
+            grep -iE \
+              'cmake|ninja|CMAKE_MAKE_PROGRAM|GNinja|build\.ninja' \
+              gradle-build.log || true
+          else
+            echo "gradle-build.log not found"
+          fi
+
+      - name: Show native compiler commands
+        if: always()
+        run: |
+          echo "===== NATIVE COMPILER COMMANDS ====="
+
+          if [ -d TMessagesProj/.cxx ]; then
+            grep -RniE \
+              --include='build.ninja' \
+              'clang\+\+|clang |c\+\+|gcc |g\+\+' \
+              TMessagesProj/.cxx 2>/dev/null | head -200 || true
+          fi
+
+      - name: Show ccache statistics after build
+        if: always()
+        run: |
+          echo "===== CCACHE AFTER ====="
+          ccache -s || true
+          echo "========================"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          path: TMessagesProj_App${{ inputs.app-type }}/build/outputs/**/*.apk
+          archive: false
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          path: |
+            gradle-build.log
+            native-build.log
+            cmake.log
+          archive: false
+          if-no-files-found: ignore

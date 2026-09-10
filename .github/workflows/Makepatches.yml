@@ -1,0 +1,970 @@
+name: Make Independent Patches
+
+on:
+  workflow_dispatch:
+    inputs:
+
+      base:
+        description: "Base branch or commit"
+        required: true
+        default: "main"
+        type: string
+
+      commits:
+        description: "Commit SHA list separated by spaces"
+        required: true
+        type: string
+
+      reverse:
+        description: "Exclude selected commits instead of including them"
+        required: true
+        default: false
+        type: boolean
+
+      author_mode:
+        description: "Author information"
+        required: true
+        default: "original"
+        type: choice
+        options:
+          - original
+          - none
+          - custom
+
+      custom_author:
+        description: 'Custom author, e.g. "John Doe <john@example.com>"'
+        required: false
+        default: ""
+        type: string
+
+      include_message:
+        description: "Include commit message"
+        required: true
+        default: true
+        type: boolean
+
+      context:
+        description: "Number of context lines"
+        required: true
+        default: "3"
+        type: string
+
+      function_context:
+        description: "Use whole function as context"
+        required: true
+        default: false
+        type: boolean
+
+      diff_algorithm:
+        description: "Diff algorithm"
+        required: true
+        default: "histogram"
+        type: choice
+        options:
+          - histogram
+          - myers
+          - patience
+          - minimal
+
+      detect_renames:
+        description: "Detect renames"
+        required: true
+        default: false
+        type: boolean
+
+
+jobs:
+
+  build-patches:
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          fetch-tags: false
+
+
+      # ============================================================
+      # SHOW CONFIGURATION
+      # ============================================================
+      - name: Show configuration
+        env:
+          BASE: ${{ inputs.base }}
+          COMMITS: ${{ inputs.commits }}
+          REVERSE: ${{ inputs.reverse }}
+          AUTHOR_MODE: ${{ inputs.author_mode }}
+          CUSTOM_AUTHOR: ${{ inputs.custom_author }}
+          INCLUDE_MESSAGE: ${{ inputs.include_message }}
+          CONTEXT: ${{ inputs.context }}
+          FUNCTION_CONTEXT: ${{ inputs.function_context }}
+          DIFF_ALGORITHM: ${{ inputs.diff_algorithm }}
+          DETECT_RENAMES: ${{ inputs.detect_renames }}
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "Patch generator configuration"
+          echo "========================================"
+          echo "BASE:              $BASE"
+          echo "REVERSE:           $REVERSE"
+          echo "AUTHOR_MODE:       $AUTHOR_MODE"
+          echo "CUSTOM_AUTHOR:     $CUSTOM_AUTHOR"
+          echo "INCLUDE_MESSAGE:   $INCLUDE_MESSAGE"
+          echo "CONTEXT:           $CONTEXT"
+          echo "FUNCTION_CONTEXT:  $FUNCTION_CONTEXT"
+          echo "DIFF_ALGORITHM:    $DIFF_ALGORITHM"
+          echo "DETECT_RENAMES:    $DETECT_RENAMES"
+          echo
+          echo "COMMITS:"
+
+          for commit in $COMMITS; do
+            echo "  $commit"
+          done
+
+
+      # ============================================================
+      # PREPARE HISTORY
+      # ============================================================
+
+      - name: Prepare Git history
+        env:
+          BASE: ${{ inputs.base }}
+          COMMITS: ${{ inputs.commits }}
+          REVERSE: ${{ inputs.reverse }}
+
+        run: |
+          set -euo pipefail
+
+          MAX_DEPTH=100000
+
+          # ========================================================
+          # ENSURE COMMIT + PARENT
+          # ========================================================
+
+          ensure_commit_with_parent() {
+
+            local SHA="$1"
+
+            echo
+            echo "========================================"
+            echo "Preparing commit"
+            echo "========================================"
+            echo "$SHA"
+
+            # ------------------------------------------------------
+            # Validate SHA
+            # ------------------------------------------------------
+
+            if ! [[ "$SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "::error::Invalid commit SHA: $SHA"
+              exit 1
+            fi
+
+
+            # ------------------------------------------------------
+            # Make commit available
+            # ------------------------------------------------------
+
+            if git cat-file -e "${SHA}^{commit}" 2>/dev/null; then
+
+              echo "Commit already available."
+
+            else
+
+              echo "Commit is not available."
+              echo "Fetching commit..."
+
+              git fetch \
+                --no-tags \
+                --depth=1 \
+                origin \
+                "$SHA"
+
+            fi
+
+
+            # ------------------------------------------------------
+            # Verify commit now exists
+            # ------------------------------------------------------
+
+            if ! git cat-file -e "${SHA}^{commit}" 2>/dev/null; then
+
+              echo "::error::Unable to obtain commit:"
+              echo "$SHA"
+
+              exit 1
+
+            fi
+
+            echo "Commit is available."
+
+
+            # ------------------------------------------------------
+            # Find parent.
+            #
+            # IMPORTANT:
+            #
+            # Do NOT use rev-list --parents before the parent exists.
+            # In a shallow repository it will report only the commit,
+            # which looks like a root commit.
+            # ------------------------------------------------------
+
+            local PARENT=""
+
+            if PARENT="$(git rev-parse "${SHA}^" 2>/dev/null)"; then
+
+              echo "Parent already available:"
+              echo "$PARENT"
+
+            else
+
+              echo "Parent is not available."
+              echo "Starting progressive deepening..."
+
+              local DEPTH=50
+              local CURRENT_DEPTH=1
+
+              while true; do
+
+                echo
+                echo "Deepening repository by $DEPTH commits..."
+
+                git fetch \
+                  --no-tags \
+                  --deepen="$DEPTH" \
+                  origin
+
+                CURRENT_DEPTH=$((CURRENT_DEPTH + DEPTH))
+
+                if PARENT="$(git rev-parse "${SHA}^" 2>/dev/null)"; then
+                  break
+                fi
+
+                DEPTH=$((DEPTH * 2))
+
+                if [[ "$CURRENT_DEPTH" -ge "$MAX_DEPTH" ]]; then
+
+                  echo "::error::Unable to find parent of:"
+                  echo "$SHA"
+
+                  exit 1
+
+                fi
+
+              done
+
+              echo
+              echo "Parent found:"
+              echo "$PARENT"
+
+            fi
+
+
+            # ------------------------------------------------------
+            # Now parent definitely exists.
+            # Only NOW check number of parents.
+            # ------------------------------------------------------
+
+            local PARENT_COUNT
+
+            PARENT_COUNT="$(
+              git rev-list \
+                --parents \
+                -n 1 \
+                "$SHA" |
+                awk '{print NF-1}'
+            )"
+
+            echo
+            echo "Parent count: $PARENT_COUNT"
+
+
+            # ------------------------------------------------------
+            # Only ordinary single-parent commits are supported.
+            # ------------------------------------------------------
+
+            if [[ "$PARENT_COUNT" -eq 0 ]]; then
+
+              echo "::error::Commit $SHA is a root commit."
+              exit 1
+
+            fi
+
+            if [[ "$PARENT_COUNT" -gt 1 ]]; then
+
+              echo "::error::Commit $SHA is a merge commit."
+              echo "::error::Merge commits are not supported."
+              exit 1
+
+            fi
+
+
+            echo
+            echo "Commit is ready."
+            echo "Commit: $SHA"
+            echo "Parent: $PARENT"
+          }
+
+
+          # ========================================================
+          # INCLUDE MODE
+          # ========================================================
+
+          if [[ "$REVERSE" != "true" ]]; then
+
+            echo
+            echo "========================================"
+            echo "Mode: INCLUDE SELECTED COMMITS"
+            echo "========================================"
+
+            for commit in $COMMITS; do
+              ensure_commit_with_parent "$commit"
+            done
+
+          fi
+
+
+          # ========================================================
+          # REVERSE / EXCLUDE MODE
+          # ========================================================
+
+          if [[ "$REVERSE" == "true" ]]; then
+
+            echo
+            echo "========================================"
+            echo "Mode: EXCLUDE SELECTED COMMITS"
+            echo "========================================"
+
+
+            # ------------------------------------------------------
+            # Resolve BASE
+            # ------------------------------------------------------
+
+            BASE_SHA=""
+
+            if git rev-parse \
+                --verify \
+                --quiet \
+                "${BASE}^{commit}" >/dev/null 2>&1; then
+
+              BASE_SHA="$(git rev-parse "${BASE}^{commit}")"
+
+            else
+
+              echo "Fetching BASE: $BASE"
+
+              git fetch \
+                --no-tags \
+                --depth=1 \
+                origin \
+                "$BASE"
+
+              BASE_SHA="$(git rev-parse "${BASE}^{commit}")"
+
+            fi
+
+
+            HEAD_SHA="$(git rev-parse HEAD)"
+
+            echo
+            echo "BASE: $BASE_SHA"
+            echo "HEAD: $HEAD_SHA"
+
+
+            # ------------------------------------------------------
+            # Make BASE reachable from HEAD.
+            # ------------------------------------------------------
+
+            DEPTH=100
+            CURRENT_DEPTH=1
+
+            while ! git merge-base \
+                --is-ancestor \
+                "$BASE_SHA" \
+                "$HEAD_SHA" \
+                >/dev/null 2>&1; do
+
+              echo
+              echo "BASE is not reachable."
+              echo "Deepening repository by $DEPTH commits..."
+
+              git fetch \
+                --no-tags \
+                --deepen="$DEPTH" \
+                origin
+
+              CURRENT_DEPTH=$((CURRENT_DEPTH + DEPTH))
+
+              DEPTH=$((DEPTH * 2))
+
+              if [[ "$CURRENT_DEPTH" -ge "$MAX_DEPTH" ]]; then
+
+                echo "::error::Unable to make BASE reachable from HEAD."
+                exit 1
+
+              fi
+
+            done
+
+
+            echo
+            echo "BASE is reachable from HEAD."
+
+
+            # ------------------------------------------------------
+            # Verify selected commits and their parents.
+            # ------------------------------------------------------
+
+            for commit in $COMMITS; do
+              ensure_commit_with_parent "$commit"
+            done
+
+
+            echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
+            echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
+
+          fi
+
+
+      # ============================================================
+      # GENERATE PATCHES
+      # ============================================================
+
+      - name: Generate patches
+        env:
+          BASE: ${{ inputs.base }}
+          COMMITS: ${{ inputs.commits }}
+          REVERSE: ${{ inputs.reverse }}
+          AUTHOR_MODE: ${{ inputs.author_mode }}
+          CUSTOM_AUTHOR: ${{ inputs.custom_author }}
+          INCLUDE_MESSAGE: ${{ inputs.include_message }}
+          CONTEXT: ${{ inputs.context }}
+          FUNCTION_CONTEXT: ${{ inputs.function_context }}
+          DIFF_ALGORITHM: ${{ inputs.diff_algorithm }}
+          DETECT_RENAMES: ${{ inputs.detect_renames }}
+
+        run: |
+          set -euo pipefail
+
+          PATCH_DIR="patches"
+
+          rm -rf "$PATCH_DIR"
+          mkdir -p "$PATCH_DIR"
+
+
+          # ========================================================
+          # VALIDATION
+          # ========================================================
+
+          if ! [[ "$CONTEXT" =~ ^[0-9]+$ ]]; then
+            echo "::error::CONTEXT must be a non-negative integer."
+            exit 1
+          fi
+
+          if [[ "$AUTHOR_MODE" == "custom" && -z "$CUSTOM_AUTHOR" ]]; then
+            echo "::error::CUSTOM_AUTHOR is required when AUTHOR_MODE=custom."
+            exit 1
+          fi
+
+
+          # ========================================================
+          # BUILD COMMIT LIST
+          # ========================================================
+
+          SELECTED_COMMITS=()
+
+
+          # --------------------------------------------------------
+          # INCLUDE
+          # --------------------------------------------------------
+
+          if [[ "$REVERSE" != "true" ]]; then
+
+            read -ra SELECTED_COMMITS <<< "$COMMITS"
+
+          fi
+
+
+          # --------------------------------------------------------
+          # EXCLUDE
+          # --------------------------------------------------------
+
+          if [[ "$REVERSE" == "true" ]]; then
+
+            echo
+            echo "Building commit list from BASE..HEAD..."
+
+            mapfile -t ALL_COMMITS < <(
+              git rev-list \
+                --reverse \
+                "${BASE_SHA}..${HEAD_SHA}"
+            )
+
+
+            declare -A EXCLUDED=()
+
+
+            echo
+            echo "Selected commits to exclude:"
+
+            for commit in $COMMITS; do
+
+              SHA="$(git rev-parse "${commit}^{commit}")"
+
+              EXCLUDED["$SHA"]=1
+
+              echo "  $SHA"
+
+            done
+
+
+            echo
+            echo "Building resulting list..."
+
+            for commit in "${ALL_COMMITS[@]}"; do
+
+              if [[ -n "${EXCLUDED[$commit]+x}" ]]; then
+
+                echo "EXCLUDED: $commit"
+
+              else
+
+                SELECTED_COMMITS+=("$commit")
+
+              fi
+
+            done
+
+          fi
+
+
+          # ========================================================
+          # EMPTY RESULT
+          # ========================================================
+
+          if [[ ${#SELECTED_COMMITS[@]} -eq 0 ]]; then
+
+            echo "::error::No commits selected."
+            exit 1
+
+          fi
+
+
+          echo
+          echo "========================================"
+          echo "Commits to process"
+          echo "========================================"
+
+          printf '  %s\n' "${SELECTED_COMMITS[@]}"
+
+
+          # ========================================================
+          # METADATA
+          # ========================================================
+
+          {
+            echo "format=git-diff"
+            echo "full_index=true"
+            echo "context=$CONTEXT"
+            echo "function_context=$FUNCTION_CONTEXT"
+            echo "diff_algorithm=$DIFF_ALGORITHM"
+            echo "detect_renames=$DETECT_RENAMES"
+            echo "author_mode=$AUTHOR_MODE"
+            echo "include_message=$INCLUDE_MESSAGE"
+            echo "reverse=$REVERSE"
+            echo "base=$BASE"
+            echo
+            echo "commits:"
+            printf '%s\n' "${SELECTED_COMMITS[@]}"
+
+          } > "$PATCH_DIR/metadata.txt"
+
+
+          # ========================================================
+          # GENERATE ONE PATCH PER COMMIT
+          # ========================================================
+
+          NUMBER=1
+
+
+          for SHA_INPUT in "${SELECTED_COMMITS[@]}"; do
+
+            SHA="$(git rev-parse "${SHA_INPUT}^{commit}")"
+
+
+            # ------------------------------------------------------
+            # Resolve parent.
+            # ------------------------------------------------------
+
+            if ! PARENT="$(git rev-parse "${SHA}^" 2>/dev/null)"; then
+
+              echo "::error::Parent is not available for $SHA"
+              echo "::error::This should not happen after history preparation."
+
+              exit 1
+
+            fi
+
+
+            # ------------------------------------------------------
+            # Verify single parent.
+            # ------------------------------------------------------
+
+            PARENT_COUNT="$(
+              git rev-list \
+                --parents \
+                -n 1 \
+                "$SHA" |
+                awk '{print NF-1}'
+            )"
+
+
+            if [[ "$PARENT_COUNT" -ne 1 ]]; then
+
+              echo "::error::Commit $SHA is not a normal single-parent commit."
+
+              exit 1
+
+            fi
+
+
+            # ------------------------------------------------------
+            # Commit information.
+            # ------------------------------------------------------
+
+            SUBJECT="$(
+              git log \
+                -1 \
+                --format='%s' \
+                "$SHA"
+            )"
+
+
+            MESSAGE="$(
+              git log \
+                -1 \
+                --format='%b' \
+                "$SHA"
+            )"
+
+
+            AUTHOR_NAME="$(
+              git log \
+                -1 \
+                --format='%an' \
+                "$SHA"
+            )"
+
+
+            AUTHOR_EMAIL="$(
+              git log \
+                -1 \
+                --format='%ae' \
+                "$SHA"
+            )"
+
+
+            ORIGINAL_AUTHOR="${AUTHOR_NAME} <${AUTHOR_EMAIL}>"
+
+
+            # ------------------------------------------------------
+            # Safe filename.
+            # ------------------------------------------------------
+
+            SAFE_SUBJECT="$(
+              printf '%s' "$SUBJECT" |
+                tr '[:upper:]' '[:lower:]' |
+                sed \
+                  -e 's/[^a-z0-9._-]/-/g' \
+                  -e 's/-\{2,\}/-/g' \
+                  -e 's/^-//' \
+                  -e 's/-$//'
+            )"
+
+
+            SAFE_SUBJECT="${SAFE_SUBJECT:0:80}"
+
+
+            if [[ -z "$SAFE_SUBJECT" ]]; then
+              SAFE_SUBJECT="patch"
+            fi
+
+
+            PATCH_FILE="$PATCH_DIR/$(printf '%04d' "$NUMBER")-${SAFE_SUBJECT}.patch"
+
+
+            echo
+            echo "========================================"
+            echo "Patch #$NUMBER"
+            echo "========================================"
+            echo "Commit:  $SHA"
+            echo "Parent:  $PARENT"
+            echo "Subject: $SUBJECT"
+            echo "Output:  $PATCH_FILE"
+
+
+            # ======================================================
+            # PATCH HEADER
+            # ======================================================
+
+            {
+
+              # ----------------------------------------------------
+              # Author
+              # ----------------------------------------------------
+
+              case "$AUTHOR_MODE" in
+
+                original)
+
+                  printf 'Author: %s\n' "$ORIGINAL_AUTHOR"
+
+                  ;;
+
+
+                custom)
+
+                  printf 'Author: %s\n' "$CUSTOM_AUTHOR"
+
+                  ;;
+
+
+                none)
+
+                  ;;
+
+
+                *)
+
+                  echo "::error::Invalid AUTHOR_MODE: $AUTHOR_MODE"
+                  exit 1
+
+                  ;;
+
+              esac
+
+
+              # ----------------------------------------------------
+              # Commit message
+              # ----------------------------------------------------
+
+              if [[ "$INCLUDE_MESSAGE" == "true" ]]; then
+
+                if [[ "$AUTHOR_MODE" != "none" ]]; then
+                  echo
+                fi
+
+                printf '%s\n' "$SUBJECT"
+
+                if [[ -n "$MESSAGE" ]]; then
+
+                  echo
+                  printf '%s\n' "$MESSAGE"
+
+                fi
+
+              fi
+
+
+              echo
+              echo "---"
+
+
+              # ====================================================
+              # DIFF STAT
+              # ====================================================
+
+              git diff \
+                --stat \
+                "$PARENT" \
+                "$SHA"
+
+              echo
+
+
+              # ====================================================
+              # DIFF OPTIONS
+              # ====================================================
+
+              DIFF_ARGS=(
+                "--no-ext-diff"
+                "--no-color"
+                "--patch"
+                "--full-index"
+                "--indent-heuristic"
+                "--diff-algorithm=${DIFF_ALGORITHM}"
+              )
+
+
+              # ----------------------------------------------------
+              # Rename detection
+              # ----------------------------------------------------
+
+              if [[ "$DETECT_RENAMES" == "true" ]]; then
+
+                DIFF_ARGS+=(
+                  "-M"
+                )
+
+              else
+
+                DIFF_ARGS+=(
+                  "--no-renames"
+                )
+
+              fi
+
+
+              # ----------------------------------------------------
+              # Context
+              # ----------------------------------------------------
+
+              if [[ "$FUNCTION_CONTEXT" == "true" ]]; then
+
+                DIFF_ARGS+=(
+                  "--function-context"
+                )
+
+              else
+
+                DIFF_ARGS+=(
+                  "-U${CONTEXT}"
+                )
+
+              fi
+
+
+              # ----------------------------------------------------
+              # Generate diff.
+              #
+              # IMPORTANT:
+              #
+              # This compares:
+              #
+              #     PARENT -> COMMIT
+              #
+              # It does NOT cherry-pick the commit.
+              #
+              # Therefore every patch is independent.
+              # ----------------------------------------------------
+
+              git diff \
+                "${DIFF_ARGS[@]}" \
+                "$PARENT" \
+                "$SHA"
+
+
+            } > "$PATCH_FILE"
+
+
+            # ======================================================
+            # VALIDATE PATCH
+            # ======================================================
+
+            if [[ ! -s "$PATCH_FILE" ]]; then
+
+              echo "::warning::Patch is empty."
+              echo "::warning::Commit: $SHA"
+
+              rm -f "$PATCH_FILE"
+
+            else
+
+              INDEX_COUNT="$(
+                grep -c \
+                  '^index [0-9a-f]\{40\}\.\.[0-9a-f]\{40\}' \
+                  "$PATCH_FILE" ||
+                  true
+              )"
+
+
+              echo
+              echo "Full-index entries: $INDEX_COUNT"
+
+
+              BINARY_COUNT="$(
+                git diff \
+                  --numstat \
+                  "$PARENT" \
+                  "$SHA" |
+                  awk '$1 == "-" && $2 == "-" {count++} END {print count+0}'
+              )"
+
+
+              if [[ "$BINARY_COUNT" -gt 0 ]]; then
+
+                echo "::warning::Commit contains binary file changes."
+                echo "::warning::Binary data is not embedded in the patch."
+
+              fi
+
+
+              echo
+              echo "Created:"
+
+              ls -lh "$PATCH_FILE"
+
+            fi
+
+
+            NUMBER=$((NUMBER + 1))
+
+          done
+
+
+          # ========================================================
+          # SUMMARY
+          # ========================================================
+
+          echo
+          echo "========================================"
+          echo "Generated patches"
+          echo "========================================"
+
+          find "$PATCH_DIR" \
+            -maxdepth 1 \
+            -type f \
+            -print |
+            sort
+
+
+          PATCH_COUNT="$(
+            find "$PATCH_DIR" \
+              -maxdepth 1 \
+              -type f \
+              -name '*.patch' |
+              wc -l
+          )"
+
+
+          echo
+          echo "Patch count: $PATCH_COUNT"
+
+
+          echo
+          echo "Total size:"
+
+          du -sh "$PATCH_DIR"
+
+
+      # ============================================================
+      # UPLOAD
+      # ============================================================
+
+      - name: Upload patches
+        uses: actions/upload-artifact@v7
+        with:
+          name: patches
+          path: patches/
+          if-no-files-found: error
+          retention-days: 30

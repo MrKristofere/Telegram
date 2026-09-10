@@ -1,0 +1,1451 @@
+name: Apply commits to branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      strategy:
+        description: "How changes should be applied"
+        required: true
+        type: choice
+        options:
+          - cherry-pick
+          - squash
+          - merge-selected
+          - merge-branch
+          - rebase-branch
+
+      target_branch:
+        description: "Branch that receives the result"
+        required: true
+        type: string
+
+      source_branch:
+        description: "Source branch used for commit selection"
+        required: false
+        type: string
+
+      commits:
+        description: "Commit SHA(s), separated by spaces or new lines"
+        required: false
+        type: string
+
+      exclude_commits:
+        description: "If true, commits are exclusions; all other source commits are selected"
+        required: false
+        default: false
+        type: boolean
+
+      mainline_parent:
+        description: "Parent number used when replaying a merge commit"
+        required: true
+        default: "1"
+        type: string
+
+      conflict_resolution:
+        description: "Automatic conflict strategy"
+        required: true
+        default: fail
+        type: choice
+        options:
+          - fail
+          - rerere
+          - ours
+          - theirs
+
+      commit_message:
+        description: "Custom commit message"
+        required: false
+        type: string
+
+      skip_redundant:
+        description: "Skip commits whose change is already satisfied by the current tree"
+        required: true
+        default: false
+        type: boolean
+
+      dry_run:
+        description: "Show the plan without changing or pushing the target branch"
+        required: false
+        default: false
+        type: boolean
+
+      fetch_step:
+        description: "Number of commits to deepen per adaptive fetch"
+        required: true
+        default: "128"
+        type: string
+
+      max_fetch_depth:
+        description: "Maximum adaptive depth; 0 means unlimited adaptive deepening"
+        required: true
+        default: "4096"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-${{ github.repository }}-${{ inputs.target_branch }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Apply selected commits
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          fetch-tags: false
+          filter: blob:none
+          persist-credentials: true
+          show-progress: false
+
+      - name: Configure Git
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git config advice.detachedHead false
+          git config core.autocrlf false
+          git config core.safecrlf false
+          git config merge.conflictStyle zdiff3
+
+          git config rerere.enabled true
+          git config rerere.autoupdate true
+
+          git config pull.rebase false
+          git config rebase.autoStash false
+          git config rebase.autoSquash false
+          git config rebase.updateRefs false
+          git config rebase.missingCommitsCheck error
+
+      - name: Plan and apply
+        shell: bash
+        env:
+          STRATEGY: ${{ inputs.strategy }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          COMMITS_INPUT: ${{ inputs.commits }}
+          EXCLUDE_COMMITS: ${{ inputs.exclude_commits }}
+          MAINLINE_PARENT: ${{ inputs.mainline_parent }}
+          CONFLICT_RESOLUTION: ${{ inputs.conflict_resolution }}
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
+          SKIP_REDUNDANT: ${{ inputs.skip_redundant }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FETCH_STEP: ${{ inputs.fetch_step }}
+          MAX_FETCH_DEPTH: ${{ inputs.max_fetch_depth }}
+        run: |
+          set -Eeuo pipefail
+
+          TMP="$RUNNER_TEMP/apply-commits"
+
+          rm -rf "$TMP"
+          mkdir -p "$TMP"
+
+          error() {
+            echo "::error::$*" >&2
+            exit 1
+          }
+
+          warning() {
+            echo "::warning::$*" >&2
+          }
+
+          notice() {
+            echo "::notice::$*"
+          }
+
+          count_file() {
+            if [[ -s "$1" ]]; then
+              wc -l < "$1" | tr -d ' '
+            else
+              echo "0"
+            fi
+          }
+
+          normalize_list() {
+            tr '[:space:]' '\n' |
+              sed '/^[[:space:]]*$/d' |
+              sed 's/^[[:space:]]*//' |
+              sed 's/[[:space:]]*$//' |
+              awk '!seen[$0]++'
+          }
+
+          parent_count() {
+            git rev-list --parents -n 1 "$1" |
+              awk '{print NF - 1}'
+          }
+
+          commit_parent() {
+            local sha="$1"
+            local number="$2"
+
+            git rev-list --parents -n 1 "$sha" |
+              awk -v n="$number" 'NF > n { print $(n + 1) }'
+          }
+
+          is_commit() {
+            git cat-file -e "$1^{commit}" 2>/dev/null
+          }
+
+          tree_of() {
+            git rev-parse "$1^{tree}"
+          }
+
+          unresolved() {
+            git diff --name-only --diff-filter=U
+          }
+
+          resolve_conflicts() {
+            case "$CONFLICT_RESOLUTION" in
+              fail)
+                echo "::error::Unresolved conflicts:"
+                unresolved || true
+                return 1
+                ;;
+
+              rerere)
+                git rerere || true
+                git add -A
+
+                if unresolved | grep -q .; then
+                  return 1
+                fi
+                ;;
+
+              ours)
+                git checkout --ours -- . || true
+                git add -A
+
+                if unresolved | grep -q .; then
+                  return 1
+                fi
+                ;;
+
+              theirs)
+                git checkout --theirs -- . || true
+                git add -A
+
+                if unresolved | grep -q .; then
+                  return 1
+                fi
+                ;;
+            esac
+          }
+
+          # ============================================================
+          # VALIDATION
+          # ============================================================
+
+          case "$STRATEGY" in
+            cherry-pick|squash|merge-selected|merge-branch|rebase-branch)
+              ;;
+            *)
+              error "Unknown strategy: $STRATEGY"
+              ;;
+          esac
+
+          [[ -n "$TARGET_BRANCH" ]] ||
+            error "target_branch is required"
+
+          git check-ref-format --branch "$TARGET_BRANCH" >/dev/null 2>&1 ||
+            error "Invalid target branch: $TARGET_BRANCH"
+
+          if [[ -n "$SOURCE_BRANCH" ]]; then
+            git check-ref-format --branch "$SOURCE_BRANCH" >/dev/null 2>&1 ||
+              error "Invalid source branch: $SOURCE_BRANCH"
+          fi
+
+          [[ "$MAINLINE_PARENT" =~ ^[1-9][0-9]*$ ]] ||
+            error "mainline_parent must be a positive integer"
+
+          [[ "$FETCH_STEP" =~ ^[1-9][0-9]*$ ]] ||
+            error "fetch_step must be a positive integer"
+
+          [[ "$MAX_FETCH_DEPTH" =~ ^[0-9]+$ ]] ||
+            error "max_fetch_depth must be 0 or a positive integer"
+
+          case "$CONFLICT_RESOLUTION" in
+            fail|rerere|ours|theirs)
+              ;;
+            *)
+              error "Invalid conflict_resolution: $CONFLICT_RESOLUTION"
+              ;;
+          esac
+
+          if [[ "$EXCLUDE_COMMITS" == "true" ]]; then
+            [[ -n "$SOURCE_BRANCH" ]] ||
+              error "exclude_commits=true requires source_branch"
+
+            [[ -n "$COMMITS_INPUT" ]] ||
+              error "exclude_commits=true requires commits"
+          fi
+
+          case "$STRATEGY" in
+            merge-branch|rebase-branch)
+              [[ -n "$SOURCE_BRANCH" ]] ||
+                error "$STRATEGY requires source_branch"
+              ;;
+
+            cherry-pick|squash|merge-selected)
+              if [[ -z "$SOURCE_BRANCH" &&
+                    -z "$COMMITS_INPUT" ]]; then
+                error "$STRATEGY requires source_branch or commits"
+              fi
+              ;;
+          esac
+
+          if [[ "$STRATEGY" == "cherry-pick" &&
+                -n "$COMMIT_MESSAGE" ]]; then
+
+            MESSAGE_COUNT=$(
+              printf '%s\n' "$COMMITS_INPUT" |
+                normalize_list |
+                wc -l |
+                tr -d ' '
+            )
+
+            [[ "$MESSAGE_COUNT" -eq 1 ]] ||
+              error \
+                "commit_message for cherry-pick requires exactly one requested commit"
+          fi
+
+          if [[ "$STRATEGY" == "rebase-branch" &&
+                -n "$COMMIT_MESSAGE" ]]; then
+            warning "commit_message is ignored by rebase-branch"
+          fi
+
+          # ============================================================
+          # FETCH TARGET
+          # ============================================================
+
+          echo "Fetching target tip..."
+
+          git fetch \
+            --no-tags \
+            --filter=blob:none \
+            origin \
+            "+refs/heads/$TARGET_BRANCH:refs/remotes/origin/$TARGET_BRANCH"
+
+          TARGET_SHA=$(
+            git rev-parse \
+              "refs/remotes/origin/$TARGET_BRANCH^{commit}"
+          )
+
+          SOURCE_SHA=""
+
+          # ============================================================
+          # FETCH SOURCE
+          # ============================================================
+
+          if [[ -n "$SOURCE_BRANCH" ]]; then
+            echo "Fetching source tip..."
+
+            git fetch \
+              --no-tags \
+              --filter=blob:none \
+              origin \
+              "+refs/heads/$SOURCE_BRANCH:refs/remotes/origin/$SOURCE_BRANCH"
+
+            SOURCE_SHA=$(
+              git rev-parse \
+                "refs/remotes/origin/$SOURCE_BRANCH^{commit}"
+            )
+          fi
+
+          TARGET_DEPTH=1
+          SOURCE_DEPTH=1
+
+          # ============================================================
+          # ADAPTIVE DEEPENING
+          # ============================================================
+
+          deepen_target() {
+            if [[ "$MAX_FETCH_DEPTH" -ne 0 &&
+                  "$TARGET_DEPTH" -ge "$MAX_FETCH_DEPTH" ]]; then
+              return 1
+            fi
+
+            local next=$((TARGET_DEPTH + FETCH_STEP))
+
+            if [[ "$MAX_FETCH_DEPTH" -ne 0 &&
+                  "$next" -gt "$MAX_FETCH_DEPTH" ]]; then
+              next="$MAX_FETCH_DEPTH"
+            fi
+
+            local amount=$((next - TARGET_DEPTH))
+
+            git fetch \
+              --no-tags \
+              --filter=blob:none \
+              --deepen="$amount" \
+              origin \
+              "+refs/heads/$TARGET_BRANCH:refs/remotes/origin/$TARGET_BRANCH"
+
+            TARGET_DEPTH="$next"
+
+            return 0
+          }
+
+          deepen_source() {
+            [[ -n "$SOURCE_BRANCH" ]] ||
+              return 1
+
+            if [[ "$MAX_FETCH_DEPTH" -ne 0 &&
+                  "$SOURCE_DEPTH" -ge "$MAX_FETCH_DEPTH" ]]; then
+              return 1
+            fi
+
+            local next=$((SOURCE_DEPTH + FETCH_STEP))
+
+            if [[ "$MAX_FETCH_DEPTH" -ne 0 &&
+                  "$next" -gt "$MAX_FETCH_DEPTH" ]]; then
+              next="$MAX_FETCH_DEPTH"
+            fi
+
+            local amount=$((next - SOURCE_DEPTH))
+
+            git fetch \
+              --no-tags \
+              --filter=blob:none \
+              --deepen="$amount" \
+              origin \
+              "+refs/heads/$SOURCE_BRANCH:refs/remotes/origin/$SOURCE_BRANCH"
+
+            SOURCE_DEPTH="$next"
+
+            return 0
+          }
+
+          ensure_merge_base() {
+            [[ -n "$SOURCE_SHA" ]] ||
+              return 1
+
+            while true; do
+              mapfile -t BASES < <(
+                git merge-base \
+                  --all \
+                  "$TARGET_SHA" \
+                  "$SOURCE_SHA" \
+                  2>/dev/null || true
+              )
+
+              if (( ${#BASES[@]} > 0 )); then
+                printf '%s\n' "${BASES[@]}"
+                return 0
+              fi
+
+              if deepen_source; then
+                continue
+              fi
+
+              if deepen_target; then
+                continue
+              fi
+
+              return 1
+            done
+          }
+
+          # ============================================================
+          # NORMALIZE EXPLICIT COMMITS
+          # ============================================================
+
+          : > "$TMP/input"
+
+          if [[ -n "$COMMITS_INPUT" ]]; then
+            while IFS= read -r value; do
+              [[ -n "$value" ]] || continue
+
+              [[ "$value" =~ ^[0-9a-fA-F]{7,64}$ ]] ||
+                error "Invalid commit SHA: $value"
+
+              if ! is_commit "$value"; then
+                git fetch \
+                  --no-tags \
+                  --filter=blob:none \
+                  origin \
+                  "$value" ||
+                  error "Unable to fetch commit object: $value"
+              fi
+
+              SHA=$(
+                git rev-parse \
+                  "$value^{commit}" \
+                  2>/dev/null
+              ) ||
+                error "Unable to resolve commit: $value"
+
+              printf '%s\n' "$SHA"
+
+            done < <(
+              printf '%s\n' "$COMMITS_INPUT" |
+                normalize_list
+            ) |
+              awk '!seen[$0]++' \
+              > "$TMP/input"
+          fi
+
+          INPUT_COUNT=$(count_file "$TMP/input")
+
+          # ============================================================
+          # SOURCE HISTORY
+          # ============================================================
+
+          MERGE_BASE=""
+
+          if [[ -n "$SOURCE_SHA" ]]; then
+
+            mapfile -t BASES < <(
+              ensure_merge_base
+            ) ||
+              error \
+                "Unable to establish common history between target and source"
+
+            MERGE_BASE="${BASES[0]}"
+
+            if (( ${#BASES[@]} > 1 )); then
+              warning \
+                "Multiple merge bases detected; using source commits not reachable from target."
+            fi
+
+            git rev-list \
+              --topo-order \
+              --reverse \
+              "$SOURCE_SHA" \
+              --not "$TARGET_SHA" \
+              > "$TMP/source_history"
+
+          else
+            : > "$TMP/source_history"
+          fi
+
+          SOURCE_COUNT=$(count_file "$TMP/source_history")
+
+          # ============================================================
+          # BUILD SELECTION
+          # ============================================================
+
+          : > "$TMP/selected"
+
+          case "$STRATEGY" in
+
+            merge-branch|rebase-branch)
+
+              cp \
+                "$TMP/source_history" \
+                "$TMP/selected"
+              ;;
+
+            cherry-pick|squash|merge-selected)
+
+              if [[ "$EXCLUDE_COMMITS" == "true" ]]; then
+
+                # ALL source commits MINUS explicitly excluded commits.
+
+                awk '
+                  NR == FNR {
+                    excluded[$1] = 1
+                    next
+                  }
+
+                  !excluded[$1] {
+                    print $1
+                  }
+                ' \
+                  "$TMP/input" \
+                  "$TMP/source_history" \
+                  > "$TMP/selected"
+
+              elif [[ -n "$SOURCE_BRANCH" &&
+                      -n "$COMMITS_INPUT" ]]; then
+
+                # Explicit allow-list.
+                # Keep source topology order.
+
+                awk '
+                  NR == FNR {
+                    wanted[$1] = 1
+                    next
+                  }
+
+                  wanted[$1] {
+                    print $1
+                  }
+                ' \
+                  "$TMP/input" \
+                  "$TMP/source_history" \
+                  > "$TMP/selected"
+
+                sort -u \
+                  "$TMP/input" \
+                  > "$TMP/input.sorted"
+
+                sort -u \
+                  "$TMP/selected" \
+                  > "$TMP/selected.sorted"
+
+                MISSING=$(
+                  comm \
+                    -23 \
+                    "$TMP/input.sorted" \
+                    "$TMP/selected.sorted"
+                )
+
+                [[ -z "$MISSING" ]] ||
+                  error \
+                    "Requested commit(s) are not reachable from source_branch: $MISSING"
+
+              elif [[ -n "$COMMITS_INPUT" ]]; then
+
+                # Explicit SHA list without source branch.
+                cp \
+                  "$TMP/input" \
+                  "$TMP/selected"
+
+              elif [[ -n "$SOURCE_BRANCH" ]]; then
+
+                cp \
+                  "$TMP/source_history" \
+                  "$TMP/selected"
+              fi
+              ;;
+          esac
+
+          awk '!seen[$0]++' \
+            "$TMP/selected" \
+            > "$TMP/selected.unique"
+
+          mv \
+            "$TMP/selected.unique" \
+            "$TMP/selected"
+
+          SELECTED_COUNT=$(count_file "$TMP/selected")
+
+          # ============================================================
+          # PRE-FLIGHT
+          #
+          # Important:
+          #
+          # ancestry != patch already applied
+          #
+          # A commit can be absent from target history while its change
+          # is already present in the target tree.
+          #
+          # Example:
+          #
+          #   commit: delete obsolete/directory/
+          #   target: obsolete/directory/ does not exist
+          #
+          # The commit must be SKIPPED, not cherry-picked.
+          # ============================================================
+
+          : > "$TMP/already_applied"
+          : > "$TMP/applicable"
+
+          preflight() {
+            local SHA="$1"
+            local CURRENT="$2"
+
+            local PARENT_COUNT
+            PARENT_COUNT=$(parent_count "$SHA")
+
+            local BASE
+
+            if [[ "$PARENT_COUNT" -eq 0 ]]; then
+              # Empty tree for SHA-1 repositories.
+              BASE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+            else
+              BASE=$(commit_parent \
+                "$SHA" \
+                "$MAINLINE_PARENT") ||
+                return 2
+
+              [[ -n "$BASE" ]] ||
+                return 2
+            fi
+
+            local CURRENT_TREE
+            CURRENT_TREE=$(tree_of "$CURRENT")
+
+            local RESULT
+            local RC
+
+            set +e
+
+            RESULT=$(
+              git merge-tree \
+                --write-tree \
+                --no-messages \
+                --merge-base="$BASE" \
+                "$CURRENT" \
+                "$SHA" \
+                2>/dev/null
+            )
+
+            RC=$?
+
+            set -e
+
+            if [[ "$RC" -eq 0 ]]; then
+
+              if [[ "$RESULT" == "$CURRENT_TREE" ]]; then
+                echo "SATISFIED"
+              else
+                echo "APPLY"
+              fi
+
+              return 0
+            fi
+
+            if [[ "$RC" -eq 1 ]]; then
+              echo "CONFLICT"
+              return 0
+            fi
+
+            return 2
+          }
+
+          if [[ "$SELECTED_COUNT" -gt 0 ]]; then
+
+            while IFS= read -r SHA; do
+
+              [[ -n "$SHA" ]] || continue
+
+              # --------------------------------------------------------
+              # Exact commit already exists in target history.
+              # --------------------------------------------------------
+
+              if git merge-base \
+                --is-ancestor \
+                "$SHA" \
+                "$TARGET_SHA" \
+                2>/dev/null; then
+
+                printf '%s\n' "$SHA" \
+                  >> "$TMP/already_applied"
+
+                continue
+              fi
+
+              # --------------------------------------------------------
+              # The commit may not exist in target history but its
+              # EFFECT may already be present.
+              # --------------------------------------------------------
+
+              if [[ "$SKIP_REDUNDANT" == "true" ]]; then
+
+                STATE=$(
+                  preflight \
+                    "$SHA" \
+                    "$TARGET_SHA"
+                ) ||
+                  error \
+                    "Preflight failed for $SHA"
+
+                if [[ "$STATE" == "SATISFIED" ]]; then
+
+                  printf '%s\n' "$SHA" \
+                    >> "$TMP/already_applied"
+
+                  continue
+                fi
+              fi
+
+              printf '%s\n' "$SHA" \
+                >> "$TMP/applicable"
+
+            done < "$TMP/selected"
+          fi
+
+          ALREADY_COUNT=$(count_file "$TMP/already_applied")
+          EXECUTABLE_COUNT=$(count_file "$TMP/applicable")
+
+          # ============================================================
+          # PLAN SUMMARY
+          # ============================================================
+
+          echo
+          echo "============================================================"
+          echo "PLAN"
+          echo "============================================================"
+          echo "Strategy:            $STRATEGY"
+          echo "Target branch:       $TARGET_BRANCH"
+          echo "Source branch:       ${SOURCE_BRANCH:-<none>}"
+          echo "Exclude mode:        $EXCLUDE_COMMITS"
+          echo "Input commits:       $INPUT_COUNT"
+          echo "Source commits:      $SOURCE_COUNT"
+          echo "Selected commits:    $SELECTED_COUNT"
+          echo "Already satisfied:   $ALREADY_COUNT"
+          echo "Commits to replay:   $EXECUTABLE_COUNT"
+          echo "Target SHA:          $TARGET_SHA"
+          echo "Source SHA:          ${SOURCE_SHA:-<none>}"
+          echo "Merge base:          ${MERGE_BASE:-<none>}"
+          echo "Target depth:        $TARGET_DEPTH"
+          echo "Source depth:        $SOURCE_DEPTH"
+          echo "============================================================"
+
+          if [[ "$ALREADY_COUNT" -gt 0 ]]; then
+            echo
+            echo "Skipped commits:"
+            sed 's/^/  /' "$TMP/already_applied"
+          fi
+
+          if [[ "$EXECUTABLE_COUNT" -gt 0 ]]; then
+            echo
+            echo "Commits to replay:"
+
+            while IFS= read -r SHA; do
+
+              [[ -n "$SHA" ]] || continue
+
+              printf \
+                '  %s  %s\n' \
+                "$SHA" \
+                "$(git log -1 --format='%s' "$SHA")"
+
+            done < "$TMP/applicable"
+          fi
+
+          # ============================================================
+          # DRY RUN
+          # ============================================================
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo
+            echo "Dry run: no changes will be pushed."
+            exit 0
+          fi
+
+          # ============================================================
+          # START FROM TARGET
+          # ============================================================
+
+          git switch \
+            --detach \
+            "$TARGET_SHA"
+
+          [[ -z "$(git status --porcelain)" ]] ||
+            error \
+              "Working tree is dirty before operation"
+
+          # ============================================================
+          # REPLAY ONE COMMIT
+          # ============================================================
+
+          replay_one() {
+
+            local SHA="$1"
+            local NO_COMMIT="$2"
+
+            local PARENT_COUNT
+            PARENT_COUNT=$(parent_count "$SHA")
+
+            local ARGS=(
+              cherry-pick
+              --no-edit
+            )
+
+            if [[ "$NO_COMMIT" == "true" ]]; then
+              ARGS+=(--no-commit)
+            fi
+
+            if (( PARENT_COUNT > 1 )); then
+
+              (( MAINLINE_PARENT <= PARENT_COUNT )) ||
+                error \
+                  "Commit $SHA has $PARENT_COUNT parents; mainline_parent=$MAINLINE_PARENT is invalid"
+
+              ARGS+=(
+                -m
+                "$MAINLINE_PARENT"
+              )
+            fi
+
+            case "$CONFLICT_RESOLUTION" in
+
+              ours)
+                ARGS+=(
+                  "-Xours"
+                )
+                ;;
+
+              theirs)
+                ARGS+=(
+                  "-Xtheirs"
+                )
+                ;;
+
+              rerere)
+                ARGS+=(
+                  --rerere-autoupdate
+                )
+                ;;
+
+            esac
+
+            if git "${ARGS[@]}" "$SHA"; then
+              return 0
+            fi
+
+            echo
+            echo "Conflict while replaying:"
+            echo "$SHA"
+
+            if ! resolve_conflicts; then
+              git cherry-pick --abort || true
+              return 1
+            fi
+
+            if git rev-parse \
+              --verify \
+              CHERRY_PICK_HEAD \
+              >/dev/null 2>&1; then
+
+              git cherry-pick --continue || {
+                git cherry-pick --abort || true
+                return 1
+              }
+            fi
+
+            return 0
+          }
+
+          # ============================================================
+          # SELECTIVE REPLAY ENGINE
+          #
+          # This is the common primitive for:
+          #
+          #   cherry-pick
+          #   squash
+          #   selective merge
+          #   selective rebase
+          #
+          # The preflight is repeated immediately before every commit,
+          # because an earlier selected commit may have made a later
+          # commit obsolete/empty.
+          # ============================================================
+
+          replay_selected() {
+
+            local SQUASH="$1"
+
+            while IFS= read -r SHA; do
+
+              [[ -n "$SHA" ]] || continue
+
+              if [[ "$SKIP_REDUNDANT" == "true" ]]; then
+
+                STATE=$(
+                  preflight \
+                    "$SHA" \
+                    "$(git rev-parse HEAD)"
+                ) ||
+                  error \
+                    "Preflight failed for $SHA"
+
+                if [[ "$STATE" == "SATISFIED" ]]; then
+
+                  echo
+                  echo "SKIP(already-satisfied): $SHA"
+
+                  continue
+                fi
+              fi
+
+              echo
+              echo "------------------------------------------------------------"
+              echo "REPLAY: $SHA"
+              echo "$(git log -1 --format='%s' "$SHA")"
+              echo "------------------------------------------------------------"
+
+              if [[ "$SQUASH" == "true" ]]; then
+                replay_one \
+                  "$SHA" \
+                  "true" ||
+                  error \
+                    "Failed to replay $SHA during squash"
+              else
+                replay_one \
+                  "$SHA" \
+                  "false" ||
+                  error \
+                    "Failed to replay $SHA"
+              fi
+
+            done < "$TMP/applicable"
+          }
+
+          FINAL_SHA="$TARGET_SHA"
+
+          # ============================================================
+          # CHERRY-PICK
+          # ============================================================
+
+          if [[ "$STRATEGY" == "cherry-pick" ]]; then
+
+            if [[ "$EXECUTABLE_COUNT" -eq 0 ]]; then
+
+              notice \
+                "No commit needs to be cherry-picked; target is already satisfied."
+
+            else
+
+              while IFS= read -r SHA; do
+
+                [[ -n "$SHA" ]] || continue
+
+                # Re-check against CURRENT HEAD.
+
+                if [[ "$SKIP_REDUNDANT" == "true" ]]; then
+
+                  STATE=$(
+                    preflight \
+                      "$SHA" \
+                      "$(git rev-parse HEAD)"
+                  ) ||
+                    error \
+                      "Preflight failed for $SHA"
+
+                  if [[ "$STATE" == "SATISFIED" ]]; then
+                    echo "SKIP(already-satisfied): $SHA"
+                    continue
+                  fi
+                fi
+
+                PARENT_COUNT=$(
+                  parent_count "$SHA"
+                )
+
+                if [[ "$EXECUTABLE_COUNT" -eq 1 &&
+                      -n "$COMMIT_MESSAGE" ]]; then
+
+                  ARGS=(
+                    cherry-pick
+                    --no-commit
+                  )
+
+                  if (( PARENT_COUNT > 1 )); then
+                    ARGS+=(
+                      -m
+                      "$MAINLINE_PARENT"
+                    )
+                  fi
+
+                  case "$CONFLICT_RESOLUTION" in
+                    ours)
+                      ARGS+=("-Xours")
+                      ;;
+                    theirs)
+                      ARGS+=("-Xtheirs")
+                      ;;
+                    rerere)
+                      ARGS+=(--rerere-autoupdate)
+                      ;;
+                  esac
+
+                  if ! git "${ARGS[@]}" "$SHA"; then
+
+                    resolve_conflicts ||
+                      {
+                        git cherry-pick --abort || true
+                        error \
+                          "Cherry-pick failed for $SHA"
+                      }
+
+                    if git rev-parse \
+                      --verify \
+                      CHERRY_PICK_HEAD \
+                      >/dev/null 2>&1; then
+
+                      git cherry-pick --continue || {
+                        git cherry-pick --abort || true
+                        error \
+                          "Cherry-pick failed for $SHA"
+                      }
+                    fi
+                  fi
+
+                  if git diff --cached --quiet; then
+                    notice \
+                      "Commit became empty after application; skipped: $SHA"
+                  else
+                    git commit \
+                      -m "$COMMIT_MESSAGE"
+                  fi
+
+                else
+
+                  replay_one \
+                    "$SHA" \
+                    "false" ||
+                    error \
+                      "Cherry-pick failed for $SHA"
+
+                fi
+
+              done < "$TMP/applicable"
+            fi
+
+            FINAL_SHA=$(git rev-parse HEAD)
+
+          # ============================================================
+          # SQUASH
+          # ============================================================
+
+          elif [[ "$STRATEGY" == "squash" ]]; then
+
+            if [[ "$EXECUTABLE_COUNT" -eq 0 ]]; then
+
+              notice \
+                "Nothing to squash; all selected changes are already satisfied."
+
+            else
+
+              replay_selected \
+                "true"
+
+              if git diff --cached --quiet; then
+
+                notice \
+                  "Squash became empty after replay; nothing to commit."
+
+              else
+
+                if [[ -n "$COMMIT_MESSAGE" ]]; then
+                  SQUASH_MESSAGE="$COMMIT_MESSAGE"
+                else
+                  SQUASH_MESSAGE="Squash selected commits"
+                fi
+
+                git commit \
+                  -m "$SQUASH_MESSAGE"
+              fi
+            fi
+
+            FINAL_SHA=$(git rev-parse HEAD)
+
+          # ============================================================
+          # MERGE
+          # ============================================================
+
+          elif [[ "$STRATEGY" == "merge-selected" ||
+                  "$STRATEGY" == "merge-branch" ]]; then
+
+            if [[ "$STRATEGY" == "merge-branch" &&
+                  "$INPUT_COUNT" -eq 0 &&
+                  "$EXCLUDE_COMMITS" == "false" ]]; then
+
+              # Native merge is used only when there is no selection
+              # requirement.
+
+              MERGE_ARGS=(
+                merge
+                --no-ff
+                --no-edit
+              )
+
+              case "$CONFLICT_RESOLUTION" in
+                ours)
+                  MERGE_ARGS+=("-Xours")
+                  ;;
+                theirs)
+                  MERGE_ARGS+=("-Xtheirs")
+                  ;;
+                rerere)
+                  MERGE_ARGS+=(--rerere-autoupdate)
+                  ;;
+              esac
+
+              if [[ -n "$COMMIT_MESSAGE" ]]; then
+                MERGE_ARGS+=(
+                  -m
+                  "$COMMIT_MESSAGE"
+                )
+              fi
+
+              if ! git "${MERGE_ARGS[@]}" "$SOURCE_SHA"; then
+
+                resolve_conflicts ||
+                  {
+                    git merge --abort || true
+                    error \
+                      "Native merge failed"
+                  }
+
+                if git rev-parse \
+                  --verify \
+                  MERGE_HEAD \
+                  >/dev/null 2>&1; then
+
+                  if [[ -n "$COMMIT_MESSAGE" ]]; then
+                    git commit \
+                      -m "$COMMIT_MESSAGE"
+                  else
+                    git commit \
+                      -m "Merge $SOURCE_BRANCH"
+                  fi
+                fi
+              fi
+
+            else
+
+              # Selective merge:
+              #
+              # TARGET
+              #    \
+              #     temporary side branch
+              #        + selected commits only
+              #    /
+              # TARGET <- merge
+              #
+              # This keeps merge semantics while making cherry-pick
+              # the primitive for selecting changes.
+
+              SIDE_BRANCH="__workflow_replay_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+
+              git switch \
+                -c "$SIDE_BRANCH" \
+                "$TARGET_SHA"
+
+              replay_selected \
+                "false"
+
+              SIDE_SHA=$(git rev-parse HEAD)
+
+              git switch \
+                --detach \
+                "$TARGET_SHA"
+
+              if [[ "$SIDE_SHA" == "$TARGET_SHA" ]]; then
+
+                notice \
+                  "Selective merge has no remaining changes."
+
+              else
+
+                MERGE_ARGS=(
+                  merge
+                  --no-ff
+                  --no-edit
+                )
+
+                case "$CONFLICT_RESOLUTION" in
+                  ours)
+                    MERGE_ARGS+=("-Xours")
+                    ;;
+                  theirs)
+                    MERGE_ARGS+=("-Xtheirs")
+                    ;;
+                  rerere)
+                    MERGE_ARGS+=(--rerere-autoupdate)
+                    ;;
+                esac
+
+                if [[ -n "$COMMIT_MESSAGE" ]]; then
+                  MERGE_ARGS+=(
+                    -m
+                    "$COMMIT_MESSAGE"
+                  )
+                fi
+
+                if ! git "${MERGE_ARGS[@]}" "$SIDE_SHA"; then
+
+                  resolve_conflicts ||
+                    {
+                      git merge --abort || true
+                      error \
+                        "Selective merge failed"
+                    }
+
+                  if git rev-parse \
+                    --verify \
+                    MERGE_HEAD \
+                    >/dev/null 2>&1; then
+
+                    if [[ -n "$COMMIT_MESSAGE" ]]; then
+                      git commit \
+                        -m "$COMMIT_MESSAGE"
+                    else
+                      git commit \
+                        -m "Merge selected commits"
+                    fi
+                  fi
+                fi
+              fi
+
+              git branch \
+                -D \
+                "$SIDE_BRANCH" \
+                >/dev/null 2>&1 || true
+            fi
+
+            FINAL_SHA=$(git rev-parse HEAD)
+
+          # ============================================================
+          # REBASE
+          # ============================================================
+
+          elif [[ "$STRATEGY" == "rebase-branch" ]]; then
+
+            if [[ "$INPUT_COUNT" -eq 0 &&
+                  "$EXCLUDE_COMMITS" == "false" ]]; then
+
+              # No selection/exclusion:
+              # native rebase is appropriate.
+
+              git switch \
+                --detach \
+                "$SOURCE_SHA"
+
+              REBASE_ARGS=(
+                rebase
+                --onto
+                "$TARGET_SHA"
+                --rebase-merges
+                --empty=drop
+              )
+
+              case "$CONFLICT_RESOLUTION" in
+                ours)
+                  REBASE_ARGS+=("-Xours")
+                  ;;
+                theirs)
+                  REBASE_ARGS+=("-Xtheirs")
+                  ;;
+              esac
+
+              REBASE_ARGS+=(
+                "$MERGE_BASE"
+                "$SOURCE_SHA"
+              )
+
+              if ! git "${REBASE_ARGS[@]}"; then
+
+                if ! resolve_conflicts; then
+                  git rebase --abort || true
+                  error \
+                    "Native rebase failed"
+                fi
+
+                while [[ -d .git/rebase-merge ||
+                         -d .git/rebase-apply ]]; do
+
+                  git rebase --continue || {
+
+                    if ! resolve_conflicts; then
+                      git rebase --abort || true
+                      error \
+                        "Unable to resolve rebase conflict"
+                    fi
+
+                    git rebase --continue || {
+                      git rebase --abort || true
+                      error \
+                        "Rebase continuation failed"
+                    }
+                  }
+                done
+              fi
+
+            else
+
+              # Selective rebase:
+              #
+              # It is intentionally implemented as selective replay.
+              # This is the important guarantee of this workflow:
+              # selection/exclusion is authoritative even when the
+              # requested high-level strategy is "rebase".
+
+              replay_selected \
+                "false"
+            fi
+
+            FINAL_SHA=$(git rev-parse HEAD)
+          fi
+
+          # ============================================================
+          # FINAL VALIDATION
+          # ============================================================
+
+          [[ -z "$(git status --porcelain)" ]] ||
+            error \
+              "Working tree is dirty after operation"
+
+          echo
+          echo "============================================================"
+          echo "RESULT"
+          echo "============================================================"
+          echo "Original target: $TARGET_SHA"
+          echo "Final result:    $FINAL_SHA"
+          echo "============================================================"
+
+          if [[ "$FINAL_SHA" == "$TARGET_SHA" ]]; then
+
+            notice \
+              "No changes need to be pushed."
+
+            exit 0
+          fi
+
+          # ============================================================
+          # RACE PROTECTION
+          # ============================================================
+
+          git fetch \
+            --no-tags \
+            --filter=blob:none \
+            origin \
+            "+refs/heads/$TARGET_BRANCH:refs/remotes/origin/$TARGET_BRANCH"
+
+          REMOTE_TARGET_SHA=$(
+            git rev-parse \
+              "refs/remotes/origin/$TARGET_BRANCH^{commit}"
+          )
+
+          [[ "$REMOTE_TARGET_SHA" == "$TARGET_SHA" ]] ||
+            error \
+              "Target branch changed while workflow was running; refusing to push"
+
+          # ============================================================
+          # PUSH
+          # ============================================================
+
+          if [[ "$STRATEGY" == "rebase-branch" &&
+                "$INPUT_COUNT" -eq 0 &&
+                "$EXCLUDE_COMMITS" == "false" ]]; then
+
+            git push \
+              --force-with-lease="refs/heads/$TARGET_BRANCH:$TARGET_SHA" \
+              origin \
+              "HEAD:refs/heads/$TARGET_BRANCH"
+
+          else
+
+            git merge-base \
+              --is-ancestor \
+              "$TARGET_SHA" \
+              "$FINAL_SHA" ||
+              error \
+                "Final result is not a descendant of original target"
+
+            git push \
+              origin \
+              "HEAD:refs/heads/$TARGET_BRANCH"
+          fi
+
+          echo
+          echo "============================================================"
+          echo "SUCCESS"
+          echo "============================================================"
+          echo "Strategy: $STRATEGY"
+          echo "Target:   $TARGET_BRANCH"
+          echo "Old SHA:  $TARGET_SHA"
+          echo "New SHA:  $FINAL_SHA"
+          echo "============================================================"

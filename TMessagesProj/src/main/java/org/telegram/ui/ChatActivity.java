@@ -8672,7 +8672,7 @@ public class ChatActivity extends BaseFragment implements
         chatScrollHelper.setAnimationCallback(chatScrollHelperCallback);
 
         flagSecure = new FlagSecureReason(getParentActivity().getWindow(), () ->
-            currentEncryptedChat != null ||
+            //currentEncryptedChat != null ||
             isPeerNoForwards()
         );
 

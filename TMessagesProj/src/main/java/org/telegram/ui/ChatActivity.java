@@ -2550,7 +2550,7 @@ public class ChatActivity extends BaseFragment implements
 
         @Override
         public boolean onceVoiceAvailable() {
-            return currentUser != null && !UserObject.isUserSelf(currentUser) && !currentUser.bot && currentEncryptedChat == null && chatMode == 0;
+            return currentUser != null && !UserObject.isUserSelf(currentUser) && !currentUser.bot /*&& currentEncryptedChat == null */&& chatMode == 0;
         }
 
         @Override

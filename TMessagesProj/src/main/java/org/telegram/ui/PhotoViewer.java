@@ -14428,7 +14428,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 || (parentChatActivity == null && placeProvider != null && placeProvider.canSetTimer())
             );
             if (placeProvider != null && placeProvider.getEditingMessageObject() != null) {
-                allowTimeItem = false;
+                allowTimeItem = true;
             }
             if (entry instanceof TLRPC.BotInlineResult) {
                 allowTimeItem = false;

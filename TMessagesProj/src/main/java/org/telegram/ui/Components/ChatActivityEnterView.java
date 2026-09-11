@@ -10636,7 +10636,7 @@ public class ChatActivityEnterView extends FrameLayout implements
             if (rows == null || rows.isEmpty()) return false;
 
             if (RichMessageConvert.isLossy(rows, authors)) {
-                if (!MessagesController.getInstance(currentAccount).richEditorAvailable()) {
+                if (!MessagesController.getInstance(currentAccount).richEditorAllowed()) {
                     return false;
                 }
                 final int selStart = Math.max(0, messageEditText.getSelectionStart());

@@ -14424,11 +14424,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             final Object entry = imagesArrLocals.get(index);
             final TLRPC.User user = parentChatActivity != null ? parentChatActivity.getCurrentUser() : null;
             boolean allowTimeItem = !isDocumentsPicker && (
-                (parentChatActivity != null && !parentChatActivity.isSecretChat() && !parentChatActivity.isInScheduleMode() && user != null && !user.bot && !UserObject.isUserSelf(user) && !parentChatActivity.isEditingMessageMedia())
+                (parentChatActivity != null /*&& !parentChatActivity.isSecretChat() && !parentChatActivity.isInScheduleMode() */&& user != null && !user.bot && !UserObject.isUserSelf(user)/* && !parentChatActivity.isEditingMessageMedia()*/)
                 || (parentChatActivity == null && placeProvider != null && placeProvider.canSetTimer())
             );
             if (placeProvider != null && placeProvider.getEditingMessageObject() != null) {
-                allowTimeItem = false;
+                allowTimeItem = true;
             }
             if (entry instanceof TLRPC.BotInlineResult) {
                 allowTimeItem = false;

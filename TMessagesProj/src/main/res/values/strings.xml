@@ -11221,4 +11221,8 @@
     <string name="UnsupportedMessageTitle">Unsupported Message</string>
     <string name="UnsupportedMessageMessage">Update Telegram to view this message</string>
     <string name="UnsupportedUpdate">Update</string>
+    <string name="InuSendStickers">Send Stickers</string>
+    <string name="InuSendGifs">Send GIFs</string>
+    <string name="InuSendGames">Send Games</string>
+    <string name="InuSendInline">Send via Inline Bots</string>
 </resources>

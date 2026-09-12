@@ -653,7 +653,7 @@ public class ChatRightsEditActivity extends BaseFragment implements Notification
         });
 
         listView.setOnItemClickListener((view, position) -> {
-            if (!canEdit && (!currentChat.creator || currentType != TYPE_ADMIN || position != anonymousRow)) {
+            if (!canEdit && position != 0 && (!currentChat.creator || currentType != TYPE_ADMIN || position != anonymousRow)) {
                 return;
             }
             if (position == sendMediaRow) {
@@ -1864,7 +1864,7 @@ public class ChatRightsEditActivity extends BaseFragment implements Notification
                 return true;
             }
             if (!canEdit) {
-                return false;
+                return type == VIEW_TYPE_USER_CELL && holder.getAdapterPosition() == 0;
             }
             if ((currentType == TYPE_ADMIN || currentType == TYPE_ADD_BOT) && type == VIEW_TYPE_SWITCH_CELL) {
                 int position = holder.getAdapterPosition();

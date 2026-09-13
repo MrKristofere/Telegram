@@ -4175,15 +4175,15 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
         }
         if (!bannedRights.send_stickers) {
             i++;
-        }
-        if (!bannedRights.send_gifs) {
-            i++;
-        }
-        if (!bannedRights.send_games) {
-            i++;
-        }
-        if (!bannedRights.send_inline) {
-            i++;
+            if (!bannedRights.send_gifs) {
+                i++;
+            }
+            if (!bannedRights.send_games) {
+                i++;
+            }
+            if (!bannedRights.send_inline) {
+                i++;
+            }
         }
         if (!bannedRights.send_audios) {
             i++;

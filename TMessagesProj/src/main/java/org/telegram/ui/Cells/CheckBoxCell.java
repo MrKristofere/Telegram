@@ -281,6 +281,10 @@ public class CheckBoxCell extends FrameLayout {
     }
 
     public void setCollapsed(Boolean collapsed) {
+        setCollapsed(collapsed, true);
+    }
+
+    public void setCollapsed(Boolean collapsed, boolean animated) {
         if (collapsed == null) {
             if (collapsedArrow != null) {
                 removeView(collapsedArrow);
@@ -297,7 +301,17 @@ public class CheckBoxCell extends FrameLayout {
 
             updateCollapseArrowTranslation();
             collapsedArrow.animate().cancel();
-            collapsedArrow.animate().rotation(collapsed ? 0 : 180).setDuration(340).setInterpolator(CubicBezierInterpolator.EASE_OUT_QUINT).start();
+
+            float rotation = collapsed ? 0 : 180;
+            if (animated) {
+                collapsedArrow.animate()
+                        .rotation(rotation)
+                        .setDuration(340)
+                        .setInterpolator(CubicBezierInterpolator.EASE_OUT_QUINT)
+                        .start();
+            } else {
+                collapsedArrow.setRotation(rotation);
+            }
         }
     }
 

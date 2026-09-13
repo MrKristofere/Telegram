@@ -3265,6 +3265,13 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
         public void onViewRecycled(RecyclerView.ViewHolder holder) {
             if (holder.itemView instanceof ManageChatUserCell) {
                 ((ManageChatUserCell) holder.itemView).recycle();
+            } else if (holder.itemView instanceof CheckBoxCell) {
+                CheckBoxCell checkBoxCell = (CheckBoxCell) holder.itemView;
+                checkBoxCell.setOnSectionsClickListener(null, null);
+                checkBoxCell.setCollapsed(null);
+                checkBoxCell.setEnabled(true);
+                checkBoxCell.setTag(null);
+                checkBoxCell.setPad(1);
             }
         }
 
@@ -3795,6 +3802,7 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
                     checkBoxCell.setTag(position);
                     checkBoxCell.setOnSectionsClickListener(null, null);
                     checkBoxCell.setCollapsed(null);
+                    checkBoxCell.setEnabled(true);
                     if (position == sendMediaPhotosRow) {
                         checkBoxCell.setText(getString("SendMediaPermissionPhotos", R.string.SendMediaPermissionPhotos), "", !defaultBannedRights.send_photos, true, animated);
                     } else if (position == sendMediaVideosRow) {
@@ -3875,6 +3883,13 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
         public void onViewRecycled(RecyclerView.ViewHolder holder) {
             if (holder.itemView instanceof ManageChatUserCell) {
                 ((ManageChatUserCell) holder.itemView).recycle();
+            } else if (holder.itemView instanceof CheckBoxCell) {
+                CheckBoxCell checkBoxCell = (CheckBoxCell) holder.itemView;
+                checkBoxCell.setOnSectionsClickListener(null, null);
+                checkBoxCell.setCollapsed(null);
+                checkBoxCell.setEnabled(true);
+                checkBoxCell.setTag(null);
+                checkBoxCell.setPad(1);
             }
         }
 

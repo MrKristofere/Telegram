@@ -3801,12 +3801,14 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
                         checkBoxCell.setText(getString("SendMediaPermissionVideos", R.string.SendMediaPermissionVideos), "", !defaultBannedRights.send_videos, true, animated);
                     } else if (position == sendMediaStickerGifsRow) {
                         checkBoxCell.setText(LocaleController.getString(R.string.InuSendStickers), "", !defaultBannedRights.send_stickers, true, animated);
-                        checkBoxCell.setCollapsed(!sendMediaStickersExpanded);
+                        checkBoxCell.setCollapsed(!sendMediaStickersExpanded, false);
                         checkBoxCell.setOnSectionsClickListener(
                                 v -> {
                                     sendMediaStickersExpanded = !sendMediaStickersExpanded;
                                     updateRows();
                                     listView.getAdapter().notifyDataSetChanged();
+                                    AndroidUtilities.updateVisibleRows(listView);
+                                    checkBoxCell.setCollapsed(!sendMediaStickersExpanded, true);
                                 },
                                 v -> {
                                     defaultBannedRights.send_stickers = !defaultBannedRights.send_stickers;

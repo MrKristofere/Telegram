@@ -3325,6 +3325,11 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
                 }
             }
             if (viewType == VIEW_TYPE_INNER_CHECK) {
+                if (position == inu_sendMediaGifsRow ||
+                        position == inu_sendMediaGamesRow ||
+                        position == inu_sendMediaInlineRow) {
+                    return ChatObject.canBlockUsers(currentChat) && !defaultBannedRights.send_stickers;
+                }
                 return ChatObject.canBlockUsers(currentChat);
             }
             return false;

@@ -878,6 +878,12 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
                 if (isExpandableSendMediaRow(position)) {
                     CheckBoxCell checkBoxCell = (CheckBoxCell) view;
                     if (!checkBoxCell.isEnabled()) return;
+                    if ((position == inu_sendMediaGifsRow ||
+                            position == inu_sendMediaGamesRow ||
+                            position == inu_sendMediaInlineRow) &&
+                            defaultBannedRights.send_stickers) {
+                        return;
+                    }
                     if (position == sendMediaPhotosRow) {
                         defaultBannedRights.send_photos = !defaultBannedRights.send_photos;
                     } else if (position == sendMediaVideosRow) {
@@ -1257,7 +1263,7 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
                             AndroidUtilities.updateVisibleRows(listView);
                             updateListAnimated(diffCallback);
                         } else if (position == sendStickersRow) {
-                            defaultBannedRights.send_stickers = defaultBannedRights.send_games = defaultBannedRights.send_gifs = defaultBannedRights.send_inline = !defaultBannedRights.send_stickers;
+                            defaultBannedRights.send_stickers = !defaultBannedRights.send_stickers;
                         } else if (position == embedLinksRow) {
                             defaultBannedRights.embed_links = !defaultBannedRights.embed_links;
                         } else if (position == sendPollsRow) {
@@ -4114,7 +4120,27 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
     }
 
     private int getSendMediaSelectedCount() {
-        return getSendMediaSelectedCount(defaultBannedRights);
+        int count = 0;
+
+        if (!defaultBannedRights.send_photos) count++;
+        if (!defaultBannedRights.send_videos) count++;
+
+        if (!defaultBannedRights.send_stickers) {
+            count++;
+            if (!defaultBannedRights.send_gifs) count++;
+            if (!defaultBannedRights.send_games) count++;
+            if (!defaultBannedRights.send_inline) count++;
+        }
+
+        if (!defaultBannedRights.send_audios) count++;
+        if (!defaultBannedRights.send_docs) count++;
+        if (!defaultBannedRights.send_voices) count++;
+        if (!defaultBannedRights.send_roundvideos) count++;
+        if (!defaultBannedRights.embed_links && !defaultBannedRights.send_plain) count++;
+        if (!defaultBannedRights.send_polls) count++;
+        if (!defaultBannedRights.send_reactions) count++;
+
+        return count;
     }
 
     public static int getSendMediaSelectedCount(TLRPC.TL_chatBannedRights bannedRights) {

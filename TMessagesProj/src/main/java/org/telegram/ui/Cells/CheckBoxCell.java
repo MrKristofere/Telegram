@@ -313,9 +313,9 @@ public class CheckBoxCell extends FrameLayout {
 
         float translateX;
         if (LocaleController.isRTL) {
-            translateX = textView.getRight() - textWidth - dp(20);
+            translateX = textView.getRight() + textView.getTranslationX() - textWidth - dp(20);
         } else {
-            translateX = textView.getLeft() + textWidth + dp(4);
+            translateX = textView.getLeft() + textView.getTranslationX() + textWidth + dp(4);
         }
         collapsedArrow.setTranslationX(translateX);
     }

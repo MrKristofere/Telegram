@@ -218,6 +218,7 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
     private int delayResults;
 
     private boolean sendMediaExpanded;
+    private boolean sendMediaStickersExpanded = true;
 
     private ChatUsersActivityDelegate delegate;
 
@@ -413,9 +414,11 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
                     sendMediaPhotosRow = rowCount++;
                     sendMediaVideosRow = rowCount++;
                     sendMediaStickerGifsRow = rowCount++;
-                    inu_sendMediaGifsRow = rowCount++;
-                    inu_sendMediaGamesRow = rowCount++;
-                    inu_sendMediaInlineRow = rowCount++;
+                    if (sendMediaStickersExpanded) {
+                        inu_sendMediaGifsRow = rowCount++;
+                        inu_sendMediaGamesRow = rowCount++;
+                        inu_sendMediaInlineRow = rowCount++;
+                    }
                     sendMediaMusicRow = rowCount++;
                     sendMediaFilesRow = rowCount++;
                     sendMediaVoiceMessagesRow = rowCount++;
@@ -879,8 +882,6 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
                         defaultBannedRights.send_photos = !defaultBannedRights.send_photos;
                     } else if (position == sendMediaVideosRow) {
                         defaultBannedRights.send_videos = !defaultBannedRights.send_videos;
-                    } else if (position == sendMediaStickerGifsRow) {
-                        defaultBannedRights.send_stickers = !defaultBannedRights.send_stickers;
                     } else if (position == inu_sendMediaGifsRow) {
                         defaultBannedRights.send_gifs = !defaultBannedRights.send_gifs;
                     } else if (position == inu_sendMediaGamesRow) {
@@ -3786,12 +3787,26 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
                     CheckBoxCell checkBoxCell = (CheckBoxCell) holder.itemView;
                     animated = checkBoxCell.getTag() != null && (Integer) checkBoxCell.getTag() == position;
                     checkBoxCell.setTag(position);
+                    checkBoxCell.setOnSectionsClickListener(null, null);
+                    checkBoxCell.setCollapsed(null);
                     if (position == sendMediaPhotosRow) {
                         checkBoxCell.setText(getString("SendMediaPermissionPhotos", R.string.SendMediaPermissionPhotos), "", !defaultBannedRights.send_photos, true, animated);
                     } else if (position == sendMediaVideosRow) {
                         checkBoxCell.setText(getString("SendMediaPermissionVideos", R.string.SendMediaPermissionVideos), "", !defaultBannedRights.send_videos, true, animated);
                     } else if (position == sendMediaStickerGifsRow) {
                         checkBoxCell.setText(LocaleController.getString(R.string.InuSendStickers), "", !defaultBannedRights.send_stickers, true, animated);
+                        checkBoxCell.setCollapsed(!sendMediaStickersExpanded);
+                        checkBoxCell.setOnSectionsClickListener(
+                                v -> {
+                                    sendMediaStickersExpanded = !sendMediaStickersExpanded;
+                                    updateRows();
+                                    listView.getAdapter().notifyDataSetChanged();
+                                },
+                                v -> {
+                                    defaultBannedRights.send_stickers = !defaultBannedRights.send_stickers;
+                                    AndroidUtilities.updateVisibleRows(listView);
+                                }
+                        );
                     } else if (position == inu_sendMediaGifsRow) {
                         checkBoxCell.setText(LocaleController.getString(R.string.InuSendGifs), "", !defaultBannedRights.send_gifs, true, animated);
                     } else if (position == inu_sendMediaGamesRow) {
@@ -3812,9 +3827,18 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
                         checkBoxCell.setText(getString(R.string.UserRestrictionsSendReactions), "", !defaultBannedRights.send_reactions, false, animated);
                     } else if (position == sendPollsRow) {
                         checkBoxCell.setText(getString("SendMediaPolls", R.string.SendMediaPolls), "", !defaultBannedRights.send_polls, true, animated);
-                    } else
-                    //  checkBoxCell.setText(getCheckBoxTitle(item.headerName, percents[item.index < 0 ? 8 : item.index], item.index < 0), AndroidUtilities.formatFileSize(item.size), selected, item.index < 0 ? !collapsed : !item.last);
-                    checkBoxCell.setPad(1);
+                    }
+                    boolean innerCheckEnabled = ChatObject.canBlockUsers(currentChat);
+                    if (position == inu_sendMediaGifsRow || position == inu_sendMediaGamesRow || position == inu_sendMediaInlineRow) {
+                        innerCheckEnabled &= !defaultBannedRights.send_stickers;
+                    }
+                    checkBoxCell.setEnabled(innerCheckEnabled);
+
+                    if (position == inu_sendMediaGifsRow || position == inu_sendMediaGamesRow || position == inu_sendMediaInlineRow) {
+                        checkBoxCell.setPad(2);
+                    } else {
+                        checkBoxCell.setPad(1);
+                    }
                     break;
                 case VIEW_TYPE_CHECK:
                     TextCheckCell checkCell2 = (TextCheckCell) holder.itemView;
@@ -3877,7 +3901,7 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
                 return 11;
             } else if (position == antiSpamRow || position == hideMembersRow || position == tagsRow) {
                 return 12;
-            } else if (isExpandableSendMediaRow(position)) {
+            } else if (position == sendMediaStickerGifsRow || isExpandableSendMediaRow(position)) {
                 return VIEW_TYPE_INNER_CHECK;
             } else if (position == sendMediaRow) {
                 return VIEW_TYPE_EXPANDABLE_SWITCH;
@@ -3925,7 +3949,7 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
     }
 
     private boolean isExpandableSendMediaRow(int position) {
-        return position == sendMediaPhotosRow || position == sendMediaVideosRow || position == sendMediaStickerGifsRow ||
+        return position == sendMediaPhotosRow || position == sendMediaVideosRow ||
                 position == inu_sendMediaGifsRow || position == inu_sendMediaGamesRow || position == inu_sendMediaInlineRow ||
                 position == sendMediaMusicRow || position == sendMediaFilesRow || position == sendMediaVoiceMessagesRow ||
                 position == sendReactionsRow ||

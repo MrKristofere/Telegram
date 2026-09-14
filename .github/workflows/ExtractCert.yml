@@ -1,4 +1,4 @@
-name: Extract APK certificate
+name: Extract Telegram certificate
 
 on:
   workflow_dispatch:
@@ -8,21 +8,50 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      APK_URL: "https://telegram.org/dl/android/apk"
+      APK_URL: https://telegram.org/dl/android/apk
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+      BUILD_TOOLS_VERSION: "36.1.0"
 
     steps:
-      - name: Download APK
+      - name: Install Android SDK Build Tools
+        run: |
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+
+          curl -fsSL \
+            -o commandlinetools.zip \
+            https://dl.google.com/android/repository/commandlinetools-linux-14742923_latest.zip
+
+          unzip -q commandlinetools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+
+          mv \
+            "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" \
+            "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            --licenses >/dev/null || true
+
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            "build-tools;$BUILD_TOOLS_VERSION"
+
+          echo "$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION" >> "$GITHUB_PATH"
+
+      - name: Download Telegram APK
         run: |
           curl -fL --retry 3 \
             -o telegram.apk \
             "$APK_URL"
+
+          file telegram.apk
+          ls -lh telegram.apk
 
       - name: Verify APK and print certificate
         run: |
           apksigner verify --verbose telegram.apk
           apksigner verify --print-certs telegram.apk
 
-      - name: Extract certificate as PEM
+      - name: Extract certificate PEM
         run: |
           apksigner verify --print-certs-pem telegram.apk > certificate-output.txt
 
@@ -34,6 +63,8 @@ jobs:
             }
           ' certificate-output.txt > telegram-cert.pem
 
+          test -s telegram-cert.pem
+
       - name: Convert certificate to DER
         run: |
           openssl x509 \
@@ -41,44 +72,70 @@ jobs:
             -outform DER \
             -out telegram-cert.der
 
-      - name: Calculate fingerprints
+      - name: Print fingerprints
         run: |
-          echo "SHA-256:"
+          echo "=== SHA-256 ==="
           openssl x509 \
             -in telegram-cert.pem \
             -noout \
             -fingerprint \
             -sha256
 
-          echo "SHA-1:"
+          echo
+          echo "=== SHA-1 ==="
           openssl x509 \
             -in telegram-cert.pem \
             -noout \
             -fingerprint \
             -sha1
 
+          echo
+          echo "=== Subject ==="
+          openssl x509 \
+            -in telegram-cert.pem \
+            -noout \
+            -subject
+
+          echo
+          echo "=== Issuer ==="
+          openssl x509 \
+            -in telegram-cert.pem \
+            -noout \
+            -issuer
+
+          echo
+          echo "=== Serial ==="
+          openssl x509 \
+            -in telegram-cert.pem \
+            -noout \
+            -serial
+
       - name: Generate Kotlin byte array
         run: |
-          xxd -i telegram-cert.der > telegram-cert.c
-
-          python3 - <<'PY'
+          python3 <<'PY'
           from pathlib import Path
-          import re
 
           data = Path("telegram-cert.der").read_bytes()
 
-          kotlin = ", ".join(
-              f"0x{b:02x}.toByte()"
-              for b in data
-          )
+          lines = []
 
-          Path("telegram-cert.kt.txt").write_text(
-              "byteArrayOf(\n    " +
-              ",\n    ".join(
-                  [kotlin[i:i+80] for i in range(0, len(kotlin), 80)]
-              ) +
-              "\n)\n"
-          )
+          for i in range(0, len(data), 16):
+              chunk = data[i:i + 16]
+
+              values = ", ".join(
+                  f"0x{b:02x}.toByte()"
+                  for b in chunk
+              )
+
+              lines.append(f"    {values},")
+
+          output = "byteArrayOf(\n"
+          output += "\n".join(lines)
+          output += "\n)\n"
+
+          Path("telegram-cert.kt.txt").write_text(output)
+
+          print(f"Certificate size: {len(data)} bytes")
           PY
 
       - name: Show certificate information
@@ -87,14 +144,10 @@ jobs:
           cat telegram-cert.pem
 
           echo
-          echo "=== SHA-256 ==="
-          openssl x509 -in telegram-cert.pem -noout -fingerprint -sha256
+          echo "=== DER SHA-256 ==="
+          sha256sum telegram-cert.der
 
-          echo
-          echo "=== Certificate details ==="
-          openssl x509 -in telegram-cert.pem -noout -subject -issuer -serial
-
-      - name: Upload certificate
+      - name: Upload certificate artifacts
         uses: actions/upload-artifact@v7
         with:
           name: telegram-certificate

@@ -1,24 +1,38 @@
-name: Extract Telegram APK data
+name: Extract Telegram Android APK data
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APK_URL: "https://telegram.org/dl/android/apk"
+
+  ANDROID_SDK_ROOT: "${{ github.workspace }}/android-sdk"
+  ANDROID_HOME: "${{ github.workspace }}/android-sdk"
+
+  CMDLINE_TOOLS_VERSION: "14742923"
+  BUILD_TOOLS_VERSION: "36.1.0"
+  JADX_VERSION: "1.5.0"
 
 jobs:
   extract:
     runs-on: ubuntu-latest
 
-    env:
-      APK_URL: https://telegram.org/dl/android/apk
-      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
-      BUILD_TOOLS_VERSION: "36.1.0"
-      CMDLINE_TOOLS_VERSION: "14742923"
-
     steps:
+      # ------------------------------------------------------------
+      # 1. Install Java
+      # ------------------------------------------------------------
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
-      # ============================================================
-      # Install Android SDK command line tools + Build Tools
-      # ============================================================
-
+      # ------------------------------------------------------------
+      # 2. Install Android SDK command line tools
+      # ------------------------------------------------------------
       - name: Install Android SDK
         shell: bash
         run: |
@@ -26,705 +40,658 @@ jobs:
 
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
 
-          curl -fsSL \
-            -o commandlinetools.zip \
+          curl -fL --retry 5 --retry-all-errors \
+            -o /tmp/cmdline-tools.zip \
             "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION}_latest.zip"
 
-          unzip -q commandlinetools.zip \
+          unzip -q /tmp/cmdline-tools.zip \
             -d "$ANDROID_SDK_ROOT/cmdline-tools"
 
           mv \
             "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" \
             "$ANDROID_SDK_ROOT/cmdline-tools/latest"
 
-          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
 
-          yes | "$SDKMANAGER" \
-            --sdk_root="$ANDROID_SDK_ROOT" \
-            --licenses >/dev/null || true
+          yes | sdkmanager --licenses >/dev/null || true
 
-          "$SDKMANAGER" \
-            --sdk_root="$ANDROID_SDK_ROOT" \
-            "build-tools;$BUILD_TOOLS_VERSION"
+          sdkmanager \
+            "platform-tools" \
+            "build-tools;${BUILD_TOOLS_VERSION}"
 
-          echo "$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}" >> "$GITHUB_PATH"
 
-      # ============================================================
-      # Download official Telegram APK
-      # ============================================================
+          sdkmanager --version
+          apksigner --version
+          aapt2 version
 
+      # ------------------------------------------------------------
+      # 3. Install JADX
+      # ------------------------------------------------------------
+      - name: Install JADX
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl -fL --retry 5 --retry-all-errors \
+            -o /tmp/jadx.zip \
+            "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip"
+
+          mkdir -p "$HOME/jadx"
+          unzip -q /tmp/jadx.zip -d "$HOME/jadx"
+
+          echo "$HOME/jadx/bin" >> "$GITHUB_PATH"
+
+          "$HOME/jadx/bin/jadx" --version
+
+      # ------------------------------------------------------------
+      # 4. Prepare directories
+      # ------------------------------------------------------------
+      - name: Prepare workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf artifacts work
+          mkdir -p artifacts/result
+          mkdir -p work
+
+      # ------------------------------------------------------------
+      # 5. Download official Telegram APK
+      # ------------------------------------------------------------
       - name: Download Telegram APK
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "Downloading:"
+          echo "$APK_URL"
+          echo
+
           curl -fL \
             --retry 5 \
-            --retry-delay 2 \
+            --retry-delay 3 \
             --retry-all-errors \
-            -o telegram.apk \
+            --continue-at - \
+            -o work/telegram.apk \
             "$APK_URL"
 
-          echo "========== FILE =========="
-          file telegram.apk
+          echo
+          echo "Downloaded APK:"
+          file work/telegram.apk
+          ls -lh work/telegram.apk
 
           echo
-          echo "========== SIZE =========="
-          ls -lh telegram.apk
+          echo "APK SHA256:"
+          sha256sum work/telegram.apk
 
-          echo
-          echo "========== ZIP TEST =========="
-          unzip -t telegram.apk >/dev/null
-
-          echo "APK looks valid."
-
-      # ============================================================
-      # Define Android tools
-      # ============================================================
-
-      - name: Locate Android tools
+      # ------------------------------------------------------------
+      # 6. Extract package name and basic APK metadata
+      # ------------------------------------------------------------
+      - name: Extract APK metadata
         shell: bash
         run: |
           set -euo pipefail
 
-          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/apksigner"
-          AAPT2="$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/aapt2"
+          LOG="artifacts/result/extraction.log"
 
-          test -x "$APKSIGNER"
-          test -x "$AAPT2"
+          {
+            echo "============================================================"
+            echo "Telegram APK extraction"
+            echo "============================================================"
+            echo
+            echo "APK URL: $APK_URL"
+            echo
+            echo "APK SHA256:"
+            sha256sum work/telegram.apk
+            echo
+          } > "$LOG"
 
-          echo "APKSIGNER=$APKSIGNER" >> "$GITHUB_ENV"
-          echo "AAPT2=$AAPT2" >> "$GITHUB_ENV"
+          echo "=== APK BADGING ===" | tee artifacts/result/manifest.txt
+          aapt2 dump badging work/telegram.apk \
+            | tee -a artifacts/result/manifest.txt \
+            | grep -m1 "^package:" || true
 
-          echo "apksigner:"
-          "$APKSIGNER" version
+          PACKAGE_NAME="$(
+            aapt2 dump badging work/telegram.apk 2>/dev/null \
+              | sed -n "s/^package: name='\([^']*\)'.*/\1/p" \
+              | head -n1
+          )"
 
-          echo
-          echo "aapt2:"
-          "$AAPT2" version
+          if [ -n "$PACKAGE_NAME" ]; then
+            echo "package_name=$PACKAGE_NAME" \
+              | tee artifacts/result/summary.txt
+          else
+            echo "package_name=NOT_FOUND" \
+              | tee artifacts/result/summary.txt
 
-      # ============================================================
-      # APK information
-      # ============================================================
+            echo "[FAIL] Package name was not extracted" | tee -a "$LOG"
+          fi
 
-      - name: Extract APK manifest information
-        shell: bash
-        run: |
-          set -euo pipefail
+          echo >> artifacts/result/summary.txt
 
-          mkdir -p apk-info
+          echo "APK metadata extraction completed."
 
-          "$AAPT2" dump badging telegram.apk \
-            > apk-info/badging.txt
-
-          "$AAPT2" dump packagename telegram.apk \
-            > apk-info/package-name.txt
-
-          echo "========== PACKAGE =========="
-          cat apk-info/package-name.txt
-
-          echo
-          echo "========== BADGING =========="
-          cat apk-info/badging.txt
-
-      - name: Extract version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 <<'PY'
-          import re
-          from pathlib import Path
-
-          text = Path(
-              "apk-info/badging.txt"
-          ).read_text(errors="replace")
-
-          match = re.search(
-              r"package:.*?name='([^']+)'.*?versionCode='([^']+)'.*?versionName='([^']+)'",
-              text
-          )
-
-          if match:
-              package_name = match.group(1)
-              version_code = match.group(2)
-              version_name = match.group(3)
-
-              Path("apk-info/version-code.txt").write_text(
-                  version_code + "\n"
-              )
-
-              Path("apk-info/version-name.txt").write_text(
-                  version_name + "\n"
-              )
-
-              print("Package:", package_name)
-              print("Version code:", version_code)
-              print("Version name:", version_name)
-          else:
-              print("Could not parse package/version from badging.")
-          PY
-
-      # ============================================================
-      # Verify APK signature
-      # ============================================================
-
-      - name: Verify APK signature
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          "$APKSIGNER" verify \
-            --verbose \
-            telegram.apk
-
-          echo "APK signature is valid."
-
-      # ============================================================
-      # Extract X.509 certificate
-      # ============================================================
-
+      # ------------------------------------------------------------
+      # 7. Extract signing certificate
+      # ------------------------------------------------------------
       - name: Extract signing certificate
         shell: bash
         run: |
           set -euo pipefail
 
-          "$APKSIGNER" verify \
-            --print-certs \
-            telegram.apk \
-            > certificate-info.txt
+          LOG="artifacts/result/extraction.log"
 
-          "$APKSIGNER" verify \
-            --print-certs-pem \
-            telegram.apk \
-            > certificate-output.txt
-
-          awk '
-            /-----BEGIN CERTIFICATE-----/ {
-              found=1
-            }
-
-            found {
-              print
-            }
-
-            /-----END CERTIFICATE-----/ {
-              exit
-            }
-          ' certificate-output.txt > telegram-cert.pem
-
-          test -s telegram-cert.pem
-
-          openssl x509 \
-            -in telegram-cert.pem \
-            -outform DER \
-            -out telegram-cert.der
-
-          test -s telegram-cert.der
-
-      # ============================================================
-      # Certificate information
-      # ============================================================
-
-      - name: Print certificate information
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "================================================"
+          echo
+          echo "============================================================"
           echo "SIGNING CERTIFICATE"
-          echo "================================================"
+          echo "============================================================"
+          echo
 
-          cat certificate-info.txt
+          echo "=== apksigner certificate information ===" \
+            | tee artifacts/result/certificate.txt
+
+          apksigner verify \
+            --verbose \
+            --print-certs \
+            work/telegram.apk \
+            | tee -a artifacts/result/certificate.txt
 
           echo
-          echo "================================================"
-          echo "SHA-256"
-          echo "================================================"
+          echo "=== PEM certificate ===" \
+            | tee -a artifacts/result/certificate.txt
 
-          openssl x509 \
-            -in telegram-cert.pem \
-            -noout \
-            -fingerprint \
-            -sha256
+          apksigner verify \
+            --print-certs-pem \
+            work/telegram.apk \
+            > work/certificate.pem
 
-          echo
-          echo "================================================"
-          echo "SHA-1"
-          echo "================================================"
+          cat work/certificate.pem \
+            | tee -a artifacts/result/certificate.txt
 
-          openssl x509 \
-            -in telegram-cert.pem \
-            -noout \
-            -fingerprint \
-            -sha1
+          cp work/certificate.pem \
+            artifacts/result/certificate.pem
 
-          echo
-          echo "================================================"
-          echo "SUBJECT"
-          echo "================================================"
+          if command -v openssl >/dev/null 2>&1; then
+            openssl x509 \
+              -in work/certificate.pem \
+              -outform DER \
+              -out artifacts/result/certificate.der
 
-          openssl x509 \
-            -in telegram-cert.pem \
-            -noout \
-            -subject
+            echo
+            echo "=== OpenSSL fingerprints ===" \
+              | tee -a artifacts/result/certificate.txt
 
-          echo
-          echo "================================================"
-          echo "ISSUER"
-          echo "================================================"
+            openssl x509 \
+              -in work/certificate.pem \
+              -noout \
+              -subject \
+              -issuer \
+              -serial \
+              -fingerprint -md5 \
+              -fingerprint -sha1 \
+              -fingerprint -sha256 \
+              | tee -a artifacts/result/certificate.txt
+          else
+            echo "[WARN] openssl not available" | tee -a "$LOG"
+          fi
 
-          openssl x509 \
-            -in telegram-cert.pem \
-            -noout \
-            -issuer
-
-          echo
-          echo "================================================"
-          echo "SERIAL"
-          echo "================================================"
-
-          openssl x509 \
-            -in telegram-cert.pem \
-            -noout \
-            -serial
-
-          echo
-          echo "================================================"
-          echo "CERTIFICATE FILE SHA-256"
-          echo "================================================"
-
-          sha256sum telegram-cert.der
-
-      # ============================================================
-      # Dump Android resources
-      # ============================================================
-
-      - name: Dump APK resources
+      # ------------------------------------------------------------
+      # 8. Run JADX
+      #
+      # Temporary only:
+      #   work/jadx
+      #
+      # It is NOT uploaded to artifacts.
+      # ------------------------------------------------------------
+      - name: Decompile APK with JADX
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p firebase
+          mkdir -p work/jadx
 
-          "$AAPT2" dump resources telegram.apk \
-            > firebase/resources.txt
+          echo
+          echo "============================================================"
+          echo "JADX"
+          echo "============================================================"
+          echo
 
-          test -s firebase/resources.txt
+          jadx \
+            --no-replace-consts \
+            --show-bad-code \
+            --threads-count 4 \
+            -d work/jadx \
+            work/telegram.apk \
+            > work/jadx.log 2>&1 || {
+              STATUS=$?
 
-          echo "Resource dump created."
+              echo "[WARN] JADX exited with status $STATUS"
+              echo "[WARN] Extraction will continue."
+              echo
+              echo "Last JADX log lines:"
+              tail -n 100 work/jadx.log || true
+            }
 
-      # ============================================================
-      # Find Firebase resources
-      # ============================================================
+          echo
+          echo "JADX output created."
+          find work/jadx -maxdepth 3 -type f | head -100 || true
 
-      - name: Show Firebase resources
+      # ------------------------------------------------------------
+      # 9. Find BuildVars.java
+      # ------------------------------------------------------------
+      - name: Find BuildVars.java
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "================================================"
-          echo "FIREBASE RESOURCE NAMES"
-          echo "================================================"
+          LOG="artifacts/result/extraction.log"
 
-          grep -n -E \
-            'string/(google_app_id|gcm_defaultSenderId|default_web_client_id|firebase_database_url|google_api_key|google_crash_reporting_api_key|project_id)' \
-            firebase/resources.txt \
-            || true
+          BUILDVARS_FILE="$(
+            find work/jadx \
+              -type f \
+              -name "BuildVars.java" \
+              | head -n1
+          )"
 
-      # ============================================================
-      # Extract exact Firebase values
-      #
-      # aapt2 dump resources normally looks approximately like:
-      #
-      # resource 0x7f.... string/google_app_id
-      #   (default) "1:1234567890:android:..."
-      #
-      # We parse the resource block instead of trying to parse
-      # the entire file with a single greedy regexp.
-      # ============================================================
+          if [ -z "$BUILDVARS_FILE" ]; then
+            echo "[FAIL] BuildVars.java was not found." \
+              | tee -a "$LOG"
 
-      - name: Extract Firebase values
+            echo "BuildVars.java: NOT_FOUND" \
+              > artifacts/result/BuildVars.extracted.txt
+
+            exit 1
+          fi
+
+          echo "BuildVars.java: $BUILDVARS_FILE" \
+            | tee artifacts/result/BuildVars.locations.txt
+
+          echo
+          echo "=== Relevant BuildVars lines ===" \
+            | tee -a artifacts/result/BuildVars.locations.txt
+
+          grep -nE \
+            'APP_ID|APP_HASH|GOOGLE_AUTH_CLIENT_ID|HUAWEI_APP_ID|SAFETYNET_KEY' \
+            "$BUILDVARS_FILE" \
+            | tee -a artifacts/result/BuildVars.locations.txt || true
+
+      # ------------------------------------------------------------
+      # 10. Extract ALL non-null BuildVars values
+      # ------------------------------------------------------------
+      - name: Extract BuildVars values
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 <<'PY'
+          BUILDVARS_FILE="$(
+            find work/jadx \
+              -type f \
+              -name "BuildVars.java" \
+              | head -n1
+          )"
+
+          OUTPUT="artifacts/result/BuildVars.extracted.txt"
+          LOCATIONS="artifacts/result/BuildVars.locations.txt"
+          LOG="artifacts/result/extraction.log"
+
+          if [ -z "$BUILDVARS_FILE" ]; then
+            echo "[FAIL] BuildVars.java not found." | tee -a "$LOG"
+            exit 1
+          fi
+
+          python3 - "$BUILDVARS_FILE" "$OUTPUT" "$LOCATIONS" <<'PY'
           import re
+          import sys
           from pathlib import Path
 
-          text = Path(
-              "firebase/resources.txt"
-          ).read_text(errors="replace")
+          source_file = Path(sys.argv[1])
+          output_file = Path(sys.argv[2])
+          locations_file = Path(sys.argv[3])
 
-          resource_names = [
-              "google_app_id",
-              "gcm_defaultSenderId",
-              "default_web_client_id",
-              "ga_trackingId",
-              "firebase_database_url",
-              "google_api_key",
-              "google_crash_reporting_api_key",
-              "project_id",
+          text = source_file.read_text(
+              encoding="utf-8",
+              errors="replace"
+          )
+
+          fields = [
+              "APP_ID",
+              "APP_HASH",
+              "GOOGLE_AUTH_CLIENT_ID",
+              "HUAWEI_APP_ID",
+              "SAFETYNET_KEY",
           ]
 
-          values = {}
+          output = []
+          locations = []
 
-          lines = text.splitlines()
+          output.append("BuildVars extracted from APK")
+          output.append("=" * 60)
+          output.append("")
 
-          for i, line in enumerate(lines):
+          total_values = 0
 
-              for name in resource_names:
+          for field in fields:
+              output.append(f"[{field}]")
 
-                  # Resource declaration.
-                  if not re.search(
-                      rf"\bstring/{re.escape(name)}\b",
-                      line
-                  ):
-                      continue
+              # Matches:
+              #
+              # APP_ID = 4;
+              # APP_ID=4;
+              # APP_HASH = "abc";
+              # APP_HASH=null;
+              #
+              pattern = re.compile(
+                  rf'(?<![\w$])'
+                  rf'{re.escape(field)}'
+                  rf'\s*=\s*'
+                  rf'(?:'
+                  rf'"([^"]*)"'
+                  rf'|'
+                  rf"'([^']*)'"
+                  rf'|'
+                  rf'(-?\d+)'
+                  rf'|'
+                  rf'(null)'
+                  rf')'
+                  rf'\s*;'
+              )
 
-                  # Search the following lines for the actual value.
-                  for next_line in lines[i + 1:i + 12]:
+              matches = list(pattern.finditer(text))
 
-                      # Typical:
-                      # () "value"
-                      #
-                      # or:
-                      # (default) "value"
+              if not matches:
+                  output.append("NOT_FOUND")
+                  output.append("")
 
-                      match = re.search(
-                          r'\)\s*"((?:[^"\\]|\\.)*)"',
-                          next_line
-                      )
+                  locations.append(
+                      f"{field}: NOT_FOUND"
+                  )
+                  continue
 
-                      if match:
-                          value = match.group(1)
+              non_null = []
 
-                          # Decode common escaped characters.
-                          value = (
-                              value
-                              .replace(r'\"', '"')
-                              .replace(r'\\', '\\')
-                          )
+              for index, match in enumerate(matches, start=1):
+                  value = (
+                      match.group(1)
+                      if match.group(1) is not None
+                      else match.group(2)
+                      if match.group(2) is not None
+                      else match.group(3)
+                      if match.group(3) is not None
+                      else None
+                  )
 
-                          values[name] = value
-                          break
+                  is_null = match.group(4) is not None
 
-          print("================================================")
-          print("EXTRACTED FIREBASE VALUES")
-          print("================================================")
+                  line_number = text.count(
+                      "\n",
+                      0,
+                      match.start()
+                  ) + 1
 
-          for name in resource_names:
-              if name in values:
-                  print(f"{name} = {values[name]}")
+                  line_text = text.splitlines()[line_number - 1].strip()
+
+                  locations.append(
+                      f"{field}[{index}] "
+                      f"line={line_number} "
+                      f"value={'null' if is_null else value}"
+                  )
+                  locations.append(
+                      f"    {line_text}"
+                  )
+
+                  # IMPORTANT:
+                  # null values are deliberately ignored.
+                  if not is_null and value is not None:
+                      non_null.append(value)
+
+              if non_null:
+                  for value in non_null:
+                      output.append(f"{field}={value}")
+                      total_values += 1
               else:
-                  print(f"{name} = <not found>")
+                  output.append("NO_NON_NULL_VALUE")
 
-          Path(
-              "firebase/values.env"
-          ).write_text(
-              "\n".join(
-                  f"{name}={value}"
-                  for name, value in values.items()
-              ) + "\n"
+              output.append("")
+
+          output.append("=" * 60)
+          output.append(f"Total non-null values: {total_values}")
+
+          output_file.write_text(
+              "\n".join(output) + "\n",
+              encoding="utf-8"
           )
+
+          locations_file.write_text(
+              locations_file.read_text(
+                  encoding="utf-8",
+                  errors="replace"
+              )
+              + "\n\n"
+              + "\n".join(locations)
+              + "\n",
+              encoding="utf-8"
+          )
+
+          print()
+          print("=== BuildVars extraction result ===")
+          print(output_file.read_text(encoding="utf-8"))
+
+          print()
+          print("=== BuildVars locations ===")
+          print("\n".join(locations))
           PY
 
-      # ============================================================
-      # Reconstruct google-services.json
-      # ============================================================
-
-      - name: Reconstruct google-services.json
+      # ------------------------------------------------------------
+      # 11. Extract Firebase values from decoded resources
+      # ------------------------------------------------------------
+      - name: Extract Firebase configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 <<'PY'
+          LOG="artifacts/result/extraction.log"
+
+          echo
+          echo "============================================================"
+          echo "FIREBASE"
+          echo "============================================================"
+          echo
+
+          VALUES_FILE="$(
+            find work/jadx \
+              -type f \
+              -path "*/resources/res/values/strings.xml" \
+              | head -n1
+          )"
+
+          if [ -z "$VALUES_FILE" ]; then
+            echo "[WARN] strings.xml was not found in JADX resources." \
+              | tee -a "$LOG"
+
+            echo "Firebase resources: NOT_FOUND" \
+              > artifacts/result/firebase.json
+
+            echo "Firebase Values.env: NOT_FOUND" \
+              > artifacts/result/Values.env
+
+            exit 0
+          fi
+
+          echo "Using:"
+          echo "$VALUES_FILE"
+
+          python3 - "$VALUES_FILE" <<'PY'
           import json
-          import re
+          import sys
+          import xml.etree.ElementTree as ET
           from pathlib import Path
 
-          package_name = Path(
-              "apk-info/package-name.txt"
-          ).read_text().strip()
+          xml_file = Path(sys.argv[1])
+
+          root = ET.parse(xml_file).getroot()
 
           values = {}
 
-          values_file = Path(
-              "firebase/values.env"
-          )
+          for item in root.findall("string"):
+              name = item.attrib.get("name")
+              if not name:
+                  continue
 
-          if values_file.exists():
-              for line in values_file.read_text().splitlines():
-                  if "=" not in line:
-                      continue
+              value = "".join(item.itertext()).strip()
+              values[name] = value
 
-                  key, value = line.split("=", 1)
-                  values[key] = value
-
-          # --------------------------------------------------------
-          # project_info
-          # --------------------------------------------------------
-
-          project_info = {}
-
-          if "project_id" in values:
-              project_info["project_id"] = values["project_id"]
-
-          if "gcm_defaultSenderId" in values:
-              project_info["project_number"] = values[
+          firebase_keys = {
+              "google_app_id": values.get("google_app_id"),
+              "google_api_key": values.get("google_api_key"),
+              "google_crash_reporting_api_key": values.get(
+                  "google_crash_reporting_api_key"
+              ),
+              "gcm_defaultSenderId": values.get(
                   "gcm_defaultSenderId"
-              ]
-
-          if "firebase_database_url" in values:
-              project_info["firebase_url"] = values[
+              ),
+              "firebase_database_url": values.get(
                   "firebase_database_url"
-              ]
-
-          # --------------------------------------------------------
-          # client_info
-          # --------------------------------------------------------
-
-          client_info = {
-              "android_client_info": {
-                  "package_name": package_name
-              }
+              ),
+              "project_id": values.get("project_id"),
+              "default_web_client_id": values.get(
+                  "default_web_client_id"
+              ),
           }
 
-          if "google_app_id" in values:
-              client_info[
-                  "mobilesdk_app_id"
-              ] = values["google_app_id"]
-
-          client = {
-              "client_info": client_info
+          firebase_keys = {
+              k: v
+              for k, v in firebase_keys.items()
+              if v
           }
 
-          # --------------------------------------------------------
-          # API key
-          # --------------------------------------------------------
-
-          if "google_api_key" in values:
-              client["api_key"] = [
-                  {
-                      "current_key": values[
-                          "google_api_key"
-                      ]
-                  }
-              ]
-
-          # --------------------------------------------------------
-          # OAuth client
-          # --------------------------------------------------------
-
-          if "default_web_client_id" in values:
-              client["oauth_client"] = [
-                  {
-                      "client_id": values[
-                          "default_web_client_id"
-                      ],
-                      "client_type": 3
-                  }
-              ]
-
-          # --------------------------------------------------------
-          # Analytics
-          # --------------------------------------------------------
-
-          if "ga_trackingId" in values:
-              client.setdefault(
-                  "services",
-                  {}
-              )
-
-              client["services"].setdefault(
-                  "analytics_service",
-                  {}
-              )
-
-              client["services"][
-                  "analytics_service"
-              ]["analytics_property"] = {
-                  "tracking_id": values[
-                      "ga_trackingId"
-                  ]
-              }
-
-          # --------------------------------------------------------
-          # App invite / crash reporting
-          # --------------------------------------------------------
-
-          if "google_crash_reporting_api_key" in values:
-              client.setdefault(
-                  "services",
-                  {}
-              )
-
-              client["services"].setdefault(
-                  "appinvite_service",
-                  {}
-              )
-
-              client["services"][
-                  "appinvite_service"
-              ]["status"] = 2
-
-          # --------------------------------------------------------
-          # Final JSON
-          # --------------------------------------------------------
-
-          result = {
-              "project_info": project_info,
-              "client": [client]
-          }
-
-          Path(
-              "firebase/google-services.reconstructed.json"
-          ).write_text(
+          Path("artifacts/result/firebase.json").write_text(
               json.dumps(
-                  result,
+                  firebase_keys,
                   indent=2,
                   ensure_ascii=False
-              ) + "\n"
+              ) + "\n",
+              encoding="utf-8"
           )
 
-          print(
-              json.dumps(
-                  result,
-                  indent=2,
-                  ensure_ascii=False
+          with open(
+              "artifacts/result/Values.env",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              for key, value in firebase_keys.items():
+                  f.write(f"{key}={value}\n")
+
+          print("Firebase values extracted:")
+          for key, value in firebase_keys.items():
+              print(f"{key}={value}")
+
+          missing = [
+              key
+              for key in (
+                  "google_app_id",
+                  "google_api_key",
+                  "gcm_defaultSenderId",
+                  "project_id",
               )
-          )
+              if not firebase_keys.get(key)
+          ]
+
+          if missing:
+              print()
+              print(
+                  "WARNING: missing Firebase values: "
+                  + ", ".join(missing)
+              )
           PY
 
-      # ============================================================
-      # Generate certificate Kotlin representation
-      # ============================================================
-
-      - name: Generate certificate byte array
+      # ------------------------------------------------------------
+      # 12. Add extraction summary
+      # ------------------------------------------------------------
+      - name: Create final summary
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 <<'PY'
-          from pathlib import Path
-
-          data = Path(
-              "telegram-cert.der"
-          ).read_bytes()
-
-          lines = []
-
-          for i in range(0, len(data), 16):
-
-              chunk = data[i:i + 16]
-
-              values = ", ".join(
-                  f"0x{byte:02x}.toByte()"
-                  for byte in chunk
-              )
-
-              lines.append(
-                  f"    {values},"
-              )
-
-          result = (
-              "byteArrayOf(\n"
-              + "\n".join(lines)
-              + "\n)\n"
-          )
-
-          Path(
-              "telegram-cert.kt.txt"
-          ).write_text(result)
-
-          print(
-              f"Certificate size: {len(data)} bytes"
-          )
-          PY
-
-      # ============================================================
-      # Generate summary
-      # ============================================================
-
-      - name: Generate summary
-        shell: bash
-        run: |
-          set -euo pipefail
+          SUMMARY="artifacts/result/summary.txt"
 
           {
-            echo "# Telegram APK extraction"
+            echo "============================================================"
+            echo "Telegram APK extraction summary"
+            echo "============================================================"
             echo
 
-            echo "## Package"
-            cat apk-info/package-name.txt
+            echo "APK:"
+            sha256sum work/telegram.apk
             echo
 
-            echo "## Version code"
-            cat apk-info/version-code.txt 2>/dev/null || true
+            echo "Package:"
+            grep '^package_name=' "$SUMMARY" 2>/dev/null || true
             echo
 
-            echo "## Version name"
-            cat apk-info/version-name.txt 2>/dev/null || true
+            echo "BuildVars:"
+            if [ -f artifacts/result/BuildVars.extracted.txt ]; then
+              cat artifacts/result/BuildVars.extracted.txt
+            else
+              echo "NOT_FOUND"
+            fi
+
             echo
+            echo "Firebase:"
+            if [ -f artifacts/result/firebase.json ]; then
+              cat artifacts/result/firebase.json
+            else
+              echo "NOT_FOUND"
+            fi
 
-            echo "## Certificate"
-            cat certificate-info.txt
             echo
+            echo "Certificate:"
+            if [ -f artifacts/result/certificate.txt ]; then
+              grep -E \
+                'Signer|Subject|Issuer|Serial|MD5|SHA-1|SHA-256' \
+                artifacts/result/certificate.txt \
+                || true
+            else
+              echo "NOT_FOUND"
+            fi
 
-            echo "## SHA-256"
-            openssl x509 \
-              -in telegram-cert.pem \
-              -noout \
-              -fingerprint \
-              -sha256
-            echo
+          } > "$SUMMARY"
 
-            echo "## SHA-1"
-            openssl x509 \
-              -in telegram-cert.pem \
-              -noout \
-              -fingerprint \
-              -sha1
-            echo
+          cat "$SUMMARY"
 
-            echo "## Firebase values"
-            cat firebase/values.env
-            echo
+      # ------------------------------------------------------------
+      # 13. Remove all heavy temporary files
+      # ------------------------------------------------------------
+      - name: Remove temporary files
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
 
-            echo "## Reconstructed google-services.json"
-            cat firebase/google-services.reconstructed.json
+          echo "Removing temporary APK and JADX output..."
 
-          } > extraction-summary.md
+          rm -rf work/jadx
+          rm -f work/jadx.log
+          rm -f work/telegram.apk
+          rm -rf work
 
-          cat extraction-summary.md
+          echo
+          echo "Files that will be uploaded:"
+          find artifacts/result \
+            -type f \
+            -printf '%P %s bytes\n' \
+            | sort
 
-      # ============================================================
-      # Upload artifacts
-      # ============================================================
-
-      - name: Upload extracted data
-        uses: actions/upload-artifact@v7
+      # ------------------------------------------------------------
+      # 14. Upload ONLY small extraction results
+      # ------------------------------------------------------------
+      - name: Upload extraction results
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: telegram-apk-data
-          path: |
-            telegram.apk
-
-            telegram-cert.pem
-            telegram-cert.der
-            telegram-cert.kt.txt
-
-            certificate-info.txt
-            certificate-output.txt
-
-            apk-info/badging.txt
-            apk-info/package-name.txt
-            apk-info/version-code.txt
-            apk-info/version-name.txt
-
-            firebase/resources.txt
-            firebase/values.env
-            firebase/google-services.reconstructed.json
-
-            extraction-summary.md
+          name: telegram-extraction
+          path: artifacts/result
+          if-no-files-found: warn
+          retention-days: 7

@@ -8,6 +8,10 @@ on:
         type: string
         default: master
         required: true
+      appidhash:
+        description: "use another APP_ID/APP_HASH"
+        type: boolean
+        default: false
 
 env:
   CCACHE_DIR: ~/.ccache
@@ -216,6 +220,7 @@ jobs:
       # ============================================================
 
       - name: Fill BuildVars
+        if: ${{ inputs.appidhash }}
         run: |
           set -euo pipefail
 

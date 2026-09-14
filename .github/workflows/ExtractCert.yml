@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      APK_URL: https://telegram.org/dl/android/apk
+      APK_URL: https://github.com/MrKristofere/Telegram/releases/download/Tst/Telegram.apk
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
       BUILD_TOOLS_VERSION: "36.1.0"
 

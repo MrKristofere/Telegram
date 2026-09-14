@@ -199,60 +199,112 @@ jobs:
           set -euo pipefail
 
           LOG="artifacts/result/extraction.log"
+          CERT_PEM="artifacts/result/certificate.pem"
+          CERT_DER="artifacts/result/certificate.der"
+          CERT_INFO="artifacts/result/certificate.txt"
 
           echo
           echo "============================================================"
           echo "SIGNING CERTIFICATE"
           echo "============================================================"
-          echo
+
+          # --------------------------------------------------------
+          # Certificate information
+          # --------------------------------------------------------
 
           echo "=== apksigner certificate information ===" \
-            | tee artifacts/result/certificate.txt
+            | tee "$CERT_INFO"
 
           "$ANDROID_BUILD_TOOLS/apksigner" verify \
             --verbose \
             --print-certs \
             work/telegram.apk \
-            | tee -a artifacts/result/certificate.txt
+            2>&1 \
+            | tee -a "$CERT_INFO"
+
+          # --------------------------------------------------------
+          # Extract ONLY PEM certificate
+          # --------------------------------------------------------
 
           echo
-          echo "=== PEM certificate ===" \
-            | tee -a artifacts/result/certificate.txt
+          echo "Extracting PEM certificate..."
 
           "$ANDROID_BUILD_TOOLS/apksigner" verify \
             --print-certs-pem \
             work/telegram.apk \
-            > work/certificate.pem
+            2>/dev/null \
+            | awk '
+                /-----BEGIN CERTIFICATE-----/ {
+                    inside=1
+                }
 
-          cat work/certificate.pem \
-            | tee -a artifacts/result/certificate.txt
+                inside {
+                    print
+                }
 
-          cp work/certificate.pem \
-            artifacts/result/certificate.pem
+                /-----END CERTIFICATE-----/ {
+                    exit
+                }
+            ' > "$CERT_PEM"
 
-          if command -v openssl >/dev/null 2>&1; then
-            openssl x509 \
-              -in work/certificate.pem \
-              -outform DER \
-              -out artifacts/result/certificate.der
+          # --------------------------------------------------------
+          # Validate PEM
+          # --------------------------------------------------------
 
-            echo
-            echo "=== OpenSSL fingerprints ===" \
-              | tee -a artifacts/result/certificate.txt
-
-            openssl x509 \
-              -in work/certificate.pem \
-              -noout \
-              -subject \
-              -issuer \
-              -serial \
-              -fingerprint -md5 \
-              -fingerprint -sha1 \
-              -fingerprint -sha256 \
-              | tee -a artifacts/result/certificate.txt
-          else
-            echo "[WARN] openssl not available" | tee -a "$LOG"
+          if [ ! -s "$CERT_PEM" ]; then
+            echo "[FAIL] Certificate PEM was not extracted." \
+              | tee -a "$LOG"
+            exit 1
           fi
+
+          if ! grep -q '^-----BEGIN CERTIFICATE-----$' "$CERT_PEM"; then
+            echo "[FAIL] Invalid PEM: BEGIN CERTIFICATE not found." \
+              | tee -a "$LOG"
+            exit 1
+          fi
+
+          if ! grep -q '^-----END CERTIFICATE-----$' "$CERT_PEM"; then
+            echo "[FAIL] Invalid PEM: END CERTIFICATE not found." \
+              | tee -a "$LOG"
+            exit 1
+          fi
+
+          echo
+          echo "PEM certificate:"
+          cat "$CERT_PEM"
+
+          # --------------------------------------------------------
+          # Convert PEM -> DER
+          # --------------------------------------------------------
+
+          openssl x509 \
+            -in "$CERT_PEM" \
+            -outform DER \
+            -out "$CERT_DER"
+
+          # --------------------------------------------------------
+          # Additional certificate information
+          # --------------------------------------------------------
+
+          echo
+          echo "=== OpenSSL certificate information ===" \
+            | tee -a "$CERT_INFO"
+
+          openssl x509 \
+            -in "$CERT_PEM" \
+            -noout \
+            -subject \
+            -issuer \
+            -serial \
+            -dates \
+            -fingerprint -md5 \
+            -fingerprint -sha1 \
+            -fingerprint -sha256 \
+            | tee -a "$CERT_INFO"
+
+          echo
+          echo "Certificate files:"
+          ls -lh "$CERT_PEM" "$CERT_DER"
 
       # ------------------------------------------------------------
       # 8. Run JADX

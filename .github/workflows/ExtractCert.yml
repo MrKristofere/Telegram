@@ -1,0 +1,105 @@
+name: Extract APK certificate
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extract-cert:
+    runs-on: ubuntu-latest
+
+    env:
+      APK_URL: "https://telegram.org/dl/android/apk"
+
+    steps:
+      - name: Download APK
+        run: |
+          curl -fL --retry 3 \
+            -o telegram.apk \
+            "$APK_URL"
+
+      - name: Verify APK and print certificate
+        run: |
+          apksigner verify --verbose telegram.apk
+          apksigner verify --print-certs telegram.apk
+
+      - name: Extract certificate as PEM
+        run: |
+          apksigner verify --print-certs-pem telegram.apk > certificate-output.txt
+
+          awk '
+            /-----BEGIN CERTIFICATE-----/ { found=1 }
+            found { print }
+            /-----END CERTIFICATE-----/ {
+              exit
+            }
+          ' certificate-output.txt > telegram-cert.pem
+
+      - name: Convert certificate to DER
+        run: |
+          openssl x509 \
+            -in telegram-cert.pem \
+            -outform DER \
+            -out telegram-cert.der
+
+      - name: Calculate fingerprints
+        run: |
+          echo "SHA-256:"
+          openssl x509 \
+            -in telegram-cert.pem \
+            -noout \
+            -fingerprint \
+            -sha256
+
+          echo "SHA-1:"
+          openssl x509 \
+            -in telegram-cert.pem \
+            -noout \
+            -fingerprint \
+            -sha1
+
+      - name: Generate Kotlin byte array
+        run: |
+          xxd -i telegram-cert.der > telegram-cert.c
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          data = Path("telegram-cert.der").read_bytes()
+
+          kotlin = ", ".join(
+              f"0x{b:02x}.toByte()"
+              for b in data
+          )
+
+          Path("telegram-cert.kt.txt").write_text(
+              "byteArrayOf(\n    " +
+              ",\n    ".join(
+                  [kotlin[i:i+80] for i in range(0, len(kotlin), 80)]
+              ) +
+              "\n)\n"
+          )
+          PY
+
+      - name: Show certificate information
+        run: |
+          echo "=== Certificate ==="
+          cat telegram-cert.pem
+
+          echo
+          echo "=== SHA-256 ==="
+          openssl x509 -in telegram-cert.pem -noout -fingerprint -sha256
+
+          echo
+          echo "=== Certificate details ==="
+          openssl x509 -in telegram-cert.pem -noout -subject -issuer -serial
+
+      - name: Upload certificate
+        uses: actions/upload-artifact@v7
+        with:
+          name: telegram-certificate
+          path: |
+            telegram-cert.pem
+            telegram-cert.der
+            telegram-cert.kt.txt
+            certificate-output.txt

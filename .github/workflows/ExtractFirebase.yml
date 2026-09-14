@@ -1,0 +1,436 @@
+name: Extract Telegram APK data
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+
+    env:
+      APK_URL: https://telegram.org/dl/android/apk
+      ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+      BUILD_TOOLS_VERSION: "36.1.0"
+      CMDLINE_TOOLS_VERSION: "14742923"
+
+    steps:
+      # ------------------------------------------------------------
+      # Android SDK
+      # ------------------------------------------------------------
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+
+          curl -fsSL \
+            -o commandlinetools.zip \
+            "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION}_latest.zip"
+
+          unzip -q commandlinetools.zip \
+            -d "$ANDROID_SDK_ROOT/cmdline-tools"
+
+          mv \
+            "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" \
+            "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+          yes | "$SDKMANAGER" \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            --licenses >/dev/null || true
+
+          "$SDKMANAGER" \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            "build-tools;$BUILD_TOOLS_VERSION"
+
+          echo "$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+
+      # ------------------------------------------------------------
+      # Download APK
+      # ------------------------------------------------------------
+
+      - name: Download APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl -fL \
+            --retry 5 \
+            --retry-delay 2 \
+            --retry-all-errors \
+            -o telegram.apk \
+            "$APK_URL"
+
+          echo "APK:"
+          file telegram.apk
+          ls -lh telegram.apk
+
+          # Make sure we actually downloaded an APK/ZIP
+          unzip -t telegram.apk >/dev/null
+
+      # ------------------------------------------------------------
+      # APK information
+      # ------------------------------------------------------------
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          apksigner verify --verbose telegram.apk
+
+      - name: Extract signing certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          apksigner verify \
+            --print-certs \
+            telegram.apk \
+            > certificate-info.txt
+
+          apksigner verify \
+            --print-certs-pem \
+            telegram.apk \
+            > certificate-output.txt
+
+          awk '
+            /-----BEGIN CERTIFICATE-----/ { found=1 }
+            found { print }
+            /-----END CERTIFICATE-----/ {
+              exit
+            }
+          ' certificate-output.txt > telegram-cert.pem
+
+          test -s telegram-cert.pem
+
+          openssl x509 \
+            -in telegram-cert.pem \
+            -outform DER \
+            -out telegram-cert.der
+
+      - name: Print certificate information
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========== APK CERTIFICATE =========="
+          cat certificate-info.txt
+
+          echo
+          echo "========== SHA-256 =========="
+          openssl x509 \
+            -in telegram-cert.pem \
+            -noout \
+            -fingerprint \
+            -sha256
+
+          echo
+          echo "========== SHA-1 =========="
+          openssl x509 \
+            -in telegram-cert.pem \
+            -noout \
+            -fingerprint \
+            -sha1
+
+          echo
+          echo "========== SUBJECT =========="
+          openssl x509 \
+            -in telegram-cert.pem \
+            -noout \
+            -subject
+
+          echo
+          echo "========== ISSUER =========="
+          openssl x509 \
+            -in telegram-cert.pem \
+            -noout \
+            -issuer
+
+          echo
+          echo "========== SERIAL =========="
+          openssl x509 \
+            -in telegram-cert.pem \
+            -noout \
+            -serial
+
+          echo
+          echo "========== DER SHA-256 =========="
+          sha256sum telegram-cert.der
+
+      # ------------------------------------------------------------
+      # Extract APK resources
+      # ------------------------------------------------------------
+
+      - name: Extract APK resources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p apk-dump
+
+          apkanalyzer manifest application-id telegram.apk \
+            > apk-dump/package-name.txt
+
+          apkanalyzer manifest min-sdk telegram.apk \
+            > apk-dump/min-sdk.txt
+
+          apkanalyzer manifest target-sdk telegram.apk \
+            > apk-dump/target-sdk.txt
+
+          apkanalyzer manifest version-name telegram.apk \
+            > apk-dump/version-name.txt
+
+          apkanalyzer manifest version-code telegram.apk \
+            > apk-dump/version-code.txt
+
+          apkanalyzer resources packages telegram.apk \
+            > apk-dump/resource-packages.txt
+
+          echo "Package name:"
+          cat apk-dump/package-name.txt
+
+          echo
+          echo "Version:"
+          cat apk-dump/version-name.txt
+
+      # ------------------------------------------------------------
+      # Extract Firebase values
+      # ------------------------------------------------------------
+
+      - name: Extract Firebase configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p firebase
+
+          # Dump all resources to text.
+          apkanalyzer resources value \
+            --config \
+            telegram.apk \
+            > firebase/resources.txt
+
+          # Also keep the complete resource dump.
+          cp firebase/resources.txt firebase/resources-full.txt
+
+      # ------------------------------------------------------------
+      # Reconstruct google-services.json
+      # ------------------------------------------------------------
+
+      - name: Build google-services.json
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          package_name = Path(
+              "apk-dump/package-name.txt"
+          ).read_text().strip()
+
+          text = Path(
+              "firebase/resources-full.txt"
+          ).read_text(errors="replace")
+
+          def find_resource(name):
+              """
+              Try to find a resource value in apkanalyzer output.
+
+              The exact formatting of apkanalyzer output can differ
+              between Android SDK versions, so several patterns are
+              intentionally supported.
+              """
+
+              patterns = [
+                  rf'name="{re.escape(name)}".*?value="([^"]*)"',
+                  rf'\b{name}\b.*?=\s*"([^"]*)"',
+                  rf'\b{name}\b.*?:\s*"([^"]*)"',
+                  rf'\b{name}\b\s*=\s*([^\s]+)',
+              ]
+
+              for pattern in patterns:
+                  match = re.search(
+                      pattern,
+                      text,
+                      flags=re.IGNORECASE | re.DOTALL
+                  )
+
+                  if match:
+                      value = match.group(1).strip()
+
+                      # Remove XML escaping if present.
+                      value = (
+                          value
+                          .replace("&amp;", "&")
+                          .replace("&quot;", '"')
+                          .replace("&lt;", "<")
+                          .replace("&gt;", ">")
+                      )
+
+                      if value:
+                          return value
+
+              return None
+
+          google_app_id = find_resource("google_app_id")
+          sender_id = find_resource("gcm_defaultSenderId")
+          default_web_client_id = find_resource("default_web_client_id")
+          firebase_database_url = find_resource("firebase_database_url")
+          google_api_key = find_resource("google_api_key")
+          crash_api_key = find_resource(
+              "google_crash_reporting_api_key"
+          )
+          project_id = find_resource("project_id")
+
+          # ----------------------------------------------------------
+          # Construct the reconstructed google-services.json
+          # ----------------------------------------------------------
+
+          project_info = {}
+
+          if project_id:
+              project_info["project_id"] = project_id
+
+          if sender_id:
+              project_info["project_number"] = sender_id
+
+          if firebase_database_url:
+              project_info["firebase_url"] = firebase_database_url
+
+          client_info = {
+              "mobilesdk_app_id": google_app_id,
+              "android_client_info": {
+                  "package_name": package_name
+              }
+          }
+
+          if google_app_id is None:
+              client_info.pop("mobilesdk_app_id")
+
+          client = {
+              "client_info": client_info
+          }
+
+          if google_api_key:
+              client["api_key"] = [
+                  {
+                      "current_key": google_api_key
+                  }
+              ]
+
+          oauth_clients = []
+
+          if default_web_client_id:
+              oauth_clients.append({
+                  "client_id": default_web_client_id,
+                  "client_type": 3
+              })
+
+          if oauth_clients:
+              client["oauth_client"] = oauth_clients
+
+          if crash_api_key:
+              client["services"] = {
+                  "appinvite_service": {
+                      "other_platform_oauth_client": []
+                  }
+              }
+
+          output = {
+              "project_info": project_info,
+              "client": [client]
+          }
+
+          Path(
+              "firebase/google-services.reconstructed.json"
+          ).write_text(
+              json.dumps(
+                  output,
+                  indent=2,
+                  ensure_ascii=False
+              ) + "\n"
+          )
+
+          print(
+              json.dumps(
+                  output,
+                  indent=2,
+                  ensure_ascii=False
+              )
+          )
+          PY
+
+      # ------------------------------------------------------------
+      # Generate summary
+      # ------------------------------------------------------------
+
+      - name: Generate summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "# Telegram APK information"
+            echo
+            echo "## Package"
+            cat apk-dump/package-name.txt
+            echo
+            echo "## Version"
+            cat apk-dump/version-name.txt
+            echo
+            echo "## Certificate"
+            cat certificate-info.txt
+            echo
+            echo "## SHA-256"
+            openssl x509 \
+              -in telegram-cert.pem \
+              -noout \
+              -fingerprint \
+              -sha256
+            echo
+            echo "## SHA-1"
+            openssl x509 \
+              -in telegram-cert.pem \
+              -noout \
+              -fingerprint \
+              -sha1
+            echo
+            echo "## Firebase"
+            cat firebase/google-services.reconstructed.json
+          } | tee extraction-summary.md
+
+      # ------------------------------------------------------------
+      # Upload everything
+      # ------------------------------------------------------------
+
+      - name: Upload extracted data
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-apk-data
+          path: |
+            telegram.apk
+
+            telegram-cert.pem
+            telegram-cert.der
+            certificate-info.txt
+            certificate-output.txt
+
+            firebase/google-services.reconstructed.json
+            firebase/resources-full.txt
+
+            apk-dump/package-name.txt
+            apk-dump/min-sdk.txt
+            apk-dump/target-sdk.txt
+            apk-dump/version-name.txt
+            apk-dump/version-code.txt
+            apk-dump/resource-packages.txt
+
+            extraction-summary.md

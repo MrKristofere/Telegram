@@ -22,6 +22,10 @@ on:
           - Debug
           - Standalone
         default: Debug
+      appidhash:
+        description: "use another APP_ID/APP_HASH"
+        type: boolean
+        default: false
 
 env:
   CCACHE_DIR: ~/.ccache
@@ -115,6 +119,7 @@ jobs:
           cat gradle.properties
 
       - name: Fill BuildVars
+        if: ${{ inputs.appidhash }}
         run: |
           sed -i -E 's/public static int APP_ID = [0-9]+;/public static int APP_ID = 6;/' \
             TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java

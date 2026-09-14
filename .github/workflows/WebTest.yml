@@ -151,9 +151,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          sed -i '/^org.gradle.caching=/d' gradle.properties
+          sed -i \
+            -e '/^org.gradle.caching=/d' \
+            -e '/^org.gradle.configuration-cache=/d' \
+            -e '/^org.gradle.configuration-cache.problems=/d' \
+             gradle.properties
 
           printf '%s\n' 'org.gradle.caching=true' >> gradle.properties
+          printf '%s\n' 'org.gradle.configuration-cache=true' >> gradle.properties
+          printf '%s\n' 'org.gradle.configuration-cache.problems=warn' >> gradle.properties
 
           echo "Gradle optimizations configured."
 

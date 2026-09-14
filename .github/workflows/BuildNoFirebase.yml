@@ -8,6 +8,10 @@ on:
         type: string
         default: master
         required: true
+      appidhash:
+        description: "use another APP_ID/APP_HASH"
+        type: boolean
+        default: false
 
 env:
   APP_PACKAGE: ft.telegram.messenger
@@ -513,6 +517,7 @@ jobs:
       # ------------------------------------------------------------
 
       - name: Configure BuildVars
+        if: ${{ inputs.appidhash }}
         shell: bash
         run: |
           set -euo pipefail

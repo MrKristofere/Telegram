@@ -401,7 +401,6 @@ jobs:
           set -euo pipefail
 
           ./gradlew \
-            --build-cache \
             :TMessagesProj_AppStandalone:assembleAfatStandalone
 
       # ============================================================

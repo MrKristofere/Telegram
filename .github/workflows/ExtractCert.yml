@@ -149,35 +149,24 @@ jobs:
       # ============================================================
 
       - name: Download Telegram APK
-        shell: bash
         run: |
           set -euo pipefail
 
-          echo "============================================================"
-          echo "DOWNLOAD TELEGRAM APK"
-          echo "============================================================"
-
           mkdir -p artifacts
-
-          echo "URL:"
-          echo "$APK_URL"
 
           curl -fL \
             --retry 5 \
             --retry-delay 3 \
+            --retry-all-errors \
+            --continue-at - \
             -o artifacts/telegram.apk \
             "$APK_URL"
 
-          echo
-          echo "APK downloaded."
-
+          file artifacts/telegram.apk
           ls -lh artifacts/telegram.apk
-
           echo
           echo "SHA-256 of APK:"
           sha256sum artifacts/telegram.apk
-
-          echo "============================================================"
 
 
       # ============================================================

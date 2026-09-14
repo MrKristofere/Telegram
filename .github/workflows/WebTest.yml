@@ -8,6 +8,10 @@ on:
         type: string
         default: master
         required: true
+      pkg-name:
+        description: "use another pkg name"
+        type: string
+        default: ft.telegram.messenger.web
       appidhash:
         description: "use another APP_ID/APP_HASH"
         type: boolean
@@ -82,7 +86,7 @@ jobs:
           grep '^APP_PACKAGE=' gradle.properties
 
           sed -i \
-            's/^APP_PACKAGE=.*/APP_PACKAGE=ft.telegram.messenger/' \
+            's/^APP_PACKAGE=.*/APP_PACKAGE=${{ inputs.pkg-name }}/' \
             gradle.properties
 
           echo "Configured APP_PACKAGE:"
@@ -109,7 +113,7 @@ jobs:
               data = json.load(f)
 
           target = "org.telegram.messenger.web"
-          replacement = "ft.telegram.messenger.web"
+          replacement = "${{ inputs.pkg-name }}"
 
           found = False
 
@@ -175,7 +179,7 @@ jobs:
       # ============================================================
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           java-version: '21'
           distribution: 'temurin'

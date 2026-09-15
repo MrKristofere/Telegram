@@ -100,48 +100,61 @@ jobs:
         run: |
           set -euo pipefail
 
-          FILE="TMessagesProj_AppStandalone/google-services.json"
-
-          cp "$FILE" "${FILE}.original"
-
           python3 <<'PY'
           import json
+          import shutil
 
-          path = "TMessagesProj_AppStandalone/google-services.json"
-
-          with open(path, "r", encoding="utf-8") as f:
-              data = json.load(f)
+          files = [
+              "TMessagesProj_AppStandalone/google-services.json",
+              "TMessagesProj/google-services.json",
+          ]
 
           target = "org.telegram.messenger.web"
           replacement = "${{ inputs.pkg-name }}.web"
 
-          found = False
+          for path in files:
+              print(f"Configuring Firebase: {path}")
 
-          for client in data.get("client", []):
-              package_name = (
-                  client
-                  .get("client_info", {})
-                  .get("android_client_info", {})
-                  .get("package_name")
-              )
+              # Keep original file for cleanup/debugging.
+              shutil.copy2(path, f"{path}.original")
 
-              if package_name == target:
-                  client["client_info"]["android_client_info"]["package_name"] = replacement
-                  found = True
-                  print(f"Changed Firebase package: {target} -> {replacement}")
+              with open(path, "r", encoding="utf-8") as f:
+                  data = json.load(f)
 
-          if not found:
-              raise SystemExit(
-                  f"Firebase client '{target}' was not found in {path}"
-              )
+              found = False
 
-          with open(path, "w", encoding="utf-8") as f:
-              json.dump(data, f, indent=2)
-              f.write("\n")
+              for client in data.get("client", []):
+                  package_name = (
+                      client
+                      .get("client_info", {})
+                      .get("android_client_info", {})
+                      .get("package_name")
+                  )
+
+                  if package_name == target:
+                      client["client_info"]["android_client_info"]["package_name"] = replacement
+                      found = True
+
+                      print(
+                          f"Changed Firebase package in {path}: "
+                          f"{target} -> {replacement}"
+                      )
+
+              if not found:
+                  raise SystemExit(
+                      f"Firebase client '{target}' was not found in {path}"
+                  )
+
+              with open(path, "w", encoding="utf-8") as f:
+                  json.dump(data, f, indent=2)
+                  f.write("\n")
+
           PY
 
           echo "Firebase package entries:"
-          grep -n "package_name" "$FILE"
+          grep -n "package_name" \
+            TMessagesProj_AppStandalone/google-services.json \
+            TMessagesProj/google-services.json
 
       # ============================================================
       # GRADLE OPTIMIZATIONS
@@ -153,7 +166,7 @@ jobs:
 
           sed -i \
             -e '/^org.gradle.caching=/d' \
-             gradle.properties
+            gradle.properties
 
           printf '%s\n' 'org.gradle.caching=true' >> gradle.properties
 
@@ -530,6 +543,8 @@ jobs:
 
           rm -f TMessagesProj/config/release.keystore
           rm -f "$GRADLE_USER_HOME/gradle.properties"
+
           rm -f TMessagesProj_AppStandalone/google-services.json.original
+          rm -f TMessagesProj/google-services.json.original
 
           echo "Signing files cleaned up."

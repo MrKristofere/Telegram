@@ -73,7 +73,7 @@ jobs:
             -e '/^org.gradle.configuration-cache.problems=/d' \
              gradle.properties
 
-          printf "\norg.gradle.caching=true\n" >> gradle.properties
+          printf "org.gradle.caching=true\n" >> gradle.properties
           printf "org.gradle.configuration-cache=true\n" >> gradle.properties
           printf "org.gradle.configuration-cache.problems=warn\n" >> gradle.properties
 

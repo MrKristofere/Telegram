@@ -15,7 +15,7 @@ on:
 
       commit_message:
         description: "Commit message"
-        required: true
+        required: false
         type: string
         default: "Apply patch"
 

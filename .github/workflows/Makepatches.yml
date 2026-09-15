@@ -183,6 +183,7 @@ jobs:
               exit 1
             fi
 
+
             # ------------------------------------------------------
             # Make commit available
             # ------------------------------------------------------
@@ -204,6 +205,7 @@ jobs:
 
             fi
 
+
             # ------------------------------------------------------
             # Verify commit now exists
             # ------------------------------------------------------
@@ -219,8 +221,15 @@ jobs:
 
             echo "Commit is available."
 
+
             # ------------------------------------------------------
-            # Find parent
+            # Find parent.
+            #
+            # IMPORTANT:
+            #
+            # Do NOT use rev-list --parents before the parent exists.
+            # In a shallow repository it will report only the commit,
+            # which looks like a root commit.
             # ------------------------------------------------------
 
             local PARENT=""
@@ -273,9 +282,10 @@ jobs:
 
             fi
 
+
             # ------------------------------------------------------
             # Now parent definitely exists.
-            # Only now check number of parents.
+            # Only NOW check number of parents.
             # ------------------------------------------------------
 
             local PARENT_COUNT
@@ -290,6 +300,7 @@ jobs:
 
             echo
             echo "Parent count: $PARENT_COUNT"
+
 
             # ------------------------------------------------------
             # Only ordinary single-parent commits are supported.
@@ -309,6 +320,7 @@ jobs:
               exit 1
 
             fi
+
 
             echo
             echo "Commit is ready."
@@ -358,6 +370,11 @@ jobs:
               exit 1
             fi
 
+
+            # ------------------------------------------------------
+            # Make both endpoints available.
+            # ------------------------------------------------------
+
             ensure_commit_with_parent "$RANGE_START"
             ensure_commit_with_parent "$RANGE_END"
 
@@ -369,101 +386,72 @@ jobs:
               git rev-parse "${RANGE_END}^{commit}"
             )"
 
-            HEAD_SHA="$(git rev-parse HEAD)"
-
             echo
             echo "Range START: $RANGE_START_SHA"
             echo "Range END:   $RANGE_END_SHA"
-            echo "HEAD:        $HEAD_SHA"
+
 
             # ------------------------------------------------------
-            # Make END reachable from current HEAD.
+            # IMPORTANT:
+            #
+            # The range is NOT required to end at current HEAD.
+            #
+            # If the repository is shallow, make it complete before
+            # resolving START -> END ancestry.
             # ------------------------------------------------------
 
-            DEPTH=100
-            CURRENT_DEPTH=1
-
-            while ! git merge-base \
-                --is-ancestor \
-                "$RANGE_END_SHA" \
-                "$HEAD_SHA" \
-                >/dev/null 2>&1; do
+            if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
 
               echo
-              echo "Range END is not reachable from HEAD."
-              echo "Deepening repository by $DEPTH commits..."
+              echo "Repository is shallow."
+              echo "Fetching complete history for range resolution..."
 
               git fetch \
                 --no-tags \
-                --deepen="$DEPTH" \
+                --unshallow \
                 origin
 
-              CURRENT_DEPTH=$((CURRENT_DEPTH + DEPTH))
-              DEPTH=$((DEPTH * 2))
+            fi
 
-              if [[ "$CURRENT_DEPTH" -ge "$MAX_DEPTH" ]]; then
-
-                echo "::error::Unable to make range END reachable from HEAD."
-                exit 1
-
-              fi
-
-            done
-
-            echo
-            echo "Range END is reachable from HEAD."
 
             # ------------------------------------------------------
-            # Make START reachable from END.
-            #
-            # This loop is necessary because a shallow repository
-            # can contain both commits while still not having the
-            # complete ancestry between them.
+            # START must be an ancestor of END.
             # ------------------------------------------------------
 
-            DEPTH=100
-            CURRENT_DEPTH=1
-
-            while ! git merge-base \
+            if ! git merge-base \
                 --is-ancestor \
                 "$RANGE_START_SHA" \
                 "$RANGE_END_SHA" \
-                >/dev/null 2>&1; do
+                >/dev/null 2>&1; then
 
-              echo
-              echo "Range START is not yet an ancestor of END."
-              echo "Deepening repository by $DEPTH commits..."
+              echo "::error::COMMIT_RANGE START must be an ancestor of END."
+              echo "::error::START: $RANGE_START_SHA"
+              echo "::error::END:   $RANGE_END_SHA"
 
-              git fetch \
-                --no-tags \
-                --deepen="$DEPTH" \
-                origin
+              exit 1
 
-              CURRENT_DEPTH=$((CURRENT_DEPTH + DEPTH))
-              DEPTH=$((DEPTH * 2))
-
-              if [[ "$CURRENT_DEPTH" -ge "$MAX_DEPTH" ]]; then
-
-                echo "::error::Unable to establish START -> END ancestry."
-                echo "::error::START: $RANGE_START_SHA"
-                echo "::error::END:   $RANGE_END_SHA"
-                exit 1
-
-              fi
-
-            done
+            fi
 
             echo
             echo "Range ancestry is valid."
             echo "START is an ancestor of END."
 
+
             # ------------------------------------------------------
-            # Build range now and verify every selected commit.
+            # Build the actual inclusive range.
+            #
+            # START^..END includes START itself.
+            #
+            # --ancestry-path prevents unrelated side branches from
+            # entering the selected range.
+            #
+            # --reverse gives historical order.
             # ------------------------------------------------------
 
             mapfile -t RANGE_COMMITS < <(
               git rev-list \
                 --reverse \
+                --ancestry-path \
                 "${RANGE_START_SHA}^..${RANGE_END_SHA}"
             )
 
@@ -476,13 +464,20 @@ jobs:
             echo "Commits in range:"
             printf '  %s\n' "${RANGE_COMMITS[@]}"
 
+
+            # ------------------------------------------------------
+            # Verify every selected commit.
+            #
+            # This also rejects root/merge commits according to the
+            # existing workflow rules.
+            # ------------------------------------------------------
+
             for commit in "${RANGE_COMMITS[@]}"; do
               ensure_commit_with_parent "$commit"
             done
 
             echo "RANGE_START_SHA=$RANGE_START_SHA" >> "$GITHUB_ENV"
             echo "RANGE_END_SHA=$RANGE_END_SHA" >> "$GITHUB_ENV"
-            echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
 
           fi
 
@@ -526,6 +521,7 @@ jobs:
               exit 1
             fi
 
+
             # ------------------------------------------------------
             # Resolve BASE
             # ------------------------------------------------------
@@ -553,11 +549,13 @@ jobs:
 
             fi
 
+
             HEAD_SHA="$(git rev-parse HEAD)"
 
             echo
             echo "BASE: $BASE_SHA"
             echo "HEAD: $HEAD_SHA"
+
 
             # ------------------------------------------------------
             # Make BASE reachable from HEAD.
@@ -582,6 +580,7 @@ jobs:
                 origin
 
               CURRENT_DEPTH=$((CURRENT_DEPTH + DEPTH))
+
               DEPTH=$((DEPTH * 2))
 
               if [[ "$CURRENT_DEPTH" -ge "$MAX_DEPTH" ]]; then
@@ -593,8 +592,10 @@ jobs:
 
             done
 
+
             echo
             echo "BASE is reachable from HEAD."
+
 
             # ------------------------------------------------------
             # Verify selected commits and their parents.
@@ -603,6 +604,7 @@ jobs:
             for commit in $COMMITS; do
               ensure_commit_with_parent "$commit"
             done
+
 
             echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
             echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
@@ -668,6 +670,7 @@ jobs:
 
           SELECTED_COMMITS=()
 
+
           # --------------------------------------------------------
           # RANGE
           # --------------------------------------------------------
@@ -696,15 +699,17 @@ jobs:
                 >/dev/null 2>&1; then
 
               echo "::error::COMMIT_RANGE START must be an ancestor of END."
+              echo "::error::START: $RANGE_START_SHA"
+              echo "::error::END:   $RANGE_END_SHA"
+
               exit 1
 
             fi
 
-            SELECTED_COMMITS=()
-
             mapfile -t SELECTED_COMMITS < <(
               git rev-list \
                 --reverse \
+                --ancestry-path \
                 "${RANGE_START_SHA}^..${RANGE_END_SHA}"
             )
 
@@ -737,7 +742,9 @@ jobs:
                 "${BASE_SHA}..${HEAD_SHA}"
             )
 
+
             declare -A EXCLUDED=()
+
 
             echo
             echo "Selected commits to exclude:"
@@ -751,6 +758,7 @@ jobs:
               echo "  $SHA"
 
             done
+
 
             echo
             echo "Building resulting list..."
@@ -820,6 +828,7 @@ jobs:
 
           NUMBER=1
 
+
           for SHA_INPUT in "${SELECTED_COMMITS[@]}"; do
 
             SHA="$(git rev-parse "${SHA_INPUT}^{commit}")"
@@ -851,6 +860,7 @@ jobs:
                 awk '{print NF-1}'
             )"
 
+
             if [[ "$PARENT_COUNT" -ne 1 ]]; then
 
               echo "::error::Commit $SHA is not a normal single-parent commit."
@@ -870,12 +880,14 @@ jobs:
                 "$SHA"
             )"
 
+
             MESSAGE="$(
               git log \
                 -1 \
                 --format='%b' \
                 "$SHA"
             )"
+
 
             AUTHOR_NAME="$(
               git log \
@@ -884,12 +896,14 @@ jobs:
                 "$SHA"
             )"
 
+
             AUTHOR_EMAIL="$(
               git log \
                 -1 \
                 --format='%ae' \
                 "$SHA"
             )"
+
 
             ORIGINAL_AUTHOR="${AUTHOR_NAME} <${AUTHOR_EMAIL}>"
 
@@ -910,9 +924,11 @@ jobs:
 
             SAFE_SUBJECT="${SAFE_SUBJECT:0:80}"
 
+
             if [[ -z "$SAFE_SUBJECT" ]]; then
               SAFE_SUBJECT="patch"
             fi
+
 
             PATCH_FILE="$PATCH_DIR/$(printf '%04d' "$NUMBER")-${SAFE_SUBJECT}.patch"
 
@@ -944,15 +960,18 @@ jobs:
 
                   ;;
 
+
                 custom)
 
                   printf 'Author: %s\n' "$CUSTOM_AUTHOR"
 
                   ;;
 
+
                 none)
 
                   ;;
+
 
                 *)
 
@@ -1057,13 +1076,22 @@ jobs:
               # ----------------------------------------------------
               # Generate diff.
               #
-              # PARENT -> COMMIT
+              # IMPORTANT:
+              #
+              # This compares:
+              #
+              #     PARENT -> COMMIT
+              #
+              # It does NOT cherry-pick the commit.
+              #
+              # Therefore every patch is independent.
               # ----------------------------------------------------
 
               git diff \
                 "${DIFF_ARGS[@]}" \
                 "$PARENT" \
                 "$SHA"
+
 
             } > "$PATCH_FILE"
 
@@ -1088,6 +1116,7 @@ jobs:
                   true
               )"
 
+
               echo
               echo "Full-index entries: $INDEX_COUNT"
 
@@ -1099,6 +1128,7 @@ jobs:
                   "$SHA" |
                   awk '$1 == "-" && $2 == "-" {count++} END {print count+0}'
               )"
+
 
               if [[ "$BINARY_COUNT" -gt 0 ]]; then
 
@@ -1130,11 +1160,13 @@ jobs:
           echo "Generated patches"
           echo "========================================"
 
+
           find "$PATCH_DIR" \
             -maxdepth 1 \
             -type f \
             -print |
             sort
+
 
           PATCH_COUNT="$(
             find "$PATCH_DIR" \
@@ -1144,8 +1176,10 @@ jobs:
               wc -l
           )"
 
+
           echo
           echo "Patch count: $PATCH_COUNT"
+
 
           echo
           echo "Total size:"

@@ -1,38 +1,46 @@
-name: Extract Telegram Android APK data
+name: Extract Android APK data
 
 on:
   workflow_dispatch:
+    inputs:
+      package_url:
+        description: "URL to APK / APKS / XAPK / APKM / ZIP"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 env:
-  APK_URL: "https://telegram.org/dl/android/apk"
-
   ANDROID_SDK_ROOT: "${{ github.workspace }}/android-sdk"
   ANDROID_HOME: "${{ github.workspace }}/android-sdk"
 
   CMDLINE_TOOLS_VERSION: "14742923"
   BUILD_TOOLS_VERSION: "36.1.0"
-  JADX_VERSION: "1.5.0"
+  JADX_VERSION: "1.5.6"
+
+  DEBIAN_FRONTEND: noninteractive
 
 jobs:
   extract:
     runs-on: ubuntu-latest
 
     steps:
-      # ------------------------------------------------------------
-      # 1. Install Java
-      # ------------------------------------------------------------
+
+      # ============================================================
+      # 1. Java
+      # ============================================================
+
       - name: Set up Java
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
 
-      # ------------------------------------------------------------
-      # 2. Install Android SDK command line tools
-      # ------------------------------------------------------------
+      # ============================================================
+      # 2. Android SDK
+      # ============================================================
+
       - name: Install Android SDK
         shell: bash
         run: |
@@ -40,11 +48,15 @@ jobs:
 
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
 
-          curl -fL --retry 5 --retry-all-errors \
+          curl -fL \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
             -o /tmp/cmdline-tools.zip \
             "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION}_latest.zip"
 
-          unzip -q /tmp/cmdline-tools.zip \
+          unzip -q \
+            /tmp/cmdline-tools.zip \
             -d "$ANDROID_SDK_ROOT/cmdline-tools"
 
           mv \
@@ -53,7 +65,7 @@ jobs:
 
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
 
-          yes | sdkmanager --licenses >/dev/null || true
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
           sdkmanager \
             "platform-tools" \
@@ -64,66 +76,85 @@ jobs:
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
 
-          # Export exact Build Tools directory for subsequent steps.
           echo "ANDROID_BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
 
-          echo
-          echo "Installed Build Tools:"
-          ls -la "$BUILD_TOOLS"
+          echo "SDK:"
+          sdkmanager --version
 
           echo
-          echo "sdkmanager:"
-          sdkmanager --version
+          echo "Build Tools:"
+          "$BUILD_TOOLS/aapt2" version
 
           echo
           echo "apksigner:"
           "$BUILD_TOOLS/apksigner" --version
 
-          echo
-          echo "aapt2:"
-          "$BUILD_TOOLS/aapt2" version
+      # ============================================================
+      # 3. Install JADX 1.5.6
+      # ============================================================
 
-      # ------------------------------------------------------------
-      # 3. Install JADX
-      # ------------------------------------------------------------
       - name: Install JADX
         shell: bash
         run: |
           set -euo pipefail
 
-          curl -fL --retry 5 --retry-all-errors \
+          JADX_URL="https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip"
+
+          curl -fL \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
             -o /tmp/jadx.zip \
-            "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip"
+            "$JADX_URL"
 
           mkdir -p "$HOME/jadx"
-          unzip -q /tmp/jadx.zip -d "$HOME/jadx"
+
+          unzip -q \
+            /tmp/jadx.zip \
+            -d "$HOME/jadx"
 
           echo "$HOME/jadx/bin" >> "$GITHUB_PATH"
 
+          echo
+          echo "Installed JADX:"
           "$HOME/jadx/bin/jadx" --version
 
-      # ------------------------------------------------------------
-      # 4. Prepare directories
-      # ------------------------------------------------------------
+      # ============================================================
+      # 4. Prepare workspace
+      # ============================================================
+
       - name: Prepare workspace
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf artifacts work
-          mkdir -p artifacts/result
-          mkdir -p work
+          rm -rf work artifacts
 
-      # ------------------------------------------------------------
-      # 5. Download official Telegram APK
-      # ------------------------------------------------------------
-      - name: Download Telegram APK
+          mkdir -p \
+            work/download \
+            work/apks \
+            work/jadx \
+            work/meta \
+            artifacts/result
+
+      # ============================================================
+      # 5. Download input
+      # ============================================================
+
+      - name: Download package
         shell: bash
+        env:
+          PACKAGE_URL: ${{ inputs.package_url }}
         run: |
           set -euo pipefail
 
+          if [ -z "$PACKAGE_URL" ]; then
+            echo "[FAIL] package_url is empty."
+            exit 1
+          fi
+
           echo "Downloading:"
-          echo "$APK_URL"
+          echo "$PACKAGE_URL"
           echo
 
           curl -fL \
@@ -131,200 +162,515 @@ jobs:
             --retry-delay 3 \
             --retry-all-errors \
             --continue-at - \
-            -o work/telegram.apk \
-            "$APK_URL"
+            -o work/download/input \
+            "$PACKAGE_URL"
+
+          test -s work/download/input
 
           echo
-          echo "Downloaded APK:"
-          file work/telegram.apk
-          ls -lh work/telegram.apk
+          echo "Downloaded:"
+          file work/download/input
+          ls -lh work/download/input
 
           echo
-          echo "APK SHA256:"
-          sha256sum work/telegram.apk
+          echo "SHA256:"
+          sha256sum work/download/input \
+            | tee artifacts/result/input.sha256
 
-      # ------------------------------------------------------------
-      # 6. Extract package name and basic APK metadata
-      # ------------------------------------------------------------
+      # ============================================================
+      # 6. Detect and normalize package
+      #
+      # Supports:
+      #
+      #   APK
+      #   APKS
+      #   XAPK
+      #   APKM
+      #   ZIP containing APK files
+      #
+      # Result:
+      #
+      #   work/apks/*.apk
+      #
+      # Every APK is extracted safely using Python zipfile.
+      # ============================================================
+
+      - name: Detect package type
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          src = Path("work/download/input")
+          out = Path("work/apks")
+          out.mkdir(parents=True, exist_ok=True)
+
+          log = Path("artifacts/result/package-detection.txt")
+
+          def is_zip(path):
+              return zipfile.is_zipfile(path)
+
+          def safe_name(name):
+              name = name.replace("\\", "/")
+              name = name.lstrip("/")
+              parts = [
+                  p for p in name.split("/")
+                  if p not in ("", ".", "..")
+              ]
+              return Path(*parts).name
+
+          if not is_zip(src):
+              raise SystemExit(
+                  "Input is not a ZIP-based Android package."
+              )
+
+          with zipfile.ZipFile(src) as z:
+              apk_entries = [
+                  x for x in z.namelist()
+                  if x.lower().endswith(".apk")
+                  and not x.endswith("/")
+              ]
+
+          if not apk_entries:
+              # The input itself is an APK.
+              target = out / "base.apk"
+              target.write_bytes(src.read_bytes())
+
+              package_type = "APK"
+
+          else:
+              package_type = "CONTAINER"
+
+              used = set()
+
+              for index, entry in enumerate(apk_entries):
+                  filename = safe_name(entry)
+
+                  if not filename:
+                      filename = f"split_{index}.apk"
+
+                  if filename in used:
+                      stem = Path(filename).stem
+                      suffix = Path(filename).suffix
+                      filename = f"{stem}_{index}{suffix}"
+
+                  used.add(filename)
+
+                  target = out / filename
+
+                  with zipfile.ZipFile(src) as z:
+                      target.write_bytes(
+                          z.read(entry)
+                      )
+
+          apks = sorted(out.glob("*.apk"))
+
+          if not apks:
+              raise SystemExit(
+                  "No APK files were produced."
+              )
+
+          lines = [
+              "Package detection",
+              "=" * 60,
+              f"Input: {src}",
+              f"Type: {package_type}",
+              f"APK count: {len(apks)}",
+              "",
+              "APK files:",
+          ]
+
+          for apk in apks:
+              lines.append(
+                  f"{apk.name} | {apk.stat().st_size} bytes"
+              )
+
+          log.write_text(
+              "\n".join(lines) + "\n",
+              encoding="utf-8"
+          )
+
+          print("\n".join(lines))
+          PY
+
+          echo
+          echo "Detected APKs:"
+          find work/apks \
+            -maxdepth 1 \
+            -type f \
+            -name "*.apk" \
+            -printf '%f %s bytes\n' \
+            | sort
+
+      # ============================================================
+      # 7. Validate every APK
+      # ============================================================
+
+      - name: Validate APK files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r apk; do
+
+            echo
+            echo "============================================================"
+            echo "Checking: $apk"
+            echo "============================================================"
+
+            file "$apk"
+
+            if ! unzip -tq "$apk" >/dev/null 2>&1; then
+              echo "[FAIL] Invalid APK ZIP:"
+              echo "$apk"
+              exit 1
+            fi
+
+            if ! unzip -Z1 "$apk" \
+              | grep -q '^AndroidManifest.xml$'; then
+
+              echo "[FAIL] AndroidManifest.xml missing:"
+              echo "$apk"
+              exit 1
+            fi
+
+            echo "SHA256:"
+            sha256sum "$apk"
+
+          done < <(
+            find work/apks \
+              -maxdepth 1 \
+              -type f \
+              -name "*.apk" \
+              -print \
+              | sort
+          )
+
+      # ============================================================
+      # 8. Extract manifest / package metadata
+      # ============================================================
+
       - name: Extract APK metadata
         shell: bash
         run: |
           set -euo pipefail
 
-          LOG="artifacts/result/extraction.log"
+          OUT="artifacts/result/apk-metadata.txt"
+
+          : > "$OUT"
+
+          while IFS= read -r apk; do
+
+            name="$(basename "$apk")"
+
+            {
+              echo "============================================================"
+              echo "APK: $name"
+              echo "============================================================"
+              echo
+
+              "$ANDROID_BUILD_TOOLS/aapt2" \
+                dump badging "$apk" \
+                2>&1 \
+                || true
+
+              echo
+              echo "SHA256:"
+              sha256sum "$apk"
+
+              echo
+
+            } | tee -a "$OUT"
+
+          done < <(
+            find work/apks \
+              -maxdepth 1 \
+              -type f \
+              -name "*.apk" \
+              -print \
+              | sort
+          )
+
+      # ============================================================
+      # 9. Create machine-readable package summary
+      # ============================================================
+
+      - name: Create APK JSON metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import json
+          import re
+          import subprocess
+          from pathlib import Path
+
+          result = []
+
+          for apk in sorted(Path("work/apks").glob("*.apk")):
+
+              proc = subprocess.run(
+                  [
+                      "${ANDROID_BUILD_TOOLS}/aapt2",
+                      "dump",
+                      "badging",
+                      str(apk),
+                  ],
+                  capture_output=True,
+                  text=True,
+                  errors="replace",
+                  shell=False,
+              )
+
+              text = proc.stdout
+
+              package = re.search(
+                  r"^package:.*?name='([^']+)'",
+                  text,
+                  re.MULTILINE,
+              )
+
+              version_code = re.search(
+                  r"versionCode='([^']+)'",
+                  text,
+              )
+
+              version_name = re.search(
+                  r"versionName='([^']+)'",
+                  text,
+              )
+
+              sdk = re.search(
+                  r"sdkVersion:'([^']+)'",
+                  text,
+              )
+
+              target_sdk = re.search(
+                  r"targetSdkVersion:'([^']+)'",
+                  text,
+              )
+
+              result.append(
+                  {
+                      "file": apk.name,
+                      "size": apk.stat().st_size,
+                      "sha256": subprocess.check_output(
+                          ["sha256sum", str(apk)],
+                          text=True,
+                      ).split()[0],
+                      "package": (
+                          package.group(1)
+                          if package else None
+                      ),
+                      "version_code": (
+                          version_code.group(1)
+                          if version_code else None
+                      ),
+                      "version_name": (
+                          version_name.group(1)
+                          if version_name else None
+                      ),
+                      "min_sdk": (
+                          sdk.group(1)
+                          if sdk else None
+                      ),
+                      "target_sdk": (
+                          target_sdk.group(1)
+                          if target_sdk else None
+                      ),
+                  }
+              )
+
+          Path(
+              "artifacts/result/apk-metadata.json"
+          ).write_text(
+              json.dumps(
+                  result,
+                  indent=2,
+                  ensure_ascii=False,
+              ) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+          cat artifacts/result/apk-metadata.json
+
+      # ============================================================
+      # 10. Extract signing certificates
+      #
+      # Each split is checked independently.
+      # ============================================================
+
+      - name: Extract signing certificates
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CERT_DIR="artifacts/result/certificates"
+
+          mkdir -p "$CERT_DIR"
+
+          while IFS= read -r apk; do
+
+            base="$(basename "$apk" .apk)"
+
+            safe="$(
+              printf '%s' "$base" \
+                | tr -cs 'A-Za-z0-9._-' '_'
+            )"
+
+            info="$CERT_DIR/${safe}.txt"
+            pem="$CERT_DIR/${safe}.pem"
+            der="$CERT_DIR/${safe}.der"
+
+            echo
+            echo "============================================================"
+            echo "Certificate: $base"
+            echo "============================================================"
+
+            if ! "$ANDROID_BUILD_TOOLS/apksigner" verify \
+              --verbose \
+              --print-certs \
+              "$apk" \
+              > "$info" 2>&1; then
+
+              echo "[WARN] apksigner verification failed."
+              cat "$info"
+
+              continue
+            fi
+
+            cat "$info"
+
+            "$ANDROID_BUILD_TOOLS/apksigner" verify \
+              --print-certs-pem \
+              "$apk" \
+              2>/dev/null \
+              | awk '
+                  /-----BEGIN CERTIFICATE-----/ {
+                    found=1
+                  }
+
+                  found {
+                    print
+                  }
+
+                  /-----END CERTIFICATE-----/ {
+                    exit
+                  }
+                ' > "$pem"
+
+            if [ ! -s "$pem" ]; then
+              echo "[WARN] PEM certificate not found."
+              rm -f "$pem"
+              continue
+            fi
+
+            openssl x509 \
+              -in "$pem" \
+              -outform DER \
+              -out "$der"
+
+            {
+              echo
+              echo "OpenSSL:"
+              openssl x509 \
+                -in "$pem" \
+                -noout \
+                -subject \
+                -issuer \
+                -serial \
+                -dates \
+                -fingerprint -md5 \
+                -fingerprint -sha1 \
+                -fingerprint -sha256
+
+            } | tee -a "$info"
+
+          done < <(
+            find work/apks \
+              -maxdepth 1 \
+              -type f \
+              -name "*.apk" \
+              -print \
+              | sort
+          )
+
+      # ============================================================
+      # 11. Compare signing certificates
+      # ============================================================
+
+      - name: Create certificate summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="artifacts/result/certificate-summary.txt"
 
           {
+            echo "Signing certificate summary"
             echo "============================================================"
-            echo "Telegram APK extraction"
-            echo "============================================================"
             echo
-            echo "APK URL: $APK_URL"
-            echo
-            echo "APK SHA256:"
-            sha256sum work/telegram.apk
-            echo
-          } > "$LOG"
 
-          echo "=== APK BADGING ===" | tee artifacts/result/manifest.txt
-          "$ANDROID_BUILD_TOOLS/aapt2" dump badging work/telegram.apk \
-            | tee -a artifacts/result/manifest.txt \
-            | grep -m1 "^package:" || true
+            for cert in artifacts/result/certificates/*.pem; do
 
-          PACKAGE_NAME="$(
-            "$ANDROID_BUILD_TOOLS/aapt2" dump badging work/telegram.apk 2>/dev/null \
-              | sed -n "s/^package: name='\([^']*\)'.*/\1/p" \
-              | head -n1
-          )"
+              [ -f "$cert" ] || continue
 
-          if [ -n "$PACKAGE_NAME" ]; then
-            echo "package_name=$PACKAGE_NAME" \
-              | tee artifacts/result/summary.txt
-          else
-            echo "package_name=NOT_FOUND" \
-              | tee artifacts/result/summary.txt
+              echo "FILE: $(basename "$cert")"
 
-            echo "[FAIL] Package name was not extracted" | tee -a "$LOG"
-          fi
+              openssl x509 \
+                -in "$cert" \
+                -noout \
+                -subject \
+                -issuer \
+                -serial \
+                -fingerprint -sha1 \
+                -fingerprint -sha256
 
-          echo >> artifacts/result/summary.txt
+              echo
 
-          echo "APK metadata extraction completed."
+            done
 
-      # ------------------------------------------------------------
-      # 7. Extract signing certificate
-      # ------------------------------------------------------------
-      - name: Extract signing certificate
+          } > "$OUT"
+
+          cat "$OUT"
+
+      # ============================================================
+      # 12. Decompile ALL APKs together with JADX
+      #
+      # This is important for split applications.
+      # JADX 1.5.6 supports Android package formats and APK inputs.
+      # Passing all splits together allows the analysis to see the
+      # complete set of DEX/resources instead of analyzing each
+      # split as an isolated application.
+      # ============================================================
+
+      - name: Decompile with JADX
         shell: bash
         run: |
-          set -euo pipefail
+          set -u
 
-          LOG="artifacts/result/extraction.log"
-          CERT_PEM="artifacts/result/certificate.pem"
-          CERT_DER="artifacts/result/certificate.der"
-          CERT_INFO="artifacts/result/certificate.txt"
+          mapfile -t APK_FILES < <(
+            find work/apks \
+              -maxdepth 1 \
+              -type f \
+              -name "*.apk" \
+              -print \
+              | sort
+          )
 
-          echo
-          echo "============================================================"
-          echo "SIGNING CERTIFICATE"
-          echo "============================================================"
-
-          # --------------------------------------------------------
-          # Certificate information
-          # --------------------------------------------------------
-
-          echo "=== apksigner certificate information ===" \
-            | tee "$CERT_INFO"
-
-          "$ANDROID_BUILD_TOOLS/apksigner" verify \
-            --verbose \
-            --print-certs \
-            work/telegram.apk \
-            2>&1 \
-            | tee -a "$CERT_INFO"
-
-          # --------------------------------------------------------
-          # Extract ONLY PEM certificate
-          # --------------------------------------------------------
-
-          echo
-          echo "Extracting PEM certificate..."
-
-          "$ANDROID_BUILD_TOOLS/apksigner" verify \
-            --print-certs-pem \
-            work/telegram.apk \
-            2>/dev/null \
-            | awk '
-                /-----BEGIN CERTIFICATE-----/ {
-                    inside=1
-                }
-
-                inside {
-                    print
-                }
-
-                /-----END CERTIFICATE-----/ {
-                    exit
-                }
-            ' > "$CERT_PEM"
-
-          # --------------------------------------------------------
-          # Validate PEM
-          # --------------------------------------------------------
-
-          if [ ! -s "$CERT_PEM" ]; then
-            echo "[FAIL] Certificate PEM was not extracted." \
-              | tee -a "$LOG"
+          if [ "${#APK_FILES[@]}" -eq 0 ]; then
+            echo "[FAIL] No APKs for JADX."
             exit 1
           fi
 
-          if ! grep -q '^-----BEGIN CERTIFICATE-----$' "$CERT_PEM"; then
-            echo "[FAIL] Invalid PEM: BEGIN CERTIFICATE not found." \
-              | tee -a "$LOG"
-            exit 1
-          fi
+          echo "JADX input files:"
+          printf ' - %s\n' "${APK_FILES[@]}"
 
-          if ! grep -q '^-----END CERTIFICATE-----$' "$CERT_PEM"; then
-            echo "[FAIL] Invalid PEM: END CERTIFICATE not found." \
-              | tee -a "$LOG"
-            exit 1
-          fi
-
-          echo
-          echo "PEM certificate:"
-          cat "$CERT_PEM"
-
-          # --------------------------------------------------------
-          # Convert PEM -> DER
-          # --------------------------------------------------------
-
-          openssl x509 \
-            -in "$CERT_PEM" \
-            -outform DER \
-            -out "$CERT_DER"
-
-          # --------------------------------------------------------
-          # Additional certificate information
-          # --------------------------------------------------------
-
-          echo
-          echo "=== OpenSSL certificate information ===" \
-            | tee -a "$CERT_INFO"
-
-          openssl x509 \
-            -in "$CERT_PEM" \
-            -noout \
-            -subject \
-            -issuer \
-            -serial \
-            -dates \
-            -fingerprint -md5 \
-            -fingerprint -sha1 \
-            -fingerprint -sha256 \
-            | tee -a "$CERT_INFO"
-
-          echo
-          echo "Certificate files:"
-          ls -lh "$CERT_PEM" "$CERT_DER"
-
-      # ------------------------------------------------------------
-      # 8. Run JADX
-      #
-      # Temporary only:
-      #   work/jadx
-      #
-      # It is NOT uploaded to artifacts.
-      # ------------------------------------------------------------
-      - name: Decompile APK with JADX
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p work/jadx
-
-          echo
-          echo "============================================================"
-          echo "JADX"
-          echo "============================================================"
           echo
 
           jadx \
@@ -332,96 +678,85 @@ jobs:
             --show-bad-code \
             --threads-count 4 \
             -d work/jadx \
-            work/telegram.apk \
-            > work/jadx.log 2>&1 || {
-              STATUS=$?
+            "${APK_FILES[@]}" \
+            > work/jadx.log 2>&1
 
-              echo "[WARN] JADX exited with status $STATUS"
-              echo "[WARN] Extraction will continue."
-              echo
-              echo "Last JADX log lines:"
-              tail -n 100 work/jadx.log || true
-            }
+          STATUS=$?
+
+          cp work/jadx.log \
+            artifacts/result/jadx.log
 
           echo
-          echo "JADX output created."
-          find work/jadx -maxdepth 3 -type f | head -100 || true
+          echo "JADX exit code: $STATUS"
 
-      # ------------------------------------------------------------
-      # 9. Find BuildVars.java
-      # ------------------------------------------------------------
-      - name: Find BuildVars.java
+          if [ "$STATUS" -ne 0 ]; then
+            echo
+            echo "[WARN] JADX completed with errors."
+            echo "The workflow will continue."
+            echo
+            tail -n 200 work/jadx.log
+          fi
+
+          # Do not fail the whole extraction merely because JADX
+          # could not decompile some classes.
+          exit 0
+
+      # ============================================================
+      # 13. Locate BuildVars and related source
+      # ============================================================
+
+      - name: Locate BuildVars
         shell: bash
         run: |
           set -euo pipefail
 
-          LOG="artifacts/result/extraction.log"
+          OUT="artifacts/result/BuildVars.locations.txt"
 
-          BUILDVARS_FILE="$(
+          {
+            echo "BuildVars search"
+            echo "============================================================"
+            echo
+
             find work/jadx \
               -type f \
-              -name "BuildVars.java" \
-              | head -n1
-          )"
+              \( \
+                -name "BuildVars.java" \
+                -o -name "BuildVars.kt" \
+              \) \
+              -print \
+              | sort
 
-          if [ -z "$BUILDVARS_FILE" ]; then
-            echo "[FAIL] BuildVars.java was not found." \
-              | tee -a "$LOG"
+            echo
+            echo "Relevant symbols:"
+            echo
 
-            echo "BuildVars.java: NOT_FOUND" \
-              > artifacts/result/BuildVars.extracted.txt
+            grep -RniE \
+              --include='*.java' \
+              --include='*.kt' \
+              'APP_ID|APP_HASH|GOOGLE_AUTH_CLIENT_ID|HUAWEI_APP_ID|SAFETYNET_KEY' \
+              work/jadx \
+              || true
 
-            exit 1
-          fi
+          } > "$OUT"
 
-          echo "BuildVars.java: $BUILDVARS_FILE" \
-            | tee artifacts/result/BuildVars.locations.txt
+          cat "$OUT"
 
-          echo
-          echo "=== Relevant BuildVars lines ===" \
-            | tee -a artifacts/result/BuildVars.locations.txt
+      # ============================================================
+      # 14. Extract BuildVars values
+      # ============================================================
 
-          grep -nE \
-            'APP_ID|APP_HASH|GOOGLE_AUTH_CLIENT_ID|HUAWEI_APP_ID|SAFETYNET_KEY' \
-            "$BUILDVARS_FILE" \
-            | tee -a artifacts/result/BuildVars.locations.txt || true
-
-      # ------------------------------------------------------------
-      # 10. Extract ALL non-null BuildVars values
-      # ------------------------------------------------------------
       - name: Extract BuildVars values
         shell: bash
         run: |
           set -euo pipefail
 
-          BUILDVARS_FILE="$(
-            find work/jadx \
-              -type f \
-              -name "BuildVars.java" \
-              | head -n1
-          )"
-
-          OUTPUT="artifacts/result/BuildVars.extracted.txt"
-          LOCATIONS="artifacts/result/BuildVars.locations.txt"
-          LOG="artifacts/result/extraction.log"
-
-          if [ -z "$BUILDVARS_FILE" ]; then
-            echo "[FAIL] BuildVars.java not found." | tee -a "$LOG"
-            exit 1
-          fi
-
-          python3 - "$BUILDVARS_FILE" "$OUTPUT" "$LOCATIONS" <<'PY'
+          python3 <<'PY'
           import re
-          import sys
           from pathlib import Path
 
-          source_file = Path(sys.argv[1])
-          output_file = Path(sys.argv[2])
-          locations_file = Path(sys.argv[3])
-
-          text = source_file.read_text(
-              encoding="utf-8",
-              errors="replace"
+          files = sorted(
+              list(Path("work/jadx").rglob("BuildVars.java"))
+              + list(Path("work/jadx").rglob("BuildVars.kt"))
           )
 
           fields = [
@@ -432,252 +767,278 @@ jobs:
               "SAFETYNET_KEY",
           ]
 
-          output = []
-          locations = []
+          result = []
 
-          output.append("BuildVars extracted from APK")
-          output.append("=" * 60)
-          output.append("")
-
-          total_values = 0
-
-          for field in fields:
-              output.append(f"[{field}]")
-
-              # Matches:
-              #
-              # APP_ID = 4;
-              # APP_ID=4;
-              # APP_HASH = "abc";
-              # APP_HASH=null;
-              #
-              pattern = re.compile(
-                  rf'(?<![\w$])'
-                  rf'{re.escape(field)}'
-                  rf'\s*=\s*'
-                  rf'(?:'
-                  rf'"([^"]*)"'
-                  rf'|'
-                  rf"'([^']*)'"
-                  rf'|'
-                  rf'(-?\d+)'
-                  rf'|'
-                  rf'(null)'
-                  rf')'
-                  rf'\s*;'
-              )
-
-              matches = list(pattern.finditer(text))
-
-              if not matches:
-                  output.append("NOT_FOUND")
-                  output.append("")
-
-                  locations.append(
-                      f"{field}: NOT_FOUND"
-                  )
-                  continue
-
-              non_null = []
-
-              for index, match in enumerate(matches, start=1):
-                  value = (
-                      match.group(1)
-                      if match.group(1) is not None
-                      else match.group(2)
-                      if match.group(2) is not None
-                      else match.group(3)
-                      if match.group(3) is not None
-                      else None
-                  )
-
-                  is_null = match.group(4) is not None
-
-                  line_number = text.count(
-                      "\n",
-                      0,
-                      match.start()
-                  ) + 1
-
-                  line_text = text.splitlines()[line_number - 1].strip()
-
-                  locations.append(
-                      f"{field}[{index}] "
-                      f"line={line_number} "
-                      f"value={'null' if is_null else value}"
-                  )
-                  locations.append(
-                      f"    {line_text}"
-                  )
-
-                  # IMPORTANT:
-                  # null values are deliberately ignored.
-                  if not is_null and value is not None:
-                      non_null.append(value)
-
-              if non_null:
-                  for value in non_null:
-                      output.append(f"{field}={value}")
-                      total_values += 1
-              else:
-                  output.append("NO_NON_NULL_VALUE")
-
-              output.append("")
-
-          output.append("=" * 60)
-          output.append(f"Total non-null values: {total_values}")
-
-          output_file.write_text(
-              "\n".join(output) + "\n",
-              encoding="utf-8"
+          result.append(
+              "BuildVars extracted values"
           )
+          result.append("=" * 60)
+          result.append("")
 
-          locations_file.write_text(
-              locations_file.read_text(
+          seen = set()
+
+          for source in files:
+
+              text = source.read_text(
                   encoding="utf-8",
-                  errors="replace"
+                  errors="replace",
               )
-              + "\n\n"
-              + "\n".join(locations)
-              + "\n",
-              encoding="utf-8"
+
+              result.append(
+                  f"SOURCE: {source}"
+              )
+              result.append("-" * 60)
+
+              for field in fields:
+
+                  pattern = re.compile(
+                      rf"\b{re.escape(field)}\b"
+                      rf"\s*=\s*"
+                      rf"(?:"
+                      rf'"([^"]*)"'
+                      rf"|"
+                      rf"'([^']*)'"
+                      rf"|"
+                      rf"(-?\d+)"
+                      rf"|"
+                      rf"(null)"
+                      rf")"
+                  )
+
+                  values = []
+
+                  for match in pattern.finditer(text):
+
+                      if match.group(4):
+                          continue
+
+                      value = (
+                          match.group(1)
+                          if match.group(1) is not None
+                          else match.group(2)
+                          if match.group(2) is not None
+                          else match.group(3)
+                      )
+
+                      if value:
+                          values.append(value)
+
+                  if not values:
+                      result.append(
+                          f"{field}=NOT_FOUND"
+                      )
+                  else:
+                      for value in values:
+
+                          key = (
+                              field,
+                              value,
+                          )
+
+                          if key not in seen:
+                              seen.add(key)
+
+                              result.append(
+                                  f"{field}={value}"
+                              )
+
+                  result.append("")
+
+              result.append("")
+
+          if not files:
+              result.append(
+                  "BuildVars.java / BuildVars.kt: NOT_FOUND"
+              )
+
+          Path(
+              "artifacts/result/BuildVars.extracted.txt"
+          ).write_text(
+              "\n".join(result) + "\n",
+              encoding="utf-8",
           )
 
-          print()
-          print("=== BuildVars extraction result ===")
-          print(output_file.read_text(encoding="utf-8"))
-
-          print()
-          print("=== BuildVars locations ===")
-          print("\n".join(locations))
+          print("\n".join(result))
           PY
 
-      # ------------------------------------------------------------
-      # 11. Extract Firebase values from decoded resources
-      # ------------------------------------------------------------
-      - name: Extract Firebase configuration
+      # ============================================================
+      # 15. Extract Firebase / Google resources
+      # ============================================================
+
+      - name: Extract Firebase resources
         shell: bash
         run: |
           set -euo pipefail
 
-          LOG="artifacts/result/extraction.log"
-
-          echo
-          echo "============================================================"
-          echo "FIREBASE"
-          echo "============================================================"
-          echo
-
-          VALUES_FILE="$(
-            find work/jadx \
-              -type f \
-              -path "*/resources/res/values/strings.xml" \
-              | head -n1
-          )"
-
-          if [ -z "$VALUES_FILE" ]; then
-            echo "[WARN] strings.xml was not found in JADX resources." \
-              | tee -a "$LOG"
-
-            echo "Firebase resources: NOT_FOUND" \
-              > artifacts/result/firebase.json
-
-            echo "Firebase Values.env: NOT_FOUND" \
-              > artifacts/result/Values.env
-
-            exit 0
-          fi
-
-          echo "Using:"
-          echo "$VALUES_FILE"
-
-          python3 - "$VALUES_FILE" <<'PY'
+          python3 <<'PY'
           import json
-          import sys
           import xml.etree.ElementTree as ET
           from pathlib import Path
 
-          xml_file = Path(sys.argv[1])
+          wanted = {
+              "google_app_id",
+              "google_api_key",
+              "google_crash_reporting_api_key",
+              "gcm_defaultSenderId",
+              "firebase_database_url",
+              "project_id",
+              "default_web_client_id",
+          }
 
-          root = ET.parse(xml_file).getroot()
+          found = {}
 
-          values = {}
+          xml_files = sorted(
+              Path("work/jadx").rglob("strings.xml")
+          )
 
-          for item in root.findall("string"):
-              name = item.attrib.get("name")
-              if not name:
+          for xml_file in xml_files:
+
+              try:
+                  root = ET.parse(
+                      xml_file
+                  ).getroot()
+              except Exception:
                   continue
 
-              value = "".join(item.itertext()).strip()
-              values[name] = value
+              for item in root.findall("string"):
 
-          firebase_keys = {
-              "google_app_id": values.get("google_app_id"),
-              "google_api_key": values.get("google_api_key"),
-              "google_crash_reporting_api_key": values.get(
-                  "google_crash_reporting_api_key"
-              ),
-              "gcm_defaultSenderId": values.get(
-                  "gcm_defaultSenderId"
-              ),
-              "firebase_database_url": values.get(
-                  "firebase_database_url"
-              ),
-              "project_id": values.get("project_id"),
-              "default_web_client_id": values.get(
-                  "default_web_client_id"
-              ),
-          }
+                  name = item.attrib.get("name")
 
-          firebase_keys = {
-              k: v
-              for k, v in firebase_keys.items()
-              if v
-          }
+                  if name not in wanted:
+                      continue
 
-          Path("artifacts/result/firebase.json").write_text(
+                  value = "".join(
+                      item.itertext()
+                  ).strip()
+
+                  if not value:
+                      continue
+
+                  found.setdefault(
+                      name,
+                      set(),
+                  ).add(value)
+
+          normalized = {}
+
+          for key, values in found.items():
+
+              values = sorted(values)
+
+              normalized[key] = (
+                  values[0]
+                  if len(values) == 1
+                  else values
+              )
+
+          Path(
+              "artifacts/result/firebase.json"
+          ).write_text(
               json.dumps(
-                  firebase_keys,
+                  normalized,
                   indent=2,
-                  ensure_ascii=False
+                  ensure_ascii=False,
               ) + "\n",
-              encoding="utf-8"
+              encoding="utf-8",
           )
 
           with open(
               "artifacts/result/Values.env",
               "w",
-              encoding="utf-8"
+              encoding="utf-8",
           ) as f:
-              for key, value in firebase_keys.items():
-                  f.write(f"{key}={value}\n")
 
-          print("Firebase values extracted:")
-          for key, value in firebase_keys.items():
-              print(f"{key}={value}")
+              for key, value in normalized.items():
 
-          missing = [
-              key
-              for key in (
-                  "google_app_id",
-                  "google_api_key",
-                  "gcm_defaultSenderId",
-                  "project_id",
+                  if isinstance(value, list):
+                      for i, item in enumerate(
+                          value,
+                          start=1,
+                      ):
+                          f.write(
+                              f"{key}_{i}={item}\n"
+                          )
+                  else:
+                      f.write(
+                          f"{key}={value}\n"
+                      )
+
+          print(
+              json.dumps(
+                  normalized,
+                  indent=2,
+                  ensure_ascii=False,
               )
-              if not firebase_keys.get(key)
-          ]
-
-          if missing:
-              print()
-              print(
-                  "WARNING: missing Firebase values: "
-                  + ", ".join(missing)
-              )
+          )
           PY
 
-      # ------------------------------------------------------------
-      # 12. Add extraction summary
-      # ------------------------------------------------------------
+      # ============================================================
+      # 16. Search source/resources for important values
+      #
+      # This is deliberately broader than BuildVars.
+      # ============================================================
+
+      - name: Search decoded source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          grep -RniE \
+            --include='*.java' \
+            --include='*.kt' \
+            --include='*.xml' \
+            --include='*.json' \
+            --include='*.smali' \
+            --include='*.txt' \
+            'APP_ID|APP_HASH|GOOGLE_AUTH_CLIENT_ID|HUAWEI_APP_ID|SAFETYNET_KEY|google_app_id|google_api_key|firebase_database_url|gcm_defaultSenderId|project_id|default_web_client_id' \
+            work/jadx \
+            > artifacts/result/important-values-search.txt \
+            || true
+
+      # ============================================================
+      # 17. Extract Android permissions
+      # ============================================================
+
+      - name: Extract permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUT="artifacts/result/permissions.txt"
+
+          : > "$OUT"
+
+          while IFS= read -r apk; do
+
+            {
+              echo "============================================================"
+              echo "APK: $(basename "$apk")"
+              echo "============================================================"
+
+              "$ANDROID_BUILD_TOOLS/aapt2" \
+                dump permissions "$apk" \
+                2>&1 \
+                || true
+
+              echo
+
+            } >> "$OUT"
+
+          done < <(
+            find work/apks \
+              -maxdepth 1 \
+              -type f \
+              -name "*.apk" \
+              -print \
+              | sort
+          )
+
+          cat "$OUT"
+
+      # ============================================================
+      # 18. Final summary
+      # ============================================================
+
       - name: Create final summary
         shell: bash
         run: |
@@ -687,79 +1048,76 @@ jobs:
 
           {
             echo "============================================================"
-            echo "Telegram APK extraction summary"
+            echo "Android APK extraction summary"
             echo "============================================================"
             echo
 
-            echo "APK:"
-            sha256sum work/telegram.apk
+            echo "Input URL:"
+            echo "${{ inputs.package_url }}"
             echo
 
-            echo "Package:"
-            grep '^package_name=' "$SUMMARY" 2>/dev/null || true
+            echo "JADX:"
+            echo "$JADX_VERSION"
+            echo
+
+            echo "Input SHA256:"
+            cat artifacts/result/input.sha256
+            echo
+
+            echo "Package detection:"
+            cat artifacts/result/package-detection.txt
+            echo
+
+            echo "APK metadata:"
+            cat artifacts/result/apk-metadata.json
             echo
 
             echo "BuildVars:"
-            if [ -f artifacts/result/BuildVars.extracted.txt ]; then
-              cat artifacts/result/BuildVars.extracted.txt
-            else
-              echo "NOT_FOUND"
-            fi
-
+            cat artifacts/result/BuildVars.extracted.txt
             echo
+
             echo "Firebase:"
-            if [ -f artifacts/result/firebase.json ]; then
-              cat artifacts/result/firebase.json
-            else
-              echo "NOT_FOUND"
-            fi
-
+            cat artifacts/result/firebase.json
             echo
-            echo "Certificate:"
-            if [ -f artifacts/result/certificate.txt ]; then
-              grep -E \
-                'Signer|Subject|Issuer|Serial|MD5|SHA-1|SHA-256' \
-                artifacts/result/certificate.txt \
-                || true
-            else
-              echo "NOT_FOUND"
-            fi
+
+            echo "Certificates:"
+            cat artifacts/result/certificate-summary.txt
+            echo
 
           } > "$SUMMARY"
 
           cat "$SUMMARY"
 
-      # ------------------------------------------------------------
-      # 13. Remove all heavy temporary files
-      # ------------------------------------------------------------
+      # ============================================================
+      # 19. Remove temporary / heavy files
+      # ============================================================
+
       - name: Remove temporary files
         if: always()
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Removing temporary APK and JADX output..."
+          echo "Cleaning temporary files..."
 
-          rm -rf work/jadx
-          rm -f work/jadx.log
-          rm -f work/telegram.apk
           rm -rf work
 
           echo
-          echo "Files that will be uploaded:"
+          echo "Artifact files:"
           find artifacts/result \
             -type f \
             -printf '%P %s bytes\n' \
             | sort
 
-      # ------------------------------------------------------------
-      # 14. Upload ONLY small extraction results
-      # ------------------------------------------------------------
+      # ============================================================
+      # 20. Upload results
+      # ============================================================
+
       - name: Upload extraction results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: telegram-extraction
+          name: android-extraction
           path: artifacts/result
           if-no-files-found: warn
           retention-days: 7

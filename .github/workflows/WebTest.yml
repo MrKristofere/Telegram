@@ -11,7 +11,7 @@ on:
       pkg-name:
         description: "use another pkg name"
         type: string
-        default: ft.telegram.messenger.web
+        default: ft.telegram.messenger
       appidhash:
         description: "use another APP_ID/APP_HASH"
         type: boolean
@@ -100,20 +100,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          FILE="TMessagesProj_AppStandalone/google-services.json"
+          FILE="TMessagesProj/google-services.json"
 
           cp "$FILE" "${FILE}.original"
 
           python3 <<'PY'
           import json
 
-          path = "TMessagesProj_AppStandalone/google-services.json"
+          path = "TMessagesProj/google-services.json"
 
           with open(path, "r", encoding="utf-8") as f:
               data = json.load(f)
 
           target = "org.telegram.messenger.web"
-          replacement = "${{ inputs.pkg-name }}"
+          replacement = "${{ inputs.pkg-name }}.web"
 
           found = False
 

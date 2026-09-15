@@ -100,14 +100,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          FILE="TMessagesProj/google-services.json"
+          FILE="TMessagesProj_AppStandalone/google-services.json"
 
           cp "$FILE" "${FILE}.original"
 
           python3 <<'PY'
           import json
 
-          path = "TMessagesProj/google-services.json"
+          path = "TMessagesProj_AppStandalone/google-services.json"
 
           with open(path, "r", encoding="utf-8") as f:
               data = json.load(f)
@@ -530,6 +530,6 @@ jobs:
 
           rm -f TMessagesProj/config/release.keystore
           rm -f "$GRADLE_USER_HOME/gradle.properties"
-          rm -f TMessagesProj/google-services.json.original
+          rm -f TMessagesProj_AppStandalone/google-services.json.original
 
           echo "Signing files cleaned up."

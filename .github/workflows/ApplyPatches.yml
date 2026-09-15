@@ -9,12 +9,12 @@ on:
         type: string
 
       patch_url:
-        description: "Direct URL to a patch, diff, or archive containing patches"
+        description: "Patch, archive, or GitHub Actions artifact URL"
         required: true
         type: string
 
       commit_message:
-        description: "Commit message (optional)"
+        description: "Commit message override for a plain patch or squash/merge commit (optional)"
         required: false
         type: string
         default: ""
@@ -61,7 +61,6 @@ jobs:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 0
 
-
       # ============================================================
       # 2. Configure Git
       # ============================================================
@@ -74,33 +73,24 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          echo "TARGET_BRANCH=$(git branch --show-current)" >> "$GITHUB_ENV"
+
           echo "========================================"
           echo "TARGET BRANCH"
           echo "========================================"
-
           git branch --show-current
 
           echo
           echo "========================================"
           echo "CURRENT HEAD"
           echo "========================================"
-
           git log -1 --oneline --decorate
 
           echo
           echo "========================================"
           echo "GIT VERSION"
           echo "========================================"
-
           git --version
-
-          echo
-          echo "========================================"
-          echo "WORKING TREE"
-          echo "========================================"
-
-          git status --short
-
 
       # ============================================================
       # 3. Make sure working tree is clean
@@ -119,62 +109,48 @@ jobs:
 
           echo "Working tree is clean."
 
-
       # ============================================================
-      # 4. Download patch, archive or GitHub Actions artifact
+      # 4. Download input
+      #
+      # Supports:
+      #   - direct patch/diff URL
+      #   - GitHub Actions artifact URL:
+      #     /actions/runs/RUN_ID/artifacts/ARTIFACT_ID
       # ============================================================
 
-      - name: Download patch or archive
+      - name: Download patch or artifact
         shell: bash
         env:
           PATCH_URL: ${{ inputs.patch_url }}
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          PATCH_DIR="$RUNNER_TEMP/patch"
-          INPUT_FILE="$PATCH_DIR/input"
+          WORK_DIR="$RUNNER_TEMP/patch-work"
 
-          mkdir -p "$PATCH_DIR"
+          mkdir -p "$WORK_DIR"
 
-          echo "Downloading:"
+          echo "WORK_DIR=$WORK_DIR" >> "$GITHUB_ENV"
+
+          DOWNLOAD="$WORK_DIR/input.bin"
+
+          echo "Input:"
           echo "$PATCH_URL"
+          echo
 
-          # ========================================================
-          # GitHub Actions Artifact URL
-          #
-          # Example:
-          #
-          # https://github.com/OWNER/REPO/actions/runs/RUN_ID/artifacts/ARTIFACT_ID
-          # ========================================================
-
-          if [[ "$PATCH_URL" =~ ^https://github\.com/([^/]+)/([^/]+)/actions/runs/([0-9]+)/artifacts/([0-9]+)(/.*)?$ ]]; then
+          if [[ "$PATCH_URL" =~ ^https://github\.com/([^/]+)/([^/]+)/actions/runs/([0-9]+)/artifacts/([0-9]+)/?$ ]]; then
 
             OWNER="${BASH_REMATCH[1]}"
             REPO="${BASH_REMATCH[2]}"
             RUN_ID="${BASH_REMATCH[3]}"
             ARTIFACT_ID="${BASH_REMATCH[4]}"
 
-            echo
-            echo "========================================"
-            echo "GITHUB ACTIONS ARTIFACT"
-            echo "========================================"
+            echo "Detected GitHub Actions artifact URL."
+            echo "Repository: $OWNER/$REPO"
+            echo "Run ID:      $RUN_ID"
+            echo "Artifact ID: $ARTIFACT_ID"
 
-            echo "Owner:        $OWNER"
-            echo "Repository:   $REPO"
-            echo "Run ID:       $RUN_ID"
-            echo "Artifact ID:  $ARTIFACT_ID"
-
-            API_BASE="https://api.github.com/repos/$OWNER/$REPO/actions/artifacts/$ARTIFACT_ID"
-
-            ARTIFACT_JSON="$PATCH_DIR/artifact.json"
-
-            # ------------------------------------------------------
-            # Get artifact metadata.
-            # ------------------------------------------------------
-
-            echo
-            echo "Getting artifact metadata..."
+            API="https://api.github.com/repos/$OWNER/$REPO/actions/artifacts/$ARTIFACT_ID"
 
             curl \
               --fail \
@@ -184,66 +160,44 @@ jobs:
               --retry 5 \
               --retry-delay 2 \
               --connect-timeout 20 \
-              --max-time 60 \
+              --max-time 120 \
               -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
               -H "X-GitHub-Api-Version: 2026-03-10" \
-              "$API_BASE" \
-              -o "$ARTIFACT_JSON"
+              "$API" \
+              > "$WORK_DIR/artifact.json"
 
-            # ------------------------------------------------------
-            # Verify artifact belongs to supplied workflow run.
-            # ------------------------------------------------------
-
-            FOUND_RUN_ID="$(
-              python3 - "$ARTIFACT_JSON" <<'PY'
-          import json
-          import sys
-
-          with open(sys.argv[1], "r", encoding="utf-8") as f:
-              data = json.load(f)
-
-          workflow_run = data.get("workflow_run") or {}
-
-          print(workflow_run.get("id", ""))
-          PY
+            ARTIFACT_RUN_ID="$(
+              jq -r '.workflow_run.id // empty' \
+              "$WORK_DIR/artifact.json"
             )"
-
-            if [ -n "$FOUND_RUN_ID" ] && [ "$FOUND_RUN_ID" != "$RUN_ID" ]; then
-              echo "::error::Artifact $ARTIFACT_ID does not belong to workflow run $RUN_ID."
-              echo "Actual workflow run: $FOUND_RUN_ID"
-              exit 1
-            fi
-
-            # ------------------------------------------------------
-            # Check artifact expiration.
-            # ------------------------------------------------------
 
             EXPIRED="$(
-              python3 - "$ARTIFACT_JSON" <<'PY'
-          import json
-          import sys
-
-          with open(sys.argv[1], "r", encoding="utf-8") as f:
-              data = json.load(f)
-
-          print(str(data.get("expired", False)).lower())
-          PY
+              jq -r '.expired // true' \
+              "$WORK_DIR/artifact.json"
             )"
 
-            if [ "$EXPIRED" = "true" ]; then
-              echo "::error::GitHub Actions artifact $ARTIFACT_ID has expired."
+            ARCHIVE_URL="$(
+              jq -r '.archive_download_url // empty' \
+              "$WORK_DIR/artifact.json"
+            )"
+
+            if [ -z "$ARTIFACT_RUN_ID" ] || [ -z "$ARCHIVE_URL" ]; then
+              echo "::error::GitHub API did not return valid artifact metadata."
+              cat "$WORK_DIR/artifact.json"
               exit 1
             fi
 
-            # ------------------------------------------------------
-            # Download actual artifact ZIP.
-            # ------------------------------------------------------
+            if [ "$ARTIFACT_RUN_ID" != "$RUN_ID" ]; then
+              echo "::error::Artifact $ARTIFACT_ID does not belong to workflow run $RUN_ID."
+              echo "Actual run: $ARTIFACT_RUN_ID"
+              exit 1
+            fi
 
-            DOWNLOAD_URL="$API_BASE/zip"
-
-            echo
-            echo "Downloading artifact ZIP..."
+            if [ "$EXPIRED" = "true" ]; then
+              echo "::error::GitHub Actions artifact $ARTIFACT_ID is expired."
+              exit 1
+            fi
 
             curl \
               --fail \
@@ -255,19 +209,13 @@ jobs:
               --connect-timeout 20 \
               --max-time 300 \
               -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
               -H "X-GitHub-Api-Version: 2026-03-10" \
-              "$DOWNLOAD_URL" \
-              -o "$INPUT_FILE"
-
-            echo "GitHub Actions artifact downloaded."
+              "$ARCHIVE_URL" \
+              --output "$DOWNLOAD"
 
           else
 
-            # ======================================================
-            # Normal URL
-            # ======================================================
-
             curl \
               --fail \
               --silent \
@@ -277,689 +225,405 @@ jobs:
               --retry-delay 2 \
               --connect-timeout 20 \
               --max-time 300 \
-              --output "$INPUT_FILE" \
+              --output "$DOWNLOAD" \
               "$PATCH_URL"
 
           fi
 
-          # ========================================================
-          # Verify download
-          # ========================================================
-
-          if [ ! -s "$INPUT_FILE" ]; then
-            echo "::error::Downloaded file is empty."
+          if [ ! -s "$DOWNLOAD" ]; then
+            echo "::error::Downloaded input is empty."
             exit 1
           fi
 
           echo
-          echo "========================================"
-          echo "DOWNLOADED FILE"
-          echo "========================================"
-
-          ls -lh "$INPUT_FILE"
+          echo "Downloaded input:"
+          ls -lh "$DOWNLOAD"
 
           echo
           echo "File type:"
-          file "$INPUT_FILE"
-
-          echo
-          echo "First bytes:"
-          xxd -l 32 "$INPUT_FILE" || true
-
+          file "$DOWNLOAD"
 
       # ============================================================
-      # 5. Detect patch or archive
+      # 5. Detect and unpack archives
+      #
+      # Supports:
+      #   ZIP
+      #   TAR
+      #   TAR.GZ
+      #   TAR.XZ
+      #   TAR.BZ2
+      #   standalone GZIP/XZ/BZIP2
       # ============================================================
 
-      - name: Detect patch or archive
+      - name: Detect and unpack input
         shell: bash
         run: |
           set -euo pipefail
 
-          INPUT="$RUNNER_TEMP/patch/input"
-          EXTRACT_DIR="$RUNNER_TEMP/patch/extracted"
+          INPUT="$WORK_DIR/input.bin"
+          SOURCE="$WORK_DIR/source"
+          EXTRACTED="$WORK_DIR/extracted"
 
-          mkdir -p "$EXTRACT_DIR"
+          mkdir -p "$SOURCE"
+          mkdir -p "$EXTRACTED"
 
-          FILE_TYPE="$(file -b "$INPUT")"
+          TYPE="$(file -b "$INPUT")"
 
-          echo "========================================"
-          echo "INPUT TYPE"
-          echo "========================================"
+          echo "Detected file type:"
+          echo "$TYPE"
 
-          echo "$FILE_TYPE"
+          case "$TYPE" in
+
+            Zip\ archive*)
+              unzip -q "$INPUT" -d "$EXTRACTED"
+              cp -a "$EXTRACTED"/. "$SOURCE"/
+              echo "INPUT_KIND=archive" >> "$GITHUB_ENV"
+              ;;
+
+            POSIX\ tar\ archive*|GNU\ tar\ archive*|ustar\ archive*)
+              tar -xf "$INPUT" -C "$EXTRACTED"
+              cp -a "$EXTRACTED"/. "$SOURCE"/
+              echo "INPUT_KIND=archive" >> "$GITHUB_ENV"
+              ;;
+
+            gzip\ compressed\ data*)
+              if tar -tzf "$INPUT" >/dev/null 2>&1; then
+                tar -xzf "$INPUT" -C "$EXTRACTED"
+                cp -a "$EXTRACTED"/. "$SOURCE"/
+                echo "INPUT_KIND=archive" >> "$GITHUB_ENV"
+              else
+                gunzip -c "$INPUT" > "$SOURCE/input.patch"
+                echo "INPUT_KIND=single" >> "$GITHUB_ENV"
+              fi
+              ;;
+
+            XZ\ compressed\ data*)
+              if tar -tJf "$INPUT" >/dev/null 2>&1; then
+                tar -xJf "$INPUT" -C "$EXTRACTED"
+                cp -a "$EXTRACTED"/. "$SOURCE"/
+                echo "INPUT_KIND=archive" >> "$GITHUB_ENV"
+              else
+                xz -dc "$INPUT" > "$SOURCE/input.patch"
+                echo "INPUT_KIND=single" >> "$GITHUB_ENV"
+              fi
+              ;;
+
+            bzip2\ compressed\ data*)
+              if tar -tjf "$INPUT" >/dev/null 2>&1; then
+                tar -xjf "$INPUT" -C "$EXTRACTED"
+                cp -a "$EXTRACTED"/. "$SOURCE"/
+                echo "INPUT_KIND=archive" >> "$GITHUB_ENV"
+              else
+                bzip2 -dc "$INPUT" > "$SOURCE/input.patch"
+                echo "INPUT_KIND=single" >> "$GITHUB_ENV"
+              fi
+              ;;
+
+            *)
+              cp "$INPUT" "$SOURCE/input.patch"
+              echo "INPUT_KIND=single" >> "$GITHUB_ENV"
+              ;;
+
+          esac
 
           echo
-
-          # ========================================================
-          # ZIP
-          # ========================================================
-
-          if file "$INPUT" | grep -qi 'Zip archive'; then
-
-            echo "Detected ZIP archive."
-
-            echo "INPUT_TYPE=archive" >> "$GITHUB_ENV"
-            echo "ARCHIVE_TYPE=zip" >> "$GITHUB_ENV"
-
-            unzip -q "$INPUT" -d "$EXTRACT_DIR"
-
-
-          # ========================================================
-          # TAR
-          # ========================================================
-
-          elif file "$INPUT" | grep -qi 'tar archive'; then
-
-            echo "Detected TAR archive."
-
-            echo "INPUT_TYPE=archive" >> "$GITHUB_ENV"
-            echo "ARCHIVE_TYPE=tar" >> "$GITHUB_ENV"
-
-            tar -xf "$INPUT" -C "$EXTRACT_DIR"
-
-
-          # ========================================================
-          # GZIP
-          # ========================================================
-
-          elif file "$INPUT" | grep -qi 'gzip compressed'; then
-
-            if tar -tzf "$INPUT" >/dev/null 2>&1; then
-
-              echo "Detected TAR.GZ archive."
-
-              echo "INPUT_TYPE=archive" >> "$GITHUB_ENV"
-              echo "ARCHIVE_TYPE=tar.gz" >> "$GITHUB_ENV"
-
-              tar -xzf "$INPUT" -C "$EXTRACT_DIR"
-
-            else
-
-              echo "Detected standalone GZIP."
-
-              echo "INPUT_TYPE=compressed_patch" >> "$GITHUB_ENV"
-              echo "ARCHIVE_TYPE=gzip" >> "$GITHUB_ENV"
-
-              cp "$INPUT" "$EXTRACT_DIR/input.gz"
-
-              gunzip -f "$EXTRACT_DIR/input.gz"
-
-            fi
-
-
-          # ========================================================
-          # XZ
-          # ========================================================
-
-          elif file "$INPUT" | grep -qi 'XZ compressed'; then
-
-            if tar -tJf "$INPUT" >/dev/null 2>&1; then
-
-              echo "Detected TAR.XZ archive."
-
-              echo "INPUT_TYPE=archive" >> "$GITHUB_ENV"
-              echo "ARCHIVE_TYPE=tar.xz" >> "$GITHUB_ENV"
-
-              tar -xJf "$INPUT" -C "$EXTRACT_DIR"
-
-            else
-
-              echo "Detected standalone XZ."
-
-              echo "INPUT_TYPE=compressed_patch" >> "$GITHUB_ENV"
-              echo "ARCHIVE_TYPE=xz" >> "$GITHUB_ENV"
-
-              cp "$INPUT" "$EXTRACT_DIR/input.xz"
-
-              unxz -f "$EXTRACT_DIR/input.xz"
-
-            fi
-
-
-          # ========================================================
-          # BZIP2
-          # ========================================================
-
-          elif file "$INPUT" | grep -qi 'bzip2 compressed'; then
-
-            if tar -tjf "$INPUT" >/dev/null 2>&1; then
-
-              echo "Detected TAR.BZ2 archive."
-
-              echo "INPUT_TYPE=archive" >> "$GITHUB_ENV"
-              echo "ARCHIVE_TYPE=tar.bz2" >> "$GITHUB_ENV"
-
-              tar -xjf "$INPUT" -C "$EXTRACT_DIR"
-
-            else
-
-              echo "Detected standalone BZIP2."
-
-              echo "INPUT_TYPE=compressed_patch" >> "$GITHUB_ENV"
-              echo "ARCHIVE_TYPE=bzip2" >> "$GITHUB_ENV"
-
-              cp "$INPUT" "$EXTRACT_DIR/input.bz2"
-
-              bunzip2 -f "$EXTRACT_DIR/input.bz2"
-
-            fi
-
-
-          # ========================================================
-          # Plain patch/diff
-          # ========================================================
-
-          else
-
-            if grep -qE '^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$' "$INPUT"; then
-
-              echo "Detected Git mailbox / format-patch."
-
-              echo "INPUT_TYPE=patch" >> "$GITHUB_ENV"
-              echo "PATCH_FORMAT=mailbox" >> "$GITHUB_ENV"
-
-            elif grep -qE '^diff --git ' "$INPUT"; then
-
-              echo "Detected Git unified diff."
-
-              echo "INPUT_TYPE=patch" >> "$GITHUB_ENV"
-              echo "PATCH_FORMAT=diff" >> "$GITHUB_ENV"
-
-            else
-
-              echo "::error::Downloaded file is neither a supported archive nor a Git patch."
-
-              echo
-              echo "File type:"
-              file "$INPUT"
-
-              exit 1
-
-            fi
-
-          fi
-
+          echo "Source tree:"
+          find "$SOURCE" -type f -print | sort
 
       # ============================================================
-      # 6. Extract diff from patch / archive
+      # 6. Find patch inputs
+      #
+      # Finds:
+      #   - .patch
+      #   - .diff
+      #   - format-patch / mbox
+      #   - extensionless Git patches
       # ============================================================
 
-      - name: Extract patch payload
+      - name: Find patch inputs
         shell: bash
         run: |
           set -euo pipefail
 
-          INPUT="$RUNNER_TEMP/patch/input"
-          EXTRACT_DIR="$RUNNER_TEMP/patch/extracted"
-          PATCH_DIR="$RUNNER_TEMP/patch/patches"
-          OUTPUT="$RUNNER_TEMP/patch/patch.diff"
+          PATCH_LIST="$WORK_DIR/patch-list.txt"
 
-          mkdir -p "$PATCH_DIR"
+          : > "$PATCH_LIST"
 
-          rm -f "$OUTPUT"
+          while IFS= read -r -d '' FILE; do
 
-          echo "========================================"
-          echo "PREPARING PATCHES"
-          echo "========================================"
+            if grep -qE \
+              '^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$' \
+              "$FILE" 2>/dev/null \
+              || grep -qE '^diff --git ' "$FILE" 2>/dev/null \
+              || grep -qE '^Index: ' "$FILE" 2>/dev/null; then
 
-
-          # ========================================================
-          # Plain patch
-          # ========================================================
-
-          if [ "${INPUT_TYPE:-}" = "patch" ]; then
-
-            cp "$INPUT" "$PATCH_DIR/0001-input.patch"
-
-
-          # ========================================================
-          # Standalone compressed patch
-          # ========================================================
-
-          elif [ "${INPUT_TYPE:-}" = "compressed_patch" ]; then
-
-            FOUND=0
-
-            while IFS= read -r FILE; do
-
-              if grep -qE '^diff --git ' "$FILE" 2>/dev/null; then
-
-                cp "$FILE" "$PATCH_DIR/0001-input.patch"
-                FOUND=1
-                break
-
-              fi
-
-              if grep -qE '^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$' "$FILE" 2>/dev/null; then
-
-                cp "$FILE" "$PATCH_DIR/0001-input.patch"
-                FOUND=1
-                break
-
-              fi
-
-            done < <(
-              find "$EXTRACT_DIR" \
-                -type f \
-                -print | sort
-            )
-
-            if [ "$FOUND" -eq 0 ]; then
-              echo "::error::Compressed file does not contain a Git patch."
-              exit 1
-            fi
-
-
-          # ========================================================
-          # Archive
-          # ========================================================
-
-          elif [ "${INPUT_TYPE:-}" = "archive" ]; then
-
-            echo "Searching archive recursively for patches."
-
-            echo
-            echo "Archive contents:"
-
-            find "$EXTRACT_DIR" \
-              -type f \
-              -print | sort
-
-
-            # ------------------------------------------------------
-            # First collect files explicitly named .patch/.diff.
-            # ------------------------------------------------------
-
-            PATCH_INDEX=0
-
-            while IFS= read -r FILE; do
-
-              PATCH_INDEX=$((PATCH_INDEX + 1))
-
-              BASENAME="$(basename "$FILE")"
-
-              DEST="$PATCH_DIR/$(printf '%04d' "$PATCH_INDEX")-$BASENAME"
-
-              echo
-              echo "Found patch:"
-              echo "$FILE"
-
-              cp "$FILE" "$DEST"
-
-            done < <(
-              find "$EXTRACT_DIR" \
-                -type f \
-                \( \
-                  -iname '*.patch' \
-                  -o \
-                  -iname '*.diff' \
-                \) \
-                -print | sort
-            )
-
-
-            # ------------------------------------------------------
-            # Search files without .patch/.diff extension by content.
-            # ------------------------------------------------------
-
-            while IFS= read -r FILE; do
-
-              BASENAME="$(basename "$FILE")"
-
-              case "$BASENAME" in
-                *.patch|*.PATCH|*.diff|*.DIFF)
-                  continue
-                  ;;
-              esac
-
-              # Skip obvious binary files.
-              if ! grep -Iq . "$FILE" 2>/dev/null; then
-                continue
-              fi
-
-
-              # ----------------------------------------------------
-              # Git unified diff
-              # ----------------------------------------------------
-
-              if grep -qE '^diff --git ' "$FILE" 2>/dev/null; then
-
-                PATCH_INDEX=$((PATCH_INDEX + 1))
-
-                DEST="$PATCH_DIR/$(printf '%04d' "$PATCH_INDEX")-$BASENAME.patch"
-
-                echo
-                echo "Found patch by content:"
-                echo "$FILE"
-
-                cp "$FILE" "$DEST"
-
-
-              # ----------------------------------------------------
-              # Git mailbox
-              # ----------------------------------------------------
-
-              elif grep -qE '^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$' "$FILE" 2>/dev/null; then
-
-                PATCH_INDEX=$((PATCH_INDEX + 1))
-
-                DEST="$PATCH_DIR/$(printf '%04d' "$PATCH_INDEX")-$BASENAME.patch"
-
-                echo
-                echo "Found mailbox patch by content:"
-                echo "$FILE"
-
-                cp "$FILE" "$DEST"
-
-              fi
-
-            done < <(
-              find "$EXTRACT_DIR" \
-                -type f \
-                -print | sort
-            )
-
-
-            if [ "$PATCH_INDEX" -eq 0 ]; then
-              echo "::error::Archive does not contain any Git patches."
-              exit 1
-            fi
-
-
-          else
-
-            echo "::error::Unknown input type."
-            exit 1
-
-          fi
-
-
-          # ========================================================
-          # Show discovered files
-          # ========================================================
-
-          echo
-          echo "========================================"
-          echo "DISCOVERED PATCH FILES"
-          echo "========================================"
-
-          find "$PATCH_DIR" \
-            -maxdepth 1 \
-            -type f \
-            -print | sort
-
-
-          PATCH_COUNT="$(
-            find "$PATCH_DIR" \
-              -maxdepth 1 \
-              -type f \
-              | wc -l
-          )"
-
-          if [ "$PATCH_COUNT" -eq 0 ]; then
-            echo "::error::No patch files were found."
-            exit 1
-          fi
-
-
-          # ========================================================
-          # Combine patches
-          # ========================================================
-
-          echo
-          echo "========================================"
-          echo "BUILDING COMBINED PATCH"
-          echo "========================================"
-
-          : > "$OUTPUT"
-
-          FINAL_INDEX=0
-
-          while IFS= read -r PATCH; do
-
-            FINAL_INDEX=$((FINAL_INDEX + 1))
-
-            echo
-            echo "Processing patch #$FINAL_INDEX:"
-            echo "$PATCH"
-
-
-            # ------------------------------------------------------
-            # Git mailbox / format-patch
-            # ------------------------------------------------------
-
-            if grep -qE '^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$' "$PATCH"; then
-
-              echo "Format: Git mailbox / format-patch"
-
-              awk '
-                /^diff --git / {
-                  started=1
-                }
-
-                started {
-                  print
-                }
-              ' "$PATCH" >> "$OUTPUT"
-
-
-            # ------------------------------------------------------
-            # Normal unified diff
-            # ------------------------------------------------------
-
-            elif grep -qE '^diff --git ' "$PATCH"; then
-
-              echo "Format: Git unified diff"
-
-              cat "$PATCH" >> "$OUTPUT"
-
-
-            else
-
-              echo "::error::File does not contain a recognized Git patch:"
-              echo "$PATCH"
-
-              exit 1
+              printf '%s\n' "$FILE" >> "$PATCH_LIST"
 
             fi
-
-            echo >> "$OUTPUT"
 
           done < <(
-            find "$PATCH_DIR" \
-              -maxdepth 1 \
+            find "$SOURCE" \
               -type f \
-              -print | sort
+              -print0 |
+            sort -z
           )
 
-
-          if [ ! -s "$OUTPUT" ]; then
-            echo "::error::No diff payload was found."
+          if [ ! -s "$PATCH_LIST" ]; then
+            echo "::error::No Git patch or format-patch file was found."
             exit 1
           fi
 
-
-          DIFF_COUNT="$(
-            grep -c '^diff --git ' "$OUTPUT" || true
-          )"
-
-          if [ "$DIFF_COUNT" -eq 0 ]; then
-            echo "::error::Combined patch contains no diff --git entries."
-            exit 1
-          fi
-
+          echo "PATCH_LIST=$PATCH_LIST" >> "$GITHUB_ENV"
 
           echo
-          echo "========================================"
-          echo "PATCH PREPARATION COMPLETE"
-          echo "========================================"
-
-          echo "Patch files found: $PATCH_COUNT"
-          echo "Diff sections:     $DIFF_COUNT"
-
-          echo
-          echo "Combined patch:"
-          wc -l "$OUTPUT"
-
+          echo "Patch inputs:"
+          nl -ba "$PATCH_LIST"
 
       # ============================================================
-      # 7. Show patch structure
-      # ============================================================
-
-      - name: Inspect patch
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PATCH="$RUNNER_TEMP/patch/patch.diff"
-
-          echo "========================================"
-          echo "PATCH FILES"
-          echo "========================================"
-
-          grep '^diff --git ' "$PATCH" || true
-
-          echo
-          echo "========================================"
-          echo "PATCH HEADERS"
-          echo "========================================"
-
-          grep -nE '^(diff --git |new file mode |deleted file mode |old mode |new mode |--- |\+\+\+ |index |@@ )' "$PATCH" || true
-
-          echo
-          echo "========================================"
-          echo "PATCH SIZE"
-          echo "========================================"
-
-          wc -l "$PATCH"
-
-
-      # ============================================================
-      # 8. Inspect fake indexes
+      # 7. Classify patch inputs
       #
-      # Informational only.
+      # MAILBOX = format-patch/mbox
+      # DIFF    = plain unified diff
+      #
+      # Mixing the two is rejected because their commit semantics
+      # are different.
       # ============================================================
 
-      - name: Inspect patch indexes
+      - name: Classify patch inputs
         shell: bash
         run: |
           set -euo pipefail
 
-          PATCH="$RUNNER_TEMP/patch/patch.diff"
+          MAILBOX_COUNT=0
+          DIFF_COUNT=0
 
-          echo "Index lines:"
-          grep -n '^index ' "$PATCH" || true
+          CLASS_FILE="$WORK_DIR/patch-classes.txt"
 
-          if grep -qE '^index 0+\.0+([[:space:]]|$)' "$PATCH"; then
+          : > "$CLASS_FILE"
 
-            echo
-            echo "WARNING:"
-            echo "Patch contains zero/fake blob indexes."
-            echo "3-way application will not be attempted."
+          while IFS= read -r FILE; do
 
+            if grep -qE \
+              '^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$' \
+              "$FILE" 2>/dev/null; then
+
+              KIND="mailbox"
+              MAILBOX_COUNT=$((MAILBOX_COUNT + 1))
+
+            else
+
+              KIND="diff"
+              DIFF_COUNT=$((DIFF_COUNT + 1))
+
+            fi
+
+            printf '%s\t%s\n' "$KIND" "$FILE" >> "$CLASS_FILE"
+
+          done < "$PATCH_LIST"
+
+          if [ "$MAILBOX_COUNT" -gt 0 ] && [ "$DIFF_COUNT" -gt 0 ]; then
+            echo "::error::The input contains both format-patch mailboxes and plain diffs."
+            echo "Mixing them automatically would make commit history ambiguous."
+            cat "$CLASS_FILE"
+            exit 1
           fi
 
+          if [ "$MAILBOX_COUNT" -gt 0 ]; then
+            echo "PATCH_SET_KIND=mailbox" >> "$GITHUB_ENV"
+          else
+            echo "PATCH_SET_KIND=diff" >> "$GITHUB_ENV"
+          fi
+
+          echo "PATCH_CLASS_FILE=$CLASS_FILE" >> "$GITHUB_ENV"
+
+          echo
+          echo "Patch classification:"
+          cat "$CLASS_FILE"
 
       # ============================================================
-      # 9. Strict dry-run
+      # 8. Prepare patch series
+      #
+      # IMPORTANT:
+      #
+      # We do NOT concatenate format-patch files into one diff.
+      #
+      # git am preserves:
+      #   - author
+      #   - author date
+      #   - subject
+      #   - commit message
+      #   - individual commit boundaries
       # ============================================================
 
-      - name: Check patch applicability
+      - name: Prepare patch series
         shell: bash
         env:
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
           IGNORE_WHITESPACE: ${{ inputs.ignore_whitespace }}
         run: |
           set -euo pipefail
 
-          PATCH="$RUNNER_TEMP/patch/patch.diff"
+          BASE_COMMIT="$(git rev-parse HEAD)"
 
-          ARGS=(
-            --check
-            --recount
-            --verbose
-          )
+          echo "BASE_COMMIT=$BASE_COMMIT" >> "$GITHUB_ENV"
 
-          if [ "$IGNORE_WHITESPACE" = "true" ]; then
+          TEMP_BRANCH="patch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
-            ARGS+=(
-              --ignore-space-change
-              --ignore-whitespace
-            )
+          echo "TEMP_BRANCH=$TEMP_BRANCH" >> "$GITHUB_ENV"
 
-          fi
+          git switch -c "$TEMP_BRANCH"
 
-          echo "Running git apply --check..."
+          if [ "$PATCH_SET_KIND" = "mailbox" ]; then
 
-          if git apply "${ARGS[@]}" "$PATCH"; then
+            echo "Preparing format-patch series with git am."
 
-            echo
-            echo "Patch passed strict applicability check."
+            MAILBOX_FILES=()
+
+            while IFS=$'\t' read -r KIND FILE; do
+
+              [ "$KIND" = "mailbox" ] || continue
+
+              MAILBOX_FILES+=("$FILE")
+
+            done < "$PATCH_CLASS_FILE"
+
+            if [ "${#MAILBOX_FILES[@]}" -eq 0 ]; then
+              echo "::error::No mailbox files were found."
+              exit 1
+            fi
+
+            # Do not use --3way here.
+            #
+            # Some supplied patches contain zero/fake blob indexes.
+            # Those indexes cannot be used for a three-way merge.
+            #
+            # Normal git-am application still preserves the original
+            # author and commit message.
+
+            git am \
+              --no-3way \
+              --empty=keep \
+              --whitespace=nowarn \
+              "${MAILBOX_FILES[@]}"
 
           else
 
-            echo
-            echo "Strict check failed."
-            echo "This does not necessarily mean that nothing can be applied."
-            echo "The next step will use --reject."
+            echo "Preparing plain diff series."
+
+            COUNT=0
+
+            while IFS=$'\t' read -r KIND FILE; do
+
+              [ "$KIND" = "diff" ] || continue
+
+              COUNT=$((COUNT + 1))
+
+              NAME="$(basename "$FILE")"
+
+              ARGS=(
+                --verbose
+                --recount
+                --whitespace=nowarn
+              )
+
+              if [ "$IGNORE_WHITESPACE" = "true" ]; then
+                ARGS+=(
+                  --ignore-space-change
+                  --ignore-whitespace
+                )
+              fi
+
+              echo
+              echo "Applying plain patch #$COUNT:"
+              echo "$NAME"
+
+              git apply \
+                "${ARGS[@]}" \
+                "$FILE"
+
+              git add -A
+
+              if git diff --cached --quiet; then
+                echo "::error::Patch '$NAME' produced no changes."
+                exit 1
+              fi
+
+              if [ -n "$COMMIT_MESSAGE" ]; then
+                git commit -m "$COMMIT_MESSAGE"
+              else
+                git commit \
+                  --allow-empty-message \
+                  -m ""
+              fi
+
+            done < "$PATCH_CLASS_FILE"
+
+            if [ "$COUNT" -eq 0 ]; then
+              echo "::error::No plain patches were applied."
+              exit 1
+            fi
 
           fi
 
+          PATCH_HEAD="$(git rev-parse HEAD)"
+
+          echo "PATCH_HEAD=$PATCH_HEAD" >> "$GITHUB_ENV"
+
+          echo
+          echo "Prepared history:"
+          git log \
+            --oneline \
+            --decorate \
+            "$BASE_COMMIT..$PATCH_HEAD"
 
       # ============================================================
-      # 10. Apply patch
+      # 9. Inspect prepared history
       # ============================================================
 
-      - name: Apply patch
+      - name: Inspect prepared history
         shell: bash
-        env:
-          IGNORE_WHITESPACE: ${{ inputs.ignore_whitespace }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
 
-          PATCH="$RUNNER_TEMP/patch/patch.diff"
+          echo "========================================"
+          echo "PATCH COMMITS"
+          echo "========================================"
 
-          ARGS=(
-            --recount
-            --reject
-            --verbose
-            --whitespace=nowarn
-          )
+          git log \
+            --reverse \
+            --format='commit %H%nAuthor: %an <%ae>%nDate:   %aI%nSubject: %s%n' \
+            "$BASE_COMMIT..$PATCH_HEAD"
 
-          if [ "$IGNORE_WHITESPACE" = "true" ]; then
+          echo
+          echo "Commit count:"
+          git rev-list --count "$BASE_COMMIT..$PATCH_HEAD"
 
-            ARGS+=(
-              --ignore-space-change
-              --ignore-whitespace
-            )
+      # ============================================================
+      # 10. Verify prepared changes
+      # ============================================================
 
+      - name: Verify prepared changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet "$BASE_COMMIT" "$PATCH_HEAD"; then
+            echo "::error::Patch series produced no changes."
+            exit 1
           fi
 
-          echo "Applying patch..."
-
-          git apply "${ARGS[@]}" "$PATCH"
-          APPLY_EXIT=$?
+          echo "Changed files:"
+          git diff --name-status "$BASE_COMMIT" "$PATCH_HEAD"
 
           echo
-          echo "git apply exit code: $APPLY_EXIT"
-
-          echo
-          echo "Working tree:"
-          git status --short
-
-          echo "PATCH_APPLY_EXIT=$APPLY_EXIT" >> "$GITHUB_ENV"
-
-          # Don't fail yet.
-          #
-          # We first inspect .rej files.
-          exit 0
-
+          echo "Diff stat:"
+          git diff --stat "$BASE_COMMIT" "$PATCH_HEAD"
 
       # ============================================================
-      # 11. Detect rejected hunks
+      # 11. Verify no rejected files / no in-progress Git operation
       # ============================================================
 
-      - name: Check rejected hunks
+      - name: Verify Git state
         shell: bash
         run: |
           set -euo pipefail
@@ -973,206 +637,73 @@ jobs:
           )"
 
           if [ -n "$REJECTS" ]; then
-
-            echo "::error::Some patch hunks were rejected."
-
-            echo
-            echo "========================================"
-            echo "REJECTED FILES"
-            echo "========================================"
-
+            echo "::error::Rejected patch files were created:"
             echo "$REJECTS"
-
-            while IFS= read -r FILE; do
-
-              echo
-              echo "========================================"
-              echo "REJECTED HUNKS: $FILE"
-              echo "========================================"
-
-              cat "$FILE"
-
-            done <<< "$REJECTS"
-
-            echo
-            echo "Patch was NOT committed."
-
             exit 1
           fi
 
-          echo "No .rej files found."
+          if [ -d .git/rebase-apply ] \
+            || [ -d .git/rebase-merge ] \
+            || [ -f .git/MERGE_HEAD ] \
+            || [ -f .git/CHERRY_PICK_HEAD ]; then
 
+            echo "::error::Git operation is still in progress."
+            git status
+            exit 1
+          fi
 
-      # ============================================================
-      # 12. Check git apply exit code
-      # ============================================================
-
-      - name: Verify patch application
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ "${PATCH_APPLY_EXIT:-1}" -ne 0 ]; then
-
-            echo "::error::git apply returned exit code ${PATCH_APPLY_EXIT}."
-
-            echo
-            echo "Current working tree:"
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Prepared patch branch has uncommitted changes."
             git status --short
-
-            echo
-            echo "Diff:"
-            git diff --stat
-
-            exit "$PATCH_APPLY_EXIT"
-          fi
-
-          echo "git apply completed successfully."
-
-
-      # ============================================================
-      # 13. Verify that patch actually changed something
-      # ============================================================
-
-      - name: Verify resulting changes
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          MODIFIED="$(git diff --name-only)"
-          UNTRACKED="$(git ls-files --others --exclude-standard)"
-
-          if [ -z "$MODIFIED" ] && [ -z "$UNTRACKED" ]; then
-
-            echo "::error::Patch produced no working tree changes."
-
             exit 1
-
           fi
 
-          echo "========================================"
-          echo "CHANGED FILES"
-          echo "========================================"
-
-          git status --short
-
-          echo
-          echo "========================================"
-          echo "DIFF STAT"
-          echo "========================================"
-
-          git diff --stat
-
+          echo "Git state is clean."
 
       # ============================================================
-      # 14. Direct commit / squash
+      # 12. Strategy validation
       #
-      # Empty commit message is allowed.
+      # TEMP_BRANCH contains the complete prepared history.
+      # BASE_COMMIT is the target branch before applying patches.
       # ============================================================
 
-      - name: Commit patch
-        if: inputs.strategy == 'commit' || inputs.strategy == 'squash'
+      - name: Validate strategy
         shell: bash
-        env:
-          COMMIT_MESSAGE: ${{ inputs.commit_message }}
         run: |
           set -euo pipefail
 
-          git add -A
+          COUNT="$(
+            git rev-list \
+              --count \
+              "$BASE_COMMIT..$PATCH_HEAD"
+          )"
 
-          if git diff --cached --quiet; then
+          echo "Strategy:"
+          echo "${{ inputs.strategy }}"
 
-            echo "::error::Nothing is staged."
+          echo
+          echo "Prepared commits:"
+          echo "$COUNT"
 
+          if [ "$COUNT" -lt 1 ]; then
+            echo "::error::No prepared commits exist."
             exit 1
-
           fi
 
-          if [ -n "$COMMIT_MESSAGE" ]; then
-
-            git commit \
-              -m "$COMMIT_MESSAGE"
-
-          else
-
-            echo "Commit message is empty."
-            echo "Creating commit with an empty message."
-
-            git commit \
-              --allow-empty-message \
-              -m ""
-
-          fi
-
-          echo
-          echo "Created commit:"
-
-          git log -1 --oneline --decorate
-
-
       # ============================================================
-      # 15. Create temporary local branch
+      # 13. Commit strategy
+      #
+      # format-patch:
+      #   preserve every source commit.
+      #
+      # plain diff:
+      #   use the synthetic commit created in Stage 8.
+      #
+      # commit_message is only an override for plain diffs.
       # ============================================================
 
-      - name: Create temporary patch branch
-        if: inputs.strategy == 'merge' || inputs.strategy == 'cherry-pick'
-        shell: bash
-        env:
-          COMMIT_MESSAGE: ${{ inputs.commit_message }}
-        run: |
-          set -euo pipefail
-
-          TEMP_BRANCH="patch-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-
-          echo "TEMP_BRANCH=$TEMP_BRANCH" >> "$GITHUB_ENV"
-
-          git switch -c "$TEMP_BRANCH"
-
-          git add -A
-
-          if git diff --cached --quiet; then
-
-            echo "::error::Nothing is staged."
-
-            exit 1
-
-          fi
-
-          if [ -n "$COMMIT_MESSAGE" ]; then
-
-            git commit \
-              -m "$COMMIT_MESSAGE"
-
-          else
-
-            echo "Commit message is empty."
-            echo "Creating temporary commit with an empty message."
-
-            git commit \
-              --allow-empty-message \
-              -m ""
-
-          fi
-
-          PATCH_COMMIT="$(git rev-parse HEAD)"
-
-          echo "PATCH_COMMIT=$PATCH_COMMIT" >> "$GITHUB_ENV"
-
-          echo
-          echo "Temporary branch:"
-          echo "$TEMP_BRANCH"
-
-          echo
-          echo "Patch commit:"
-          echo "$PATCH_COMMIT"
-
-
-      # ============================================================
-      # 16. Merge strategy
-      # ============================================================
-
-      - name: Merge patch branch
-        if: inputs.strategy == 'merge'
+      - name: Apply commit strategy
+        if: inputs.strategy == 'commit'
         shell: bash
         env:
           TARGET_BRANCH: ${{ inputs.target_branch }}
@@ -1182,21 +713,119 @@ jobs:
           git switch "$TARGET_BRANCH"
 
           git merge \
-            --no-ff \
-            --no-edit \
+            --ff-only \
             "$TEMP_BRANCH"
+
+          echo
+          echo "Commit strategy completed."
+
+          git log \
+            -10 \
+            --oneline \
+            --decorate
+
+      # ============================================================
+      # 14. Squash strategy
+      #
+      # Collapse all prepared commits into one commit.
+      #
+      # Explicit commit_message wins.
+      # Empty commit_message intentionally creates an empty message.
+      # ============================================================
+
+      - name: Apply squash strategy
+        if: inputs.strategy == 'squash'
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
+        run: |
+          set -euo pipefail
+
+          git switch "$TARGET_BRANCH"
+
+          git merge \
+            --squash \
+            "$TEMP_BRANCH"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "::error::Squash produced no staged changes."
+            exit 1
+          fi
+
+          if [ -n "$COMMIT_MESSAGE" ]; then
+            git commit \
+              -m "$COMMIT_MESSAGE"
+          else
+            git commit \
+              --allow-empty-message \
+              -m ""
+          fi
+
+          echo
+          echo "Squash completed."
+
+          git log \
+            -3 \
+            --oneline \
+            --decorate
+
+      # ============================================================
+      # 15. Merge strategy
+      #
+      # Keep the complete patch history on TEMP_BRANCH and create
+      # a real merge commit on the target branch.
+      # ============================================================
+
+      - name: Apply merge strategy
+        if: inputs.strategy == 'merge'
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
+        run: |
+          set -euo pipefail
+
+          git switch "$TARGET_BRANCH"
+
+          if [ -n "$COMMIT_MESSAGE" ]; then
+
+            git merge \
+              --no-ff \
+              --no-edit \
+              "$TEMP_BRANCH" \
+              -m "$COMMIT_MESSAGE"
+
+          else
+
+            git merge \
+              --no-ff \
+              --no-edit \
+              "$TEMP_BRANCH" \
+              -m ""
+
+          fi
 
           echo
           echo "Merge completed."
 
-          git log -3 --oneline --decorate
-
+          git log \
+            -10 \
+            --oneline \
+            --decorate \
+            --graph
 
       # ============================================================
-      # 17. Cherry-pick strategy
+      # 16. Cherry-pick strategy
+      #
+      # Cherry-pick every prepared commit individually.
+      #
+      # This keeps the source series as separate commits on target.
       # ============================================================
 
-      - name: Cherry-pick patch commit
+      - name: Apply cherry-pick strategy
         if: inputs.strategy == 'cherry-pick'
         shell: bash
         env:
@@ -1206,22 +835,50 @@ jobs:
 
           git switch "$TARGET_BRANCH"
 
-          git cherry-pick "$PATCH_COMMIT"
+          mapfile -t COMMITS < <(
+            git rev-list \
+              --reverse \
+              "$BASE_COMMIT..$PATCH_HEAD"
+          )
+
+          if [ "${#COMMITS[@]}" -eq 0 ]; then
+            echo "::error::No commits available for cherry-pick."
+            exit 1
+          fi
+
+          for COMMIT in "${COMMITS[@]}"; do
+
+            echo
+            echo "Cherry-picking:"
+            git show \
+              --no-patch \
+              --format='%H %s' \
+              "$COMMIT"
+
+            git cherry-pick "$COMMIT"
+
+          done
 
           echo
           echo "Cherry-pick completed."
 
-          git log -3 --oneline --decorate
-
+          git log \
+            -10 \
+            --oneline \
+            --decorate
 
       # ============================================================
-      # 18. Final sanity check
+      # 17. Final verification
       # ============================================================
 
       - name: Final verification
         shell: bash
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
           set -euo pipefail
+
+          git switch "$TARGET_BRANCH"
 
           echo "========================================"
           echo "FINAL BRANCH"
@@ -1234,7 +891,20 @@ jobs:
           echo "FINAL HEAD"
           echo "========================================"
 
-          git log -1 --oneline --decorate
+          git log \
+            -1 \
+            --oneline \
+            --decorate
+
+          echo
+          echo "========================================"
+          echo "FINAL HISTORY"
+          echo "========================================"
+
+          git log \
+            -10 \
+            --oneline \
+            --decorate
 
           echo
           echo "========================================"
@@ -1244,19 +914,64 @@ jobs:
           git status --short
 
           if [ -n "$(git status --porcelain)" ]; then
-
             echo "::error::Working tree is not clean."
-
             exit 1
-
           fi
+
+          git diff \
+            --check \
+            "$BASE_COMMIT" \
+            HEAD
 
           echo
           echo "Working tree is clean."
 
+      # ============================================================
+      # 18. Verify resulting commits
+      # ============================================================
+
+      - name: Verify resulting commits
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          set -euo pipefail
+
+          git switch "$TARGET_BRANCH"
+
+          RESULT_COUNT="$(
+            git rev-list \
+              --count \
+              "$BASE_COMMIT..HEAD"
+          )"
+
+          echo "Resulting commit count:"
+          echo "$RESULT_COUNT"
+
+          echo
+          echo "Resulting commits:"
+
+          git log \
+            --reverse \
+            --format='%h | %an <%ae> | %aI | %s' \
+            "$BASE_COMMIT..HEAD"
+
+          if [ "${{ inputs.strategy }}" = "squash" ]; then
+
+            if [ "$RESULT_COUNT" -ne 1 ]; then
+              echo "::error::Squash strategy produced $RESULT_COUNT commits instead of exactly 1."
+              exit 1
+            fi
+
+          fi
 
       # ============================================================
       # 19. Push target branch
+      #
+      # Normal push is intentional.
+      #
+      # If target branch changed after checkout, push fails instead
+      # of overwriting remote history.
       # ============================================================
 
       - name: Push target branch
@@ -1266,7 +981,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          git push origin \
+          git push \
+            origin \
             "HEAD:$TARGET_BRANCH"
 
           echo

@@ -153,13 +153,9 @@ jobs:
 
           sed -i \
             -e '/^org.gradle.caching=/d' \
-            -e '/^org.gradle.configuration-cache=/d' \
-            -e '/^org.gradle.configuration-cache.problems=/d' \
              gradle.properties
 
           printf '%s\n' 'org.gradle.caching=true' >> gradle.properties
-          printf '%s\n' 'org.gradle.configuration-cache=true' >> gradle.properties
-          printf '%s\n' 'org.gradle.configuration-cache.problems=warn' >> gradle.properties
 
           echo "Gradle optimizations configured."
 
@@ -518,7 +514,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
-          name: telegram-standalone-ft-web
+          name: telegram-standalone-web
           path: TMessagesProj_AppStandalone/build/outputs/**/*.apk
           if-no-files-found: error
           archive: false
@@ -534,6 +530,6 @@ jobs:
 
           rm -f TMessagesProj/config/release.keystore
           rm -f "$GRADLE_USER_HOME/gradle.properties"
-          rm -f TMessagesProj_AppStandalone/google-services.json.original
+          rm -f TMessagesProj/google-services.json.original
 
           echo "Signing files cleaned up."

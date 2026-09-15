@@ -9,7 +9,7 @@ on:
         type: string
 
       patch_url:
-        description: "Direct URL to .patch or .diff"
+        description: "Direct URL to a .patch/.diff file or an archive containing patches"
         required: true
         type: string
 
@@ -60,6 +60,7 @@ jobs:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 0
 
+
       # ============================================================
       # 2. Configure Git
       # ============================================================
@@ -75,25 +76,30 @@ jobs:
           echo "========================================"
           echo "TARGET BRANCH"
           echo "========================================"
+
           git branch --show-current
 
           echo
           echo "========================================"
           echo "CURRENT HEAD"
           echo "========================================"
+
           git log -1 --oneline --decorate
 
           echo
           echo "========================================"
           echo "GIT VERSION"
           echo "========================================"
+
           git --version
 
           echo
           echo "========================================"
           echo "WORKING TREE"
           echo "========================================"
+
           git status --short
+
 
       # ============================================================
       # 3. Make sure working tree is clean
@@ -112,11 +118,12 @@ jobs:
 
           echo "Working tree is clean."
 
+
       # ============================================================
-      # 4. Download patch
+      # 4. Download patch or archive
       # ============================================================
 
-      - name: Download patch
+      - name: Download patch or archive
         shell: bash
         env:
           PATCH_URL: ${{ inputs.patch_url }}
@@ -124,6 +131,7 @@ jobs:
           set -euo pipefail
 
           PATCH_DIR="$RUNNER_TEMP/patch"
+          INPUT_FILE="$PATCH_DIR/input"
 
           mkdir -p "$PATCH_DIR"
 
@@ -137,64 +145,210 @@ jobs:
             --retry-delay 2 \
             --connect-timeout 20 \
             --max-time 300 \
-            --output "$PATCH_DIR/input.patch" \
+            --output "$INPUT_FILE" \
             "$PATCH_URL"
 
-          if [ ! -s "$PATCH_DIR/input.patch" ]; then
-            echo "::error::Downloaded patch is empty."
+          if [ ! -s "$INPUT_FILE" ]; then
+            echo "::error::Downloaded file is empty."
             exit 1
           fi
 
           echo
-          echo "Downloaded patch:"
-          wc -l "$PATCH_DIR/input.patch"
+          echo "Downloaded file:"
+          ls -lh "$INPUT_FILE"
 
           echo
           echo "File type:"
-          file "$PATCH_DIR/input.patch"
+          file "$INPUT_FILE"
+
 
       # ============================================================
-      # 5. Detect mailbox / normal diff
+      # 5. Detect patch or archive
       # ============================================================
 
-      - name: Detect patch format
+      - name: Detect patch or archive
         shell: bash
         run: |
           set -euo pipefail
 
-          PATCH="$RUNNER_TEMP/patch/input.patch"
+          INPUT="$RUNNER_TEMP/patch/input"
+          EXTRACT_DIR="$RUNNER_TEMP/patch/extracted"
 
-          if grep -qE '^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$' "$PATCH"; then
-            echo "PATCH_FORMAT=mailbox" >> "$GITHUB_ENV"
+          mkdir -p "$EXTRACT_DIR"
 
-            echo "Detected:"
-            echo "Git mailbox / format-patch"
+          FILE_TYPE="$(file -b "$INPUT")"
 
-          elif grep -qE '^diff --git ' "$PATCH"; then
-            echo "PATCH_FORMAT=diff" >> "$GITHUB_ENV"
+          echo "========================================"
+          echo "INPUT TYPE"
+          echo "========================================"
 
-            echo "Detected:"
-            echo "Git unified diff"
+          echo "$FILE_TYPE"
+
+          echo
+
+          # --------------------------------------------------------
+          # ZIP
+          # --------------------------------------------------------
+
+          if file "$INPUT" | grep -qi 'Zip archive'; then
+
+            echo "Detected ZIP archive."
+
+            echo "INPUT_TYPE=archive" >> "$GITHUB_ENV"
+            echo "ARCHIVE_TYPE=zip" >> "$GITHUB_ENV"
+
+            unzip -q "$INPUT" -d "$EXTRACT_DIR"
+
+          # --------------------------------------------------------
+          # TAR
+          # --------------------------------------------------------
+
+          elif file "$INPUT" | grep -qi 'tar archive'; then
+
+            echo "Detected TAR archive."
+
+            echo "INPUT_TYPE=archive" >> "$GITHUB_ENV"
+            echo "ARCHIVE_TYPE=tar" >> "$GITHUB_ENV"
+
+            tar -xf "$INPUT" -C "$EXTRACT_DIR"
+
+          # --------------------------------------------------------
+          # GZIP
+          # --------------------------------------------------------
+
+          elif file "$INPUT" | grep -qi 'gzip compressed'; then
+
+            echo "Detected GZIP compressed file."
+
+            # First check whether it is actually a tar.gz.
+            if tar -tzf "$INPUT" >/dev/null 2>&1; then
+
+              echo "Detected TAR.GZ archive."
+
+              echo "INPUT_TYPE=archive" >> "$GITHUB_ENV"
+              echo "ARCHIVE_TYPE=tar.gz" >> "$GITHUB_ENV"
+
+              tar -xzf "$INPUT" -C "$EXTRACT_DIR"
+
+            else
+
+              echo "GZIP is not a TAR archive."
+
+              echo "INPUT_TYPE=compressed_patch" >> "$GITHUB_ENV"
+              echo "ARCHIVE_TYPE=gzip" >> "$GITHUB_ENV"
+
+              cp "$INPUT" "$EXTRACT_DIR/input"
+
+              gunzip -f "$EXTRACT_DIR/input"
+
+            fi
+
+          # --------------------------------------------------------
+          # XZ
+          # --------------------------------------------------------
+
+          elif file "$INPUT" | grep -qi 'XZ compressed'; then
+
+            echo "Detected XZ compressed file."
+
+            if tar -tJf "$INPUT" >/dev/null 2>&1; then
+
+              echo "Detected TAR.XZ archive."
+
+              echo "INPUT_TYPE=archive" >> "$GITHUB_ENV"
+              echo "ARCHIVE_TYPE=tar.xz" >> "$GITHUB_ENV"
+
+              tar -xJf "$INPUT" -C "$EXTRACT_DIR"
+
+            else
+
+              echo "XZ is not a TAR archive."
+
+              echo "INPUT_TYPE=compressed_patch" >> "$GITHUB_ENV"
+              echo "ARCHIVE_TYPE=xz" >> "$GITHUB_ENV"
+
+              cp "$INPUT" "$EXTRACT_DIR/input"
+
+              unxz -f "$EXTRACT_DIR/input"
+
+            fi
+
+          # --------------------------------------------------------
+          # BZIP2
+          # --------------------------------------------------------
+
+          elif file "$INPUT" | grep -qi 'bzip2 compressed'; then
+
+            echo "Detected BZIP2 compressed file."
+
+            if tar -tjf "$INPUT" >/dev/null 2>&1; then
+
+              echo "Detected TAR.BZ2 archive."
+
+              echo "INPUT_TYPE=archive" >> "$GITHUB_ENV"
+              echo "ARCHIVE_TYPE=tar.bz2" >> "$GITHUB_ENV"
+
+              tar -xjf "$INPUT" -C "$EXTRACT_DIR"
+
+            else
+
+              echo "BZIP2 is not a TAR archive."
+
+              echo "INPUT_TYPE=compressed_patch" >> "$GITHUB_ENV"
+              echo "ARCHIVE_TYPE=bzip2" >> "$GITHUB_ENV"
+
+              cp "$INPUT" "$EXTRACT_DIR/input"
+
+              bunzip2 -f "$EXTRACT_DIR/input"
+
+            fi
+
+          # --------------------------------------------------------
+          # Plain patch/diff
+          # --------------------------------------------------------
 
           else
-            echo "::error::The downloaded file is not recognized as a Git patch."
-            exit 1
+
+            if grep -qE '^diff --git ' "$INPUT"; then
+
+              echo "Detected Git unified diff."
+
+              echo "INPUT_TYPE=patch" >> "$GITHUB_ENV"
+              echo "PATCH_FORMAT=diff" >> "$GITHUB_ENV"
+
+            elif grep -qE '^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$' "$INPUT"; then
+
+              echo "Detected Git mailbox / format-patch."
+
+              echo "INPUT_TYPE=patch" >> "$GITHUB_ENV"
+              echo "PATCH_FORMAT=mailbox" >> "$GITHUB_ENV"
+
+            else
+
+              echo "::error::The downloaded file is neither a recognized archive nor a Git patch."
+
+              echo
+              echo "File type:"
+              file "$INPUT"
+
+              exit 1
+            fi
+
           fi
 
+
       # ============================================================
-      # 6. Extract diff from mailbox
+      # 6. Extract and prepare all patch payloads
       #
-      # IMPORTANT:
+      # Supports:
       #
-      # We intentionally don't use:
+      #   .patch
+      #   .diff
+      #   Git mailbox / format-patch
+      #   patches without extension
       #
-      #   git am
-      #
-      # because the supplied patch has fake blob indexes such as:
-      #
-      #   index 0000000..0000000
-      #
-      # We only need the diff payload.
+      # When an archive is supplied, all patches inside it are
+      # discovered recursively and combined in sorted order.
       # ============================================================
 
       - name: Extract patch payload
@@ -202,33 +356,265 @@ jobs:
         run: |
           set -euo pipefail
 
-          INPUT="$RUNNER_TEMP/patch/input.patch"
+          INPUT="$RUNNER_TEMP/patch/input"
+          EXTRACT_DIR="$RUNNER_TEMP/patch/extracted"
+          PATCH_DIR="$RUNNER_TEMP/patch/patches"
           OUTPUT="$RUNNER_TEMP/patch/patch.diff"
 
-          if [ "$PATCH_FORMAT" = "mailbox" ]; then
+          mkdir -p "$PATCH_DIR"
 
-            awk '
-              /^diff --git / {
-                started=1
-              }
+          rm -f "$OUTPUT"
 
-              started {
-                print
-              }
-            ' "$INPUT" > "$OUTPUT"
+          echo "========================================"
+          echo "PREPARING PATCHES"
+          echo "========================================"
+
+          # --------------------------------------------------------
+          # Plain patch
+          # --------------------------------------------------------
+
+          if [ "${INPUT_TYPE:-}" = "patch" ]; then
+
+            echo "Processing downloaded patch."
+
+            cp "$INPUT" "$PATCH_DIR/0001-input.patch"
+
+          # --------------------------------------------------------
+          # Compressed standalone patch
+          # --------------------------------------------------------
+
+          elif [ "${INPUT_TYPE:-}" = "compressed_patch" ]; then
+
+            echo "Processing decompressed patch."
+
+            find "$EXTRACT_DIR" \
+              -type f \
+              -print \
+              -exec sh -c '
+                FILE="$1"
+
+                if grep -qE "^diff --git " "$FILE" 2>/dev/null; then
+                  exit 0
+                fi
+
+                if grep -qE "^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$" "$FILE" 2>/dev/null; then
+                  exit 0
+                fi
+
+                exit 1
+              ' _ {} \; \
+              -exec cp {} "$PATCH_DIR/0001-input.patch" \;
+
+          # --------------------------------------------------------
+          # Archive
+          # --------------------------------------------------------
+
+          elif [ "${INPUT_TYPE:-}" = "archive" ]; then
+
+            echo "Searching archive recursively for patches."
+
+            echo
+            echo "Archive contents:"
+            find "$EXTRACT_DIR" -type f -print | sort
+
+            echo
+            echo "Searching for .patch / .diff files..."
+
+            PATCH_INDEX=0
+
+            # First collect files explicitly named .patch/.diff.
+            while IFS= read -r FILE; do
+
+              PATCH_INDEX=$((PATCH_INDEX + 1))
+
+              EXT="$(basename "$FILE")"
+
+              DEST="$PATCH_DIR/$(printf '%04d' "$PATCH_INDEX")-$EXT"
+
+              echo
+              echo "Found patch:"
+              echo "$FILE"
+
+              cp "$FILE" "$DEST"
+
+            done < <(
+              find "$EXTRACT_DIR" \
+                -type f \
+                \( \
+                  -iname '*.patch' \
+                  -o \
+                  -iname '*.diff' \
+                \) \
+                -print | sort
+            )
+
+            # ------------------------------------------------------
+            # Search files without .patch/.diff extension by content.
+            # ------------------------------------------------------
+
+            while IFS= read -r FILE; do
+
+              # Skip files already copied by extension.
+              if [[ "$FILE" == *.patch || "$FILE" == *.PATCH || "$FILE" == *.diff || "$FILE" == *.DIFF ]]; then
+                continue
+              fi
+
+              if grep -Iq . "$FILE" 2>/dev/null; then
+
+                if grep -qE '^diff --git ' "$FILE" 2>/dev/null; then
+
+                  PATCH_INDEX=$((PATCH_INDEX + 1))
+
+                  BASENAME="$(basename "$FILE")"
+
+                  DEST="$PATCH_DIR/$(printf '%04d' "$PATCH_INDEX")-$BASENAME.patch"
+
+                  echo
+                  echo "Found patch by content:"
+                  echo "$FILE"
+
+                  cp "$FILE" "$DEST"
+
+                elif grep -qE '^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$' "$FILE" 2>/dev/null; then
+
+                  PATCH_INDEX=$((PATCH_INDEX + 1))
+
+                  BASENAME="$(basename "$FILE")"
+
+                  DEST="$PATCH_DIR/$(printf '%04d' "$PATCH_INDEX")-$BASENAME.patch"
+
+                  echo
+                  echo "Found mailbox patch by content:"
+                  echo "$FILE"
+
+                  cp "$FILE" "$DEST"
+
+                fi
+
+              fi
+
+            done < <(
+              find "$EXTRACT_DIR" \
+                -type f \
+                -print | sort
+            )
+
+            if [ "$PATCH_INDEX" -eq 0 ]; then
+              echo "::error::Archive does not contain any Git patches."
+              exit 1
+            fi
 
           else
 
-            cp "$INPUT" "$OUTPUT"
+            echo "::error::Unknown input type."
+            exit 1
 
           fi
+
+          # --------------------------------------------------------
+          # Validate discovered patch files.
+          # --------------------------------------------------------
+
+          echo
+          echo "========================================"
+          echo "DISCOVERED PATCH FILES"
+          echo "========================================"
+
+          find "$PATCH_DIR" \
+            -maxdepth 1 \
+            -type f \
+            -print | sort
+
+          PATCH_COUNT="$(find "$PATCH_DIR" -maxdepth 1 -type f | wc -l)"
+
+          if [ "$PATCH_COUNT" -eq 0 ]; then
+            echo "::error::No patch files were found."
+            exit 1
+          fi
+
+          # --------------------------------------------------------
+          # Process patches in deterministic order.
+          # --------------------------------------------------------
+
+          echo
+          echo "========================================"
+          echo "BUILDING COMBINED PATCH"
+          echo "========================================"
+
+          : > "$OUTPUT"
+
+          FINAL_INDEX=0
+
+          while IFS= read -r PATCH; do
+
+            FINAL_INDEX=$((FINAL_INDEX + 1))
+
+            echo
+            echo "Processing patch #$FINAL_INDEX:"
+            echo "$PATCH"
+
+            if grep -qE '^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$' "$PATCH"; then
+
+              echo "Format: Git mailbox / format-patch"
+
+              awk '
+                /^diff --git / {
+                  started=1
+                }
+
+                started {
+                  print
+                }
+              ' "$PATCH" >> "$OUTPUT"
+
+            elif grep -qE '^diff --git ' "$PATCH"; then
+
+              echo "Format: Git unified diff"
+
+              cat "$PATCH" >> "$OUTPUT"
+
+            else
+
+              echo "::error::File does not contain a recognized Git patch:"
+              echo "$PATCH"
+
+              exit 1
+
+            fi
+
+            echo >> "$OUTPUT"
+
+          done < <(
+            find "$PATCH_DIR" \
+              -maxdepth 1 \
+              -type f \
+              -print | sort
+          )
 
           if [ ! -s "$OUTPUT" ]; then
             echo "::error::No diff payload was found."
             exit 1
           fi
 
-          echo "Patch payload extracted."
+          DIFF_COUNT="$(grep -c '^diff --git ' "$OUTPUT" || true)"
+
+          if [ "$DIFF_COUNT" -eq 0 ]; then
+            echo "::error::Combined patch contains no diff --git entries."
+            exit 1
+          fi
+
+          echo
+          echo "========================================"
+          echo "PATCH PREPARATION COMPLETE"
+          echo "========================================"
+
+          echo "Patch files found: $PATCH_COUNT"
+          echo "Diff sections:     $DIFF_COUNT"
+
+          echo
+          echo "Combined patch:"
+          wc -l "$OUTPUT"
+
 
       # ============================================================
       # 7. Show patch structure
@@ -261,6 +647,7 @@ jobs:
 
           wc -l "$PATCH"
 
+
       # ============================================================
       # 8. Inspect fake indexes
       #
@@ -285,6 +672,7 @@ jobs:
             echo "Patch contains zero/fake blob indexes."
             echo "3-way application will not be attempted."
           fi
+
 
       # ============================================================
       # 9. Strict dry-run
@@ -322,15 +710,19 @@ jobs:
           echo "Running git apply --check..."
 
           if git apply "${ARGS[@]}" "$PATCH"; then
+
             echo
             echo "Patch passed strict applicability check."
 
           else
+
             echo
             echo "Strict check failed."
             echo "This does not necessarily mean that nothing can be applied."
             echo "The next step will use --reject."
+
           fi
+
 
       # ============================================================
       # 10. Apply patch
@@ -382,13 +774,13 @@ jobs:
           echo "Working tree:"
           git status --short
 
-          # Store the result for the next step.
           echo "PATCH_APPLY_EXIT=$APPLY_EXIT" >> "$GITHUB_ENV"
 
           # Don't fail yet.
           #
           # We first inspect .rej files and give a useful error.
           exit 0
+
 
       # ============================================================
       # 11. Detect rejected hunks
@@ -437,6 +829,7 @@ jobs:
 
           echo "No .rej files found."
 
+
       # ============================================================
       # 12. Check git apply exit code
       #
@@ -465,6 +858,7 @@ jobs:
           fi
 
           echo "git apply completed successfully."
+
 
       # ============================================================
       # 13. Verify that patch actually changed something
@@ -496,6 +890,7 @@ jobs:
 
           git diff --stat
 
+
       # ============================================================
       # 14. Direct commit / squash
       #
@@ -523,7 +918,9 @@ jobs:
 
           echo
           echo "Created commit:"
+
           git log -1 --oneline --decorate
+
 
       # ============================================================
       # 15. Create temporary local branch
@@ -569,6 +966,7 @@ jobs:
           echo "Patch commit:"
           echo "$PATCH_COMMIT"
 
+
       # ============================================================
       # 16. Merge strategy
       # ============================================================
@@ -593,6 +991,7 @@ jobs:
 
           git log -3 --oneline --decorate
 
+
       # ============================================================
       # 17. Cherry-pick strategy
       # ============================================================
@@ -613,6 +1012,7 @@ jobs:
           echo "Cherry-pick completed."
 
           git log -3 --oneline --decorate
+
 
       # ============================================================
       # 18. Final sanity check
@@ -650,6 +1050,7 @@ jobs:
 
           echo
           echo "Working tree is clean."
+
 
       # ============================================================
       # 19. Push target branch

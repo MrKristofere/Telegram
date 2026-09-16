@@ -10,6 +10,7 @@ env:
   FIREBASE_REPOSITORY: MrKristofere/firebase-android-sdk
   FIREBASE_PATH: firebase-android-sdk
   TELEGRAM_PATH: Telegram
+  MAVEN_REPO: ${{ github.workspace }}/maven-repo
 
 jobs:
   build:
@@ -19,7 +20,6 @@ jobs:
       # ============================================================
       # 1. Checkout Telegram
       # ============================================================
-
       - name: Checkout Telegram
         uses: actions/checkout@v7
         with:
@@ -28,9 +28,8 @@ jobs:
           ref: Tmp
 
       # ============================================================
-      # 2. Checkout your Firebase fork
+      # 2. Checkout Firebase fork
       # ============================================================
-
       - name: Checkout Firebase fork
         uses: actions/checkout@v7
         with:
@@ -40,11 +39,8 @@ jobs:
           fetch-depth: 1
 
       # ============================================================
-      # 3. Java 21
-      #
-      # Telegram currently uses Android Gradle Plugin 8.10.1.
+      # 3. Java
       # ============================================================
-
       - name: Setup Java 21
         uses: actions/setup-java@v6
         with:
@@ -54,7 +50,6 @@ jobs:
       # ============================================================
       # 4. Android SDK
       # ============================================================
-
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
         with:
@@ -63,27 +58,24 @@ jobs:
             platforms;android-36
             build-tools;36.0.0
             ndk;27.2.12479018
-          
 
       # ============================================================
       # 5. Gradle
       # ============================================================
-
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
       # ============================================================
       # 6. Show versions
       # ============================================================
-
       - name: Show Firebase version
         working-directory: ${{ env.FIREBASE_PATH }}
         run: |
           echo "Firebase Messaging version:"
-          grep '^version=' firebase-messaging/gradle.properties || true
+          grep '^version=' firebase-messaging/gradle.properties
 
           echo
-          echo "Git commit:"
+          echo "Firebase commit:"
           git rev-parse HEAD
 
       - name: Show Telegram commit
@@ -94,17 +86,7 @@ jobs:
 
       # ============================================================
       # 7. Patch Firebase
-      #
-      # Здесь можно менять любой исходник Firebase ДО его сборки.
-      #
-      # Например:
-      #
-      # sed -i 's/OLD_VALUE/NEW_VALUE/g' \
-      #   firebase-messaging/src/main/java/...
-      #
-      # Пока ничего не меняем.
       # ============================================================
-
       - name: Patch Firebase source
         working-directory: ${{ env.FIREBASE_PATH }}
         run: |
@@ -112,18 +94,17 @@ jobs:
 
           # ========================================================
           # ДОБАВЬ СЮДА СВОЁ ИЗМЕНЕНИЕ
+          # ========================================================
           #
           # Например:
           #
           # sed -i 's/foo/bar/g' \
-          #   firebase-messaging/src/main/java/com/google/firebase/messaging/SomeFile.java
+          #   firebase-messaging/src/main/java/...
           #
-          # ========================================================
 
       # ============================================================
       # 8. Read Firebase Messaging version
       # ============================================================
-
       - name: Read Firebase Messaging version
         id: firebase_version
         working-directory: ${{ env.FIREBASE_PATH }}
@@ -139,115 +120,155 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 9. Build and publish Firebase Messaging
-      #
-      # Firebase officially supports:
-      #
-      # ./gradlew \
-      #   -PprojectsToPublish="firebase-messaging" \
-      #   publishReleasingLibrariesToMavenLocal
-      #
-      # This puts the artifact into ~/.m2/repository
+      # 9. Prepare local Maven repository
       # ============================================================
+      - name: Prepare Maven repository
+        run: |
+          rm -rf "$MAVEN_REPO"
+          mkdir -p "$MAVEN_REPO"
 
+          echo "Maven repository:"
+          echo "$MAVEN_REPO"
+
+      # ============================================================
+      # 10. Publish custom Firebase Messaging
+      #
+      # IMPORTANT:
+      # We explicitly redirect Gradle's Maven local repository
+      # to $GITHUB_WORKSPACE/maven-repo.
+      # ============================================================
       - name: Publish custom Firebase Messaging
         working-directory: ${{ env.FIREBASE_PATH }}
         run: |
           ./gradlew \
+            -Dmaven.repo.local="$MAVEN_REPO" \
             -PprojectsToPublish="firebase-messaging" \
             publishReleasingLibrariesToMavenLocal \
             --no-daemon \
             --stacktrace
 
       # ============================================================
-      # 10. Verify generated Maven artifact
+      # 11. Verify Firebase artifact
       # ============================================================
-
       - name: Verify Firebase Maven artifact
         run: |
           VERSION="${{ steps.firebase_version.outputs.version }}"
 
-          echo "Looking for:"
-          echo "~/.m2/repository/com/google/firebase/firebase-messaging/$VERSION"
+          ARTIFACT_DIR="$MAVEN_REPO/com/google/firebase/firebase-messaging/$VERSION"
 
-          if [ ! -d \
-            "$HOME/.m2/repository/com/google/firebase/firebase-messaging/$VERSION"
-          ]; then
-            echo "Firebase Maven artifact was not generated!"
+          echo "Expected artifact directory:"
+          echo "$ARTIFACT_DIR"
+
+          if [ ! -d "$ARTIFACT_DIR" ]; then
+            echo ""
+            echo "ERROR: Firebase Maven artifact was not generated!"
+            echo ""
+            echo "Contents of Maven repository:"
+            find "$MAVEN_REPO" -type f -print || true
             exit 1
           fi
 
-          find \
-            "$HOME/.m2/repository/com/google/firebase/firebase-messaging/$VERSION" \
-            -type f \
-            -print
+          echo ""
+          echo "Firebase artifact files:"
+          find "$ARTIFACT_DIR" -type f -print
+
+          echo ""
+          echo "AAR:"
+          ls -lh "$ARTIFACT_DIR"/*.aar
+
+          echo ""
+          echo "POM:"
+          ls -lh "$ARTIFACT_DIR"/*.pom
 
       # ============================================================
-      # 11. Patch Telegram's dependency resolution
-      #
-      # Original Telegram:
-      #
-      # implementation 'com.google.firebase:firebase-messaging:22.0.0'
-      #
-      # We change it to the version we just built.
-      #
-      # Also add mavenLocal() before google().
+      # 12. Upload Firebase Maven repository
       # ============================================================
+      - name: Upload Firebase Maven repository
+        uses: actions/upload-artifact@v7
+        with:
+          name: firebase-maven-repository
+          path: |
+            ${{ env.MAVEN_REPO }}/com/google/firebase/**
+          if-no-files-found: error
 
+      # ============================================================
+      # 13. Configure Telegram
+      #
+      # IMPORTANT:
+      # Do NOT use mavenLocal().
+      #
+      # Use the exact workspace Maven repository instead.
+      # ============================================================
       - name: Configure Telegram for custom Firebase
         working-directory: ${{ env.TELEGRAM_PATH }}
         env:
           FIREBASE_VERSION: ${{ steps.firebase_version.outputs.version }}
+          MAVEN_REPO_PATH: ${{ env.MAVEN_REPO }}
         run: |
-          python3 - "$FIREBASE_VERSION" <<'PY'
+          python3 - "$FIREBASE_VERSION" "$MAVEN_REPO_PATH" <<'PY'
           from pathlib import Path
           import re
           import sys
 
           firebase_version = sys.argv[1]
+          maven_repo = sys.argv[2]
 
           path = Path("TMessagesProj/build.gradle")
           text = path.read_text()
 
           # --------------------------------------------------------
-          # Add mavenLocal() before mavenCentral()
-          #
-          # Original:
-          #
-          # repositories {
-          #     mavenCentral()
-          #     google()
-          # }
+          # Remove any previous mavenLocal()
           # --------------------------------------------------------
+          text = text.replace(
+              "repositories {\n    mavenLocal()\n",
+              "repositories {\n"
+          )
 
+          # --------------------------------------------------------
+          # Replace the repositories block with an explicit
+          # workspace-local Maven repository.
+          # --------------------------------------------------------
           old_repositories = """repositories {
               mavenCentral()
               google()
           }"""
 
-          new_repositories = """repositories {
-              mavenLocal()
+          new_repositories = f"""repositories {{
+              maven {{
+                  url = uri("{maven_repo}")
+              }}
               mavenCentral()
               google()
-          }"""
+          }}"""
 
-          if old_repositories not in text:
-              print("Expected repositories block was not found.")
-              print("Current repositories block:")
-              start = text.find("repositories {")
-              print(text[start:start + 200])
-              sys.exit(1)
+          if old_repositories in text:
+              text = text.replace(
+                  old_repositories,
+                  new_repositories,
+                  1
+              )
+          else:
+              # If mavenLocal() was already present or formatting differs,
+              # replace the first repositories block more defensively.
+              pattern = r"repositories\s*\{.*?\n\}"
 
-          text = text.replace(
-              old_repositories,
-              new_repositories,
-              1
-          )
+              replacement = new_repositories
+
+              text, count = re.subn(
+                  pattern,
+                  replacement,
+                  text,
+                  count=1,
+                  flags=re.S
+              )
+
+              if count != 1:
+                  print("ERROR: Could not find repositories block.")
+                  sys.exit(1)
 
           # --------------------------------------------------------
           # Replace Firebase Messaging version.
           # --------------------------------------------------------
-
           pattern = (
               r"com\.google\.firebase:"
               r"firebase-messaging:"
@@ -255,9 +276,8 @@ jobs:
           )
 
           replacement = (
-              f"com.google.firebase:"
-              f"firebase-messaging:"
-              f"{firebase_version}"
+              "com.google.firebase:"
+              f"firebase-messaging:{firebase_version}"
           )
 
           text, count = re.subn(
@@ -268,7 +288,7 @@ jobs:
           )
 
           if count != 1:
-              print("firebase-messaging dependency was not found.")
+              print("ERROR: firebase-messaging dependency was not found.")
               sys.exit(1)
 
           path.write_text(text)
@@ -276,40 +296,39 @@ jobs:
           print()
           print("Telegram Gradle configuration:")
           print()
-          print(
-              f"Using com.google.firebase:"
-              f"firebase-messaging:{firebase_version}"
-          )
+          print(f"Using Firebase Messaging: {firebase_version}")
+          print(f"Using Maven repository: {maven_repo}")
           print()
 
           for line in text.splitlines():
-              if "firebase-" in line or "mavenLocal()" in line:
+              if (
+                  "firebase-" in line
+                  or "maven" in line.lower()
+                  or "google()" in line
+              ):
                   print(line)
           PY
 
       # ============================================================
-      # 12. Show final Telegram dependency configuration
+      # 14. Verify Telegram Gradle configuration
       # ============================================================
-
       - name: Show Firebase configuration
         working-directory: ${{ env.TELEGRAM_PATH }}
         run: |
           echo "Firebase dependencies:"
-          grep -n "firebase-" TMessagesProj/build.gradle
+          grep -n "firebase-" TMessagesProj/build.gradle || true
 
           echo
           echo "Repositories:"
           sed -n '/repositories {/,/}/p' TMessagesProj/build.gradle
 
-      # ============================================================
-      # 13. Resolve Firebase dependency
-      #
-      # This is an important diagnostic step.
-      #
-      # It shows exactly where Gradle gets firebase-messaging from
-      # and which transitive Firebase dependencies are selected.
-      # ============================================================
+          echo
+          echo "Expected Firebase Maven repository:"
+          echo "$MAVEN_REPO"
 
+      # ============================================================
+      # 15. Resolve Firebase dependency
+      # ============================================================
       - name: Resolve Firebase Messaging
         working-directory: ${{ env.TELEGRAM_PATH }}
         run: |
@@ -321,12 +340,8 @@ jobs:
             --stacktrace
 
       # ============================================================
-      # 14. Print complete Firebase dependency tree
-      #
-      # Useful when modern Firebase pulls newer firebase-common,
-      # firebase-installations, firebase-components, etc.
+      # 16. Firebase dependency tree
       # ============================================================
-
       - name: Show Firebase dependency tree
         working-directory: ${{ env.TELEGRAM_PATH }}
         run: |
@@ -349,14 +364,8 @@ jobs:
             ${{ env.TELEGRAM_PATH }}/firebase-dependencies.txt
 
       # ============================================================
-      # 15. Build Telegram
-      #
-      # Current Telegram contains a "release" build type.
-      #
-      # If your existing workflow uses another task, replace
-      # assembleRelease here with that exact task.
+      # 17. Build Telegram
       # ============================================================
-
       - name: Build Telegram Release
         working-directory: ${{ env.TELEGRAM_PATH }}
         run: |
@@ -366,13 +375,13 @@ jobs:
             --stacktrace
 
       # ============================================================
-      # 16. Find APKs
+      # 18. Find APKs
       # ============================================================
-
       - name: Find generated APKs
         working-directory: ${{ env.TELEGRAM_PATH }}
         run: |
           echo "Generated APK files:"
+
           find . \
             -type f \
             -path "*/build/outputs/apk/*" \
@@ -380,9 +389,8 @@ jobs:
             -print
 
       # ============================================================
-      # 17. Upload APK
+      # 19. Upload APK
       # ============================================================
-
       - name: Upload Telegram APK
         uses: actions/upload-artifact@v7
         with:

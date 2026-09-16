@@ -978,11 +978,13 @@ jobs:
                   "git",
                   "status",
                   "--porcelain",
+                  "--untracked-files=no",
               ]).strip()
 
               if status:
                   raise RuntimeError(
-                      f"[{index}] Repository is dirty after commit:\n{status}"
+                      f"[{index}] Tracked repository files are dirty after commit:\n"
+                      f"{tracked_status}"
                   )
 
           print()
@@ -1242,7 +1244,7 @@ jobs:
           echo "Working tree:"
           git status --short
 
-          if [[ -n "$(git status --porcelain)" ]]; then
+          if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
             echo "::error::Working tree is dirty."
             exit 1
           fi

@@ -732,7 +732,6 @@ jobs:
                       metadata["body"] = body
 
                       subject = metadata["subject"].strip()
-                      body = body.strip()
 
                       if subject and body:
                           full_message = (
@@ -742,6 +741,7 @@ jobs:
                           full_message = subject
                       else:
                           full_message = body
+
                       meta_file.write_text(
                           json.dumps(
                               metadata,
@@ -842,6 +842,7 @@ jobs:
                       full_message = subject
                   else:
                       full_message = body
+
                   metadata = {
                       "author_name": parsed[
                           "author_name"

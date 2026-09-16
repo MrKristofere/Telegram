@@ -58,11 +58,6 @@ jobs:
       IGNORE_WHITESPACE: ${{ inputs.ignore_whitespace }}
 
     steps:
-      - name: Initialize global environment
-        shell: bash
-        run: |
-          echo "PATCH_WORK=$RUNNER_TEMP/patch-work" >> $GITHUB_ENV
-
       # ------------------------------------------------------------
       # 1. Checkout complete history
       # ------------------------------------------------------------
@@ -97,16 +92,16 @@ jobs:
         run: |
           set -euo pipefail
 
-          rm -rf $PATCH_WORK
+          rm -rf .patch-work
 
           mkdir -p \
-            $PATCH_WORK/download \
-            $PATCH_WORK/extracted \
-            $PATCH_WORK/messages \
-            $PATCH_WORK/patches \
-            $PATCH_WORK/mailbox \
-            $PATCH_WORK/manifest \
-            $PATCH_WORK/logs
+            .patch-work/download \
+            .patch-work/extracted \
+            .patch-work/messages \
+            .patch-work/patches \
+            .patch-work/mailbox \
+            .patch-work/manifest \
+            .patch-work/logs
 
       # ------------------------------------------------------------
       # 4. Download input
@@ -126,7 +121,7 @@ jobs:
           set -euo pipefail
 
           URL="$PATCH_URL"
-          OUT="$PATCH_WORK/download/input"
+          OUT=".patch-work/download/input"
 
           echo "Input URL:"
           echo "$URL"
@@ -194,8 +189,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          INPUT="$PATCH_WORK/download/input"
-          OUT="$PATCH_WORK/extracted"
+          INPUT=".patch-work/download/input"
+          OUT=".patch-work/extracted"
 
           rm -rf "$OUT"
           mkdir -p "$OUT"
@@ -268,11 +263,11 @@ jobs:
           set -euo pipefail
 
           ROOT="$GITHUB_WORKSPACE"
-          EXTRACTED="$ROOT/$PATCH_WORK/extracted"
-          MAILBOX="$ROOT/$PATCH_WORK/mailbox"
-          PATCH_DIR="$ROOT/$PATCH_WORK/patches"
-          MSG_DIR="$ROOT/$PATCH_WORK/messages"
-          MANIFEST="$ROOT/$PATCH_WORK/manifest/manifest.jsonl"
+          EXTRACTED="$ROOT/.patch-work/extracted"
+          MAILBOX="$ROOT/.patch-work/mailbox"
+          PATCH_DIR="$ROOT/.patch-work/patches"
+          MSG_DIR="$ROOT/.patch-work/messages"
+          MANIFEST="$ROOT/.patch-work/manifest/manifest.jsonl"
 
           rm -rf "$MAILBOX" "$PATCH_DIR" "$MSG_DIR"
           mkdir -p "$MAILBOX" "$PATCH_DIR" "$MSG_DIR"
@@ -289,11 +284,11 @@ jobs:
           from pathlib import Path
 
           root = Path(os.environ["GITHUB_WORKSPACE"])
-          extracted = root / "$PATCH_WORK" / "extracted"
-          mailbox_root = root / "$PATCH_WORK" / "mailbox"
-          patch_root = root / "$PATCH_WORK" / "patches"
-          msg_root = root / "$PATCH_WORK" / "messages"
-          manifest_path = root / "$PATCH_WORK" / "manifest" / "manifest.jsonl"
+          extracted = root / ".patch-work" / "extracted"
+          mailbox_root = root / ".patch-work" / "mailbox"
+          patch_root = root / ".patch-work" / "patches"
+          msg_root = root / ".patch-work" / "messages"
+          manifest_path = root / ".patch-work" / "manifest" / "manifest.jsonl"
 
           mailbox_root.mkdir(parents=True, exist_ok=True)
           patch_root.mkdir(parents=True, exist_ok=True)
@@ -592,7 +587,7 @@ jobs:
           from pathlib import Path
 
           root = Path(os.environ["GITHUB_WORKSPACE"])
-          manifest_path = root / "$PATCH_WORK" / "manifest" / "manifest.jsonl"
+          manifest_path = root / ".patch-work" / "manifest" / "manifest.jsonl"
 
           entries = []
 
@@ -708,7 +703,7 @@ jobs:
           from pathlib import Path
 
           root = Path(os.environ["GITHUB_WORKSPACE"])
-          manifest_path = root / "$PATCH_WORK" / "manifest" / "manifest.jsonl"
+          manifest_path = root / ".patch-work" / "manifest" / "manifest.jsonl"
 
           target_commit_message = os.environ.get("COMMIT_MESSAGE", "").strip()
           ignore_whitespace = os.environ.get(
@@ -904,7 +899,7 @@ jobs:
 
               message_file = (
                   root
-                  / "$PATCH_WORK"
+                  / ".patch-work"
                   / "manifest"
                   / f"commit-{index:04d}.txt"
               )
@@ -1004,7 +999,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          PATCH_COUNT="$(wc -l < $PATCH_WORK/manifest/manifest.jsonl | tr -d ' ')"
+          PATCH_COUNT="$(wc -l < .patch-work/manifest/manifest.jsonl | tr -d ' ')"
 
           ACTUAL_COUNT="$(
             git rev-list \
@@ -1068,7 +1063,7 @@ jobs:
           from pathlib import Path
 
           root = Path(os.environ["GITHUB_WORKSPACE"])
-          manifest = root / "$PATCH_WORK" / "manifest" / "manifest.jsonl"
+          manifest = root / ".patch-work" / "manifest" / "manifest.jsonl"
 
           entries = []
 
@@ -1106,11 +1101,11 @@ jobs:
               fi
 
               printf '%s\n' "$FINAL_MESSAGE" \
-                > $PATCH_WORK/manifest/final-message.txt
+                > .patch-work/manifest/final-message.txt
 
               git commit \
                 --no-verify \
-                -F $PATCH_WORK/manifest/final-message.txt
+                -F .patch-work/manifest/final-message.txt
               ;;
 
             merge)
@@ -1128,7 +1123,7 @@ jobs:
           from pathlib import Path
 
           root = Path(os.environ["GITHUB_WORKSPACE"])
-          manifest = root / "$PATCH_WORK" / "manifest" / "manifest.jsonl"
+          manifest = root / ".patch-work" / "manifest" / "manifest.jsonl"
 
           subjects = []
 
@@ -1154,7 +1149,7 @@ jobs:
               fi
 
               printf '%s\n' "$FINAL_MESSAGE" \
-                > $PATCH_WORK/manifest/final-message.txt
+                > .patch-work/manifest/final-message.txt
 
               git merge \
                 --no-ff \
@@ -1167,7 +1162,7 @@ jobs:
               git commit \
                 --amend \
                 --no-edit \
-                -F $PATCH_WORK/manifest/final-message.txt
+                -F .patch-work/manifest/final-message.txt
               ;;
 
             cherry-pick)
@@ -1207,12 +1202,12 @@ jobs:
               # was supplied, it is allowed to override that one commit.
               if [[ "${#COMMITS[@]}" -eq 1 && -n "${COMMIT_MESSAGE//[[:space:]]/}" ]]; then
                 printf '%s\n' "$COMMIT_MESSAGE" \
-                  > $PATCH_WORK/manifest/final-message.txt
+                  > .patch-work/manifest/final-message.txt
 
                 git commit \
                   --amend \
                   --no-verify \
-                  -F $PATCH_WORK/manifest/final-message.txt
+                  -F .patch-work/manifest/final-message.txt
               fi
               ;;
 

@@ -245,17 +245,29 @@ jobs:
       # ------------------------------------------------------------
       # 6. Parse input and build manifest
       #
-      # The parser:
+      # Every individual patch is parsed independently.
       #
-      #   A) detects Git mailbox / format-patch files
-      #   B) splits mailbox with git mailsplit
-      #   C) extracts metadata with git mailinfo
-      #   D) ignores messages that contain no patch
-      #      (cover letters / discussion messages)
-      #   E) treats raw diff files as patches without source metadata
-      #   F) creates manifest.jsonl
+      # Metadata supported:
+      #   Author: Name <email>
+      #   From: Name <email>
+      #   Date: ...
+      #   Subject: ...
       #
-      # Nothing is applied during this stage.
+      # The message/body is everything after the metadata headers and
+      # before the patch separator:
+      #
+      #   ---
+      #   <diffstat>
+      #
+      # or:
+      #
+      #   diff --git ...
+      #
+      # IMPORTANT:
+      #   - diffstat is NEVER part of the commit message
+      #   - missing author is NOT invented
+      #   - missing body is NOT invented
+      #   - missing subject is generated later from the actual diff
       # ------------------------------------------------------------
       - name: Build patch metadata manifest
         shell: bash
@@ -267,20 +279,26 @@ jobs:
           MAILBOX="$ROOT/.patch-work/mailbox"
           PATCH_DIR="$ROOT/.patch-work/patches"
           MSG_DIR="$ROOT/.patch-work/messages"
+          META_DIR="$ROOT/.patch-work/metadata"
           MANIFEST="$ROOT/.patch-work/manifest/manifest.jsonl"
 
-          rm -rf "$MAILBOX" "$PATCH_DIR" "$MSG_DIR"
-          mkdir -p "$MAILBOX" "$PATCH_DIR" "$MSG_DIR"
+          rm -rf "$MAILBOX" "$PATCH_DIR" "$MSG_DIR" "$META_DIR"
+          mkdir -p \
+            "$MAILBOX" \
+            "$PATCH_DIR" \
+            "$MSG_DIR" \
+            "$META_DIR"
 
           : > "$MANIFEST"
 
           python3 <<'PY'
+          import hashlib
           import json
           import os
           import re
           import shutil
           import subprocess
-          import hashlib
+          from email.utils import parsedate_to_datetime
           from pathlib import Path
 
           root = Path(os.environ["GITHUB_WORKSPACE"])
@@ -288,19 +306,17 @@ jobs:
           mailbox_root = root / ".patch-work" / "mailbox"
           patch_root = root / ".patch-work" / "patches"
           msg_root = root / ".patch-work" / "messages"
+          meta_root = root / ".patch-work" / "metadata"
           manifest_path = root / ".patch-work" / "manifest" / "manifest.jsonl"
 
           mailbox_root.mkdir(parents=True, exist_ok=True)
           patch_root.mkdir(parents=True, exist_ok=True)
           msg_root.mkdir(parents=True, exist_ok=True)
+          meta_root.mkdir(parents=True, exist_ok=True)
 
+          DIFF_MAGIC = re.compile(rb"^diff --git ", re.MULTILINE)
           PATCH_MAGIC = re.compile(
               rb"^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$",
-              re.MULTILINE,
-          )
-
-          DIFF_MAGIC = re.compile(
-              rb"^diff --git ",
               re.MULTILINE,
           )
 
@@ -312,13 +328,231 @@ jobs:
           if not files:
               raise SystemExit("No files found after extraction.")
 
-          def natural_key(path: Path):
+          def natural_key(path):
               return [
                   int(x) if x.isdigit() else x.lower()
                   for x in re.split(r"([0-9]+)", str(path))
               ]
 
           files.sort(key=natural_key)
+
+          def sha256(path):
+              h = hashlib.sha256()
+              with path.open("rb") as f:
+                  for block in iter(lambda: f.read(1024 * 1024), b""):
+                      h.update(block)
+              return h.hexdigest()
+
+          def clean_header_value(value):
+              return value.strip()
+
+          def parse_author(value):
+              value = value.strip()
+
+              m = re.match(
+                  r"^(.*?)\s*<([^<>]+)>\s*$",
+                  value,
+              )
+
+              if m:
+                  return (
+                      m.group(1).strip(),
+                      m.group(2).strip(),
+                  )
+
+              return value, ""
+
+          def normalize_date(value):
+              value = value.strip()
+
+              if not value:
+                  return ""
+
+              try:
+                  dt = parsedate_to_datetime(value)
+                  return dt.isoformat()
+              except Exception:
+                  return value
+
+          def split_patch_content(data):
+              """
+              Separate mail-style metadata/body from the actual diff.
+
+              Returns:
+                  metadata_part
+                  diff_part
+              """
+
+              text = data.decode("utf-8", "replace")
+              lines = text.splitlines(keepends=True)
+
+              diff_index = None
+
+              for i, line in enumerate(lines):
+                  if line.startswith("diff --git "):
+                      diff_index = i
+                      break
+
+              if diff_index is None:
+                  raise ValueError(
+                      "Patch does not contain 'diff --git'."
+                  )
+
+              before_diff = lines[:diff_index]
+              diff_part = "".join(lines[diff_index:])
+
+              separator_index = None
+
+              for i, line in enumerate(before_diff):
+                  if line.rstrip("\r\n") == "---":
+                      separator_index = i
+                      break
+
+              if separator_index is not None:
+                  header_and_body = before_diff[:separator_index]
+              else:
+                  header_and_body = before_diff
+
+              return (
+                  "".join(header_and_body),
+                  diff_part,
+              )
+
+          def parse_metadata(data):
+              """
+              Parse metadata from a standalone patch.
+
+              Supported forms:
+
+                  Author: John Doe <john@example.com>
+                  From: John Doe <john@example.com>
+                  Date: ...
+                  Subject: ...
+
+              The body starts after the metadata header block.
+
+              Continuation lines for Subject are supported.
+              """
+
+              metadata_part, diff_part = split_patch_content(data)
+
+              lines = metadata_part.splitlines()
+
+              author_name = ""
+              author_email = ""
+              author_date = ""
+              subject = ""
+
+              body_start = None
+              current_header = None
+
+              header_re = re.compile(
+                  r"^(Author|From|Date|Subject):\s*(.*)$",
+                  re.IGNORECASE,
+              )
+
+              for i, line in enumerate(lines):
+                  match = header_re.match(line)
+
+                  if match:
+                      key = match.group(1).lower()
+                      value = match.group(2).strip()
+
+                      current_header = key
+
+                      if key == "author":
+                          author_name, author_email = parse_author(value)
+
+                      elif key == "from":
+                          if not author_name:
+                              author_name, author_email = parse_author(value)
+
+                      elif key == "date":
+                          author_date = normalize_date(value)
+
+                      elif key == "subject":
+                          subject = value
+
+                      continue
+
+                  # RFC/mail-style continuation lines.
+                  if (
+                      line[:1].isspace()
+                      and current_header == "subject"
+                  ):
+                      subject += " " + line.strip()
+                      continue
+
+                  # A completely blank line after headers starts body.
+                  if not line.strip() and any([
+                      author_name,
+                      author_email,
+                      author_date,
+                      subject,
+                  ]):
+                      body_start = i + 1
+                      break
+
+                  # Non-header text before diff is body.
+                  if (
+                      line.strip()
+                      and any([
+                          author_name,
+                          author_email,
+                          author_date,
+                          subject,
+                      ])
+                  ):
+                      body_start = i
+                      break
+
+              body = ""
+
+              if body_start is not None:
+                  body = "\n".join(lines[body_start:]).strip()
+
+              return {
+                  "author_name": author_name.strip(),
+                  "author_email": author_email.strip(),
+                  "author_date": author_date.strip(),
+                  "subject": subject.strip(),
+                  "body": body,
+                  "diff": diff_part,
+              }
+
+          def parse_patch(path):
+              data = path.read_bytes()
+
+              # First try the explicit metadata format.
+              try:
+                  parsed = parse_metadata(data)
+
+                  if parsed["diff"].strip():
+                      return parsed
+              except Exception:
+                  pass
+
+              # No usable metadata. Extract the actual diff only.
+              text = data.decode("utf-8", "replace")
+              match = re.search(
+                  r"^diff --git ",
+                  text,
+                  re.MULTILINE,
+              )
+
+              if not match:
+                  raise ValueError(
+                      f"Unable to locate diff in {path}"
+                  )
+
+              return {
+                  "author_name": "",
+                  "author_email": "",
+                  "author_date": "",
+                  "subject": "",
+                  "body": "",
+                  "diff": text[match.start():],
+              }
 
           candidates = []
 
@@ -328,97 +562,50 @@ jobs:
               except Exception:
                   continue
 
-              # Skip obviously unrelated binary files.
               if b"\x00" in data[:8192]:
                   continue
 
               has_diff = bool(DIFF_MAGIC.search(data))
-              has_mailbox_magic = bool(PATCH_MAGIC.search(data))
+              has_mailbox = bool(PATCH_MAGIC.search(data))
 
-              if has_diff or has_mailbox_magic:
-                  candidates.append((path, data, has_mailbox_magic))
+              if has_diff or has_mailbox:
+                  candidates.append(
+                      (path, data, has_mailbox)
+                  )
 
           if not candidates:
               raise SystemExit(
-                  "No patch/diff/format-patch content was found in the input."
+                  "No patch/diff/format-patch content was found."
               )
 
-          # A mailbox and standalone raw patches in the same input are
-          # deliberately rejected. This avoids an ambiguous patch order.
-          kinds = set()
-
-          for _, _, is_mailbox in candidates:
-              kinds.add("mailbox" if is_mailbox else "raw")
+          kinds = {
+              "mailbox" if is_mailbox else "raw"
+              for _, _, is_mailbox in candidates
+          }
 
           if len(kinds) > 1:
               raise SystemExit(
-                  "Mixed mailbox/format-patch and raw diff inputs are not "
-                  "accepted in the same import."
+                  "Mixed mailbox and raw diff inputs are not supported "
+                  "in one import."
               )
 
           manifest = []
           global_index = 0
 
-          def sha256(path):
-              h = hashlib.sha256()
-              with path.open("rb") as f:
-                  for block in iter(lambda: f.read(1024 * 1024), b""):
-                      h.update(block)
-              return h.hexdigest()
-
-          def run_mailinfo(message_file, msg_file, patch_file):
-              command = [
-                  "git",
-                  "mailinfo",
-                  "-b",
-                  "--no-scissors",
-                  "--quoted-cr=strip",
-                  str(msg_file),
-                  str(patch_file),
-              ]
-
-              with message_file.open("rb") as src:
-                  proc = subprocess.run(
-                      command,
-                      stdin=src,
-                      stdout=subprocess.PIPE,
-                      stderr=subprocess.PIPE,
-                      check=False,
-                  )
-
-              if proc.returncode != 0:
-                  stderr = proc.stderr.decode("utf-8", "replace")
-                  raise RuntimeError(
-                      f"git mailinfo failed for {message_file}: {stderr}"
-                  )
-
-              output = proc.stdout.decode("utf-8", "replace")
-
-              metadata = {
-                  "author_name": "",
-                  "author_email": "",
-                  "author_date": "",
-                  "subject": "",
-              }
-
-              for line in output.splitlines():
-                  if line.startswith("Author:"):
-                      metadata["author_name"] = line[len("Author:"):].strip()
-                  elif line.startswith("Email:"):
-                      metadata["author_email"] = line[len("Email:"):].strip()
-                  elif line.startswith("Date:"):
-                      metadata["author_date"] = line[len("Date:"):].strip()
-                  elif line.startswith("Subject:"):
-                      metadata["subject"] = line[len("Subject:"):].strip()
-
-              return metadata
-
           if kinds == {"mailbox"}:
-              for source_path, source_data, _ in candidates:
+
+              for source_path, _, _ in candidates:
                   rel = source_path.relative_to(extracted)
 
-                  split_dir = mailbox_root / f"source-{len(manifest):04d}"
-                  split_dir.mkdir(parents=True, exist_ok=True)
+                  split_dir = (
+                      mailbox_root
+                      / f"source-{len(manifest):04d}"
+                  )
+
+                  split_dir.mkdir(
+                      parents=True,
+                      exist_ok=True,
+                  )
 
                   proc = subprocess.run(
                       [
@@ -443,99 +630,291 @@ jobs:
                           f"{proc.stderr}"
                       )
 
-                  messages = sorted(split_dir.iterdir())
+                  messages = sorted(
+                      p for p in split_dir.iterdir()
+                      if p.is_file()
+                  )
 
                   for message_path in messages:
-                      if not message_path.is_file():
-                          continue
-
                       local_id = global_index + 1
 
-                      msg_file = msg_root / f"{local_id:04d}.txt"
-                      patch_file = patch_root / f"{local_id:04d}.patch"
-
-                      metadata = run_mailinfo(
-                          message_path,
-                          msg_file,
-                          patch_file,
+                      msg_file = (
+                          msg_root
+                          / f"{local_id:04d}.txt"
                       )
 
-                      if patch_file.stat().st_size == 0:
-                          # Cover letter / non-patch mail.
-                          print(
-                              f"Skipping non-patch mail: "
-                              f"{source_path.name}:{message_path.name}"
+                      meta_file = (
+                          meta_root
+                          / f"{local_id:04d}.json"
+                      )
+
+                      patch_file = (
+                          patch_root
+                          / f"{local_id:04d}.patch"
+                      )
+
+                      # Existing, reliable mailbox parser.
+                      command = [
+                          "git",
+                          "mailinfo",
+                          "-b",
+                          "--no-scissors",
+                          "--quoted-cr=strip",
+                          str(msg_file),
+                          str(patch_file),
+                      ]
+
+                      with message_path.open("rb") as src:
+                          proc = subprocess.run(
+                              command,
+                              stdin=src,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                              check=False,
                           )
+
+                      if proc.returncode != 0:
+                          raise SystemExit(
+                              "git mailinfo failed for "
+                              f"{message_path}:\n"
+                              f"{proc.stderr.decode('utf-8', 'replace')}"
+                          )
+
+                      if (
+                          not patch_file.exists()
+                          or not patch_file.stat().st_size
+                      ):
                           continue
 
-                      patch_sha = sha256(patch_file)
-
-                      message_body = msg_file.read_text(
-                          encoding="utf-8",
-                          errors="replace",
+                      output = proc.stdout.decode(
+                          "utf-8",
+                          "replace",
                       )
 
-                      # mailinfo normally puts the subject separately.
-                      # Reconstruct a normal Git commit message:
-                      # subject + blank line + body.
+                      metadata = {
+                          "author_name": "",
+                          "author_email": "",
+                          "author_date": "",
+                          "subject": "",
+                      }
+
+                      for line in output.splitlines():
+                          if line.startswith("Author:"):
+                              (
+                                  metadata["author_name"],
+                                  metadata["author_email"],
+                              ) = parse_author(
+                                  line[len("Author:"):].strip()
+                              )
+
+                          elif line.startswith("Email:"):
+                              metadata["author_email"] = (
+                                  line[len("Email:"):].strip()
+                              )
+
+                          elif line.startswith("Date:"):
+                              metadata["author_date"] = (
+                                  normalize_date(
+                                      line[len("Date:"):].strip()
+                                  )
+                              )
+
+                          elif line.startswith("Subject:"):
+                              metadata["subject"] = (
+                                  line[len("Subject:"):].strip()
+                              )
+
+                      body = msg_file.read_text(
+                          encoding="utf-8",
+                          errors="replace",
+                      ).strip()
+
+                      metadata["body"] = body
+
                       subject = metadata["subject"].strip()
-                      body = message_body.strip()
 
                       if subject and body:
-                          full_message = f"{subject}\n\n{body}"
+                          full_message = (
+                              f"{subject}\n\n{body}"
+                          )
                       elif subject:
                           full_message = subject
                       else:
                           full_message = body
 
+                      meta_file.write_text(
+                          json.dumps(
+                              metadata,
+                              ensure_ascii=False,
+                              indent=2,
+                          ) + "\n",
+                          encoding="utf-8",
+                      )
+
                       entry = {
-                          "index": global_index + 1,
+                          "index": local_id,
                           "source_file": str(rel),
                           "source_type": "mailbox",
-                          "message_file": str(msg_file.relative_to(root)),
-                          "patch_file": str(patch_file.relative_to(root)),
-                          "patch_sha256": patch_sha,
+                          "message_file": str(
+                              msg_file.relative_to(root)
+                          ),
+                          "metadata_file": str(
+                              meta_file.relative_to(root)
+                          ),
+                          "patch_file": str(
+                              patch_file.relative_to(root)
+                          ),
+                          "patch_sha256": sha256(patch_file),
                           "subject": subject,
+                          "body": body,
                           "message": full_message,
-                          "author_name": metadata["author_name"].strip(),
-                          "author_email": metadata["author_email"].strip(),
-                          "author_date": metadata["author_date"].strip(),
+                          "author_name": metadata[
+                              "author_name"
+                          ].strip(),
+                          "author_email": metadata[
+                              "author_email"
+                          ].strip(),
+                          "author_date": metadata[
+                              "author_date"
+                          ].strip(),
                           "metadata_source": "git-mailinfo",
+                          "subject_source": (
+                              "patch"
+                              if subject
+                              else "missing"
+                          ),
                       }
 
                       manifest.append(entry)
                       global_index += 1
 
           else:
-              # Raw diff mode.
+              # ------------------------------------------------------
+              # Standalone/raw diff mode.
+              #
+              # THIS is the important fix:
+              # each diff is parsed independently before it is
+              # ever applied.
+              # ------------------------------------------------------
+
               for source_path, source_data, _ in candidates:
                   rel = source_path.relative_to(extracted)
-
                   local_id = global_index + 1
 
-                  patch_file = patch_root / f"{local_id:04d}.patch"
-                  shutil.copyfile(source_path, patch_file)
+                  parsed = parse_patch(source_path)
 
-                  if patch_file.stat().st_size == 0:
+                  patch_file = (
+                      patch_root
+                      / f"{local_id:04d}.patch"
+                  )
+
+                  msg_file = (
+                      msg_root
+                      / f"{local_id:04d}.txt"
+                  )
+
+                  meta_file = (
+                      meta_root
+                      / f"{local_id:04d}.json"
+                  )
+
+                  diff = parsed["diff"].lstrip()
+
+                  if not diff:
                       raise SystemExit(
-                          f"Empty patch file: {rel}"
+                          f"Empty diff extracted from {rel}"
                       )
 
-                  patch_sha = sha256(patch_file)
+                  patch_file.write_text(
+                      diff,
+                      encoding="utf-8",
+                      newline="",
+                  )
+
+                  subject = parsed["subject"].strip()
+                  body = parsed["body"].strip()
+
+                  if subject and body:
+                      full_message = (
+                          f"{subject}\n\n{body}"
+                      )
+                  elif subject:
+                      full_message = subject
+                  else:
+                      full_message = body
+
+                  metadata = {
+                      "author_name": parsed[
+                          "author_name"
+                      ].strip(),
+                      "author_email": parsed[
+                          "author_email"
+                      ].strip(),
+                      "author_date": parsed[
+                          "author_date"
+                      ].strip(),
+                      "subject": subject,
+                      "body": body,
+                  }
+
+                  meta_file.write_text(
+                      json.dumps(
+                          metadata,
+                          ensure_ascii=False,
+                          indent=2,
+                      ) + "\n",
+                      encoding="utf-8",
+                  )
+
+                  msg_file.write_text(
+                      full_message.rstrip() + "\n"
+                      if full_message.strip()
+                      else "",
+                      encoding="utf-8",
+                  )
 
                   entry = {
                       "index": local_id,
                       "source_file": str(rel),
                       "source_type": "raw-diff",
-                      "message_file": "",
-                      "patch_file": str(patch_file.relative_to(root)),
-                      "patch_sha256": patch_sha,
-                      "subject": "",
-                      "message": "",
-                      "author_name": "",
-                      "author_email": "",
-                      "author_date": "",
-                      "metadata_source": "none",
+                      "message_file": str(
+                          msg_file.relative_to(root)
+                      ),
+                      "metadata_file": str(
+                          meta_file.relative_to(root)
+                      ),
+                      "patch_file": str(
+                          patch_file.relative_to(root)
+                      ),
+                      "patch_sha256": sha256(patch_file),
+                      "subject": subject,
+                      "body": body,
+                      "message": full_message,
+                      "author_name": parsed[
+                          "author_name"
+                      ].strip(),
+                      "author_email": parsed[
+                          "author_email"
+                      ].strip(),
+                      "author_date": parsed[
+                          "author_date"
+                      ].strip(),
+                      "metadata_source": (
+                          "standalone-diff"
+                          if any([
+                              parsed["author_name"],
+                              parsed["author_email"],
+                              parsed["author_date"],
+                              parsed["subject"],
+                              parsed["body"],
+                          ])
+                          else "none"
+                      ),
+                      "subject_source": (
+                          "patch"
+                          if subject
+                          else "missing"
+                      ),
                   }
 
                   manifest.append(entry)
@@ -543,23 +922,46 @@ jobs:
 
           if not manifest:
               raise SystemExit(
-                  "No actual patches were found. "
-                  "Input contained no patch-bearing messages."
+                  "No actual patches were found."
               )
 
-          with manifest_path.open("w", encoding="utf-8") as f:
+          with manifest_path.open(
+              "w",
+              encoding="utf-8",
+          ) as f:
               for entry in manifest:
-                  f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                  f.write(
+                      json.dumps(
+                          entry,
+                          ensure_ascii=False,
+                      ) + "\n"
+                  )
 
           print()
-          print("Manifest:")
+          print("=" * 80)
+          print("PATCH MANIFEST")
+          print("=" * 80)
+
           for entry in manifest:
               print(
                   f"{entry['index']:04d} | "
-                  f"{entry['source_type']:10s} | "
-                  f"{entry['subject'] or '(no subject)'} | "
-                  f"{entry['author_name'] or '(no author)'} "
-                  f"<{entry['author_email'] or 'no-email'}>"
+                  f"{entry['subject'] or '(subject missing)'}"
+              )
+
+              print(
+                  f"      author: "
+                  f"{entry['author_name'] or '(not supplied)'} "
+                  f"<{entry['author_email'] or 'not supplied'}>"
+              )
+
+              print(
+                  f"      body: "
+                  f"{'yes' if entry['body'] else 'no'}"
+              )
+
+              print(
+                  f"      subject source: "
+                  f"{entry['subject_source']}"
               )
 
           print()
@@ -569,7 +971,7 @@ jobs:
           test -s "$MANIFEST"
 
           echo
-          echo "Manifest file:"
+          echo "Manifest:"
           cat "$MANIFEST"
 
       # ------------------------------------------------------------

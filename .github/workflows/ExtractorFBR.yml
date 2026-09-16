@@ -1,0 +1,748 @@
+name: Verify Morphe Firebase Patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_url:
+        description: "Direct URL to APK, APKS, XAPK, APKM or ZIP"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify-firebase-patch:
+    name: Analyze APK for Firebase certificate spoofing
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      JAVA_VERSION: "21"
+      CMDLINE_TOOLS_VERSION: "14742923"
+      ANDROID_BUILD_TOOLS_VERSION: "36.1.0"
+      JADX_VERSION: "1.5.6"
+
+    steps:
+
+      # ============================================================
+      # Java
+      # ============================================================
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      # ============================================================
+      # Android SDK
+      # ============================================================
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK_ROOT="$HOME/android-sdk"
+
+          mkdir -p "$SDK_ROOT/cmdline-tools"
+
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS_VERSION}" >> "$GITHUB_PATH"
+
+          cd "$RUNNER_TEMP"
+
+          curl -fL \
+            --retry 5 \
+            --retry-delay 2 \
+            --connect-timeout 30 \
+            --max-time 300 \
+            -o commandlinetools.zip \
+            "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION}_latest.zip"
+
+          rm -rf "$RUNNER_TEMP/cmdline-tools"
+          mkdir -p "$RUNNER_TEMP/cmdline-tools"
+
+          unzip -q commandlinetools.zip \
+            -d "$RUNNER_TEMP/cmdline-tools"
+
+          rm -rf "$SDK_ROOT/cmdline-tools/latest"
+          mkdir -p "$SDK_ROOT/cmdline-tools/latest"
+
+          mv "$RUNNER_TEMP/cmdline-tools/cmdline-tools/"* \
+            "$SDK_ROOT/cmdline-tools/latest/"
+
+          export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager \
+            "platform-tools" \
+            "build-tools;${ANDROID_BUILD_TOOLS_VERSION}"
+
+          test -x "$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/aapt2"
+          test -x "$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner"
+
+          echo "ANDROID_BUILD_TOOLS=$SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS_VERSION}" \
+            >> "$GITHUB_ENV"
+
+      # ============================================================
+      # JADX
+      # ============================================================
+
+      - name: Install JADX
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$RUNNER_TEMP"
+
+          curl -fL \
+            --retry 5 \
+            --retry-delay 2 \
+            --connect-timeout 30 \
+            --max-time 300 \
+            -o jadx.zip \
+            "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip"
+
+          rm -rf "$RUNNER_TEMP/jadx"
+
+          mkdir -p "$RUNNER_TEMP/jadx"
+
+          unzip -q jadx.zip \
+            -d "$RUNNER_TEMP/jadx"
+
+          test -x "$RUNNER_TEMP/jadx/bin/jadx"
+
+          echo "$RUNNER_TEMP/jadx/bin" >> "$GITHUB_PATH"
+
+          jadx --version
+
+      # ============================================================
+      # Workspace
+      # ============================================================
+
+      - name: Prepare workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf work artifacts
+
+          mkdir -p \
+            work/input \
+            work/apks \
+            work/jadx \
+            work/firebase \
+            artifacts/firebase \
+            artifacts/certs
+
+      # ============================================================
+      # Download
+      # ============================================================
+
+      - name: Download package
+        shell: bash
+        env:
+          PACKAGE_URL: ${{ inputs.package_url }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$PACKAGE_URL" ]]; then
+            echo "ERROR: package_url is empty"
+            exit 1
+          fi
+
+          curl -fL \
+            --retry 5 \
+            --retry-delay 3 \
+            --connect-timeout 30 \
+            --max-time 900 \
+            -o work/input/package \
+            "$PACKAGE_URL"
+
+          test -s work/input/package
+
+          file work/input/package
+          ls -lh work/input/package
+
+      # ============================================================
+      # Extract APKs
+      # ============================================================
+
+      - name: Extract APK files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+          import shutil
+          import zipfile
+
+          source = Path("work/input/package")
+          output = Path("work/apks")
+
+          def is_apk(path):
+              try:
+                  with zipfile.ZipFile(path) as zf:
+                      return "AndroidManifest.xml" in zf.namelist()
+              except Exception:
+                  return False
+
+          if is_apk(source):
+              print("Detected ordinary APK.")
+
+              destination = output / "base.apk"
+              shutil.copy2(source, destination)
+
+          elif zipfile.is_zipfile(source):
+              print("Detected APK container/archive.")
+
+              with zipfile.ZipFile(source) as zf:
+                  entries = [
+                      info
+                      for info in zf.infolist()
+                      if not info.is_dir()
+                      and info.filename.lower().endswith(".apk")
+                  ]
+
+                  if not entries:
+                      raise SystemExit(
+                          "ERROR: ZIP archive does not contain APK files."
+                      )
+
+                  used_names = set()
+
+                  for index, info in enumerate(entries, start=1):
+                      name = Path(info.filename).name
+
+                      if not name:
+                          continue
+
+                      candidate = name
+
+                      if candidate in used_names:
+                          candidate = f"{index:03d}_{candidate}"
+
+                      used_names.add(candidate)
+
+                      destination = output / candidate
+
+                      with zf.open(info) as src:
+                          with destination.open("wb") as dst:
+                              shutil.copyfileobj(src, dst)
+
+                      print(f"Extracted: {destination}")
+
+          else:
+              raise SystemExit(
+                  "ERROR: downloaded file is neither APK nor ZIP archive."
+              )
+
+          apks = sorted(output.glob("*.apk"))
+
+          if not apks:
+              raise SystemExit("ERROR: no APK files found.")
+
+          print()
+          print("APK files:")
+
+          for apk in apks:
+              print(f" - {apk}")
+          PY
+
+      # ============================================================
+      # Validate APKs
+      # ============================================================
+
+      - name: Validate APK files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          count=0
+
+          while IFS= read -r -d '' apk; do
+
+            count=$((count + 1))
+
+            echo
+            echo "============================================================"
+            echo "Validating: $apk"
+            echo "============================================================"
+
+            unzip -tq "$apk"
+
+            if ! unzip -l "$apk" | grep -q 'AndroidManifest.xml'; then
+              echo "ERROR: AndroidManifest.xml not found:"
+              echo "$apk"
+              exit 1
+            fi
+
+          done < <(
+            find work/apks \
+              -maxdepth 1 \
+              -type f \
+              -name '*.apk' \
+              -print0 |
+            sort -z
+          )
+
+          if [[ "$count" -eq 0 ]]; then
+            echo "ERROR: no APK files found."
+            exit 1
+          fi
+
+          echo
+          echo "Validated $count APK file(s)."
+
+      # ============================================================
+      # Certificates
+      # ============================================================
+
+      - name: Extract signing certificates
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APKSIGNER="$ANDROID_BUILD_TOOLS/apksigner"
+
+          test -x "$APKSIGNER"
+
+          while IFS= read -r -d '' apk; do
+
+            base="$(basename "$apk" .apk)"
+
+            safe="$(
+              printf '%s' "$base" |
+              tr -c 'A-Za-z0-9_.-' '_'
+            )"
+
+            output="artifacts/certs/${safe}.certs.txt"
+
+            echo "============================================================"
+            echo "Certificate: $apk"
+            echo "============================================================"
+
+            "$APKSIGNER" verify \
+              --verbose \
+              --print-certs \
+              "$apk" \
+              > "$output" \
+              2>&1 || true
+
+          done < <(
+            find work/apks \
+              -maxdepth 1 \
+              -type f \
+              -name '*.apk' \
+              -print0 |
+            sort -z
+          )
+
+      # ============================================================
+      # Decompile APKs
+      # ============================================================
+
+      - name: Decompile APK files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r -d '' apk; do
+
+            stem="$(basename "$apk" .apk)"
+            output_dir="work/jadx/$stem"
+
+            rm -rf "$output_dir"
+            mkdir -p "$output_dir"
+
+            echo
+            echo "============================================================"
+            echo "JADX: $apk"
+            echo "Output: $output_dir"
+            echo "============================================================"
+
+            jadx \
+              --show-bad-code \
+              --threads-count 4 \
+              --log-level WARN \
+              -d "$output_dir" \
+              "$apk" \
+              > "work/jadx/${stem}.log" \
+              2>&1 || true
+
+            if [[ ! -d "$output_dir" ]]; then
+              echo "WARNING: JADX produced no directory."
+            fi
+
+          done < <(
+            find work/apks \
+              -maxdepth 1 \
+              -type f \
+              -name '*.apk' \
+              -print0 |
+            sort -z
+          )
+
+      # ============================================================
+      # Locate FirebaseInstallationServiceClient
+      # ============================================================
+
+      - name: Find FirebaseInstallationServiceClient
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          output="artifacts/firebase/firebase-location.txt"
+
+          : > "$output"
+
+          echo "Searching for:" | tee -a "$output"
+          echo "com.google.firebase.installations.remote.FirebaseInstallationServiceClient" \
+            | tee -a "$output"
+
+          echo | tee -a "$output"
+
+          find work/jadx \
+            -type f \
+            \( \
+              -name 'FirebaseInstallationServiceClient.java' \
+              -o \
+              -name 'FirebaseInstallationServiceClient.kt' \
+            \) \
+            -print \
+            | sort \
+            | tee -a "$output"
+
+          echo | tee -a "$output"
+
+          count="$(
+            find work/jadx \
+              -type f \
+              \( \
+                -name 'FirebaseInstallationServiceClient.java' \
+                -o \
+                -name 'FirebaseInstallationServiceClient.kt' \
+              \) \
+              -print |
+            wc -l
+          )"
+
+          echo "FOUND_FILES=$count" | tee -a "$output"
+
+          if [[ "$count" -eq 0 ]]; then
+            echo
+            echo "ERROR: FirebaseInstallationServiceClient was not found."
+            exit 1
+          fi
+
+      # ============================================================
+      # Extract ONLY FirebaseInstallationServiceClient.java
+      # ============================================================
+
+      - name: Extract FirebaseInstallationServiceClient
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          output_dir="artifacts/firebase/files"
+
+          rm -rf "$output_dir"
+          mkdir -p "$output_dir"
+
+          count=0
+
+          while IFS= read -r -d '' file; do
+
+            count=$((count + 1))
+
+            apk_name="$(basename "$(dirname "$(dirname "$(dirname "$file")")")")"
+
+            # Use a unique filename so split APKs cannot overwrite each other.
+            safe_name="$(
+              printf '%s' "$file" |
+              sed 's#/#_#g'
+            )"
+
+            destination="$output_dir/${count}_${safe_name}"
+
+            cp "$file" "$destination"
+
+            echo "Copied:"
+            echo "  $file"
+            echo "  -> $destination"
+
+          done < <(
+            find work/jadx \
+              -type f \
+              -name 'FirebaseInstallationServiceClient.java' \
+              -print0 |
+            sort -z
+          )
+
+          if [[ "$count" -eq 0 ]]; then
+            echo "ERROR: target Java file was not found."
+            exit 1
+          fi
+
+          echo
+          echo "Extracted $count FirebaseInstallationServiceClient.java file(s)."
+
+      # ============================================================
+      # Analyze Morphe patch
+      # ============================================================
+
+      - name: Verify Morphe Firebase certificate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REPORT="artifacts/firebase/morphe-verification.txt"
+
+          rm -f "$REPORT"
+
+          {
+            echo "============================================================"
+            echo "MORPHE FIREBASE CERTIFICATE PATCH VERIFICATION"
+            echo "============================================================"
+            echo
+          } > "$REPORT"
+
+          total=0
+          patched=0
+          original=0
+          unknown=0
+
+          while IFS= read -r -d '' file; do
+
+            total=$((total + 1))
+
+            echo >> "$REPORT"
+            echo "------------------------------------------------------------" >> "$REPORT"
+            echo "FILE: $file" >> "$REPORT"
+            echo "------------------------------------------------------------" >> "$REPORT"
+            echo >> "$REPORT"
+
+            text="$(cat "$file")"
+
+            method_found=0
+            constant_return=0
+            android_utils_found=0
+            x_cert_found=0
+
+            if grep -q \
+              'getFingerprintHashForPackage' \
+              "$file"; then
+              method_found=1
+            fi
+
+            if grep -qE \
+              'return[[:space:]]+"[0-9A-Fa-f]{40}"[[:space:]]*;' \
+              "$file"; then
+              constant_return=1
+            fi
+
+            if grep -q \
+              'AndroidUtilsLight.getPackageCertificateHashBytes' \
+              "$file"; then
+              android_utils_found=1
+            fi
+
+            if grep -q \
+              'X_ANDROID_CERT_HEADER_KEY' \
+              "$file"; then
+              x_cert_found=1
+            fi
+
+            echo "getFingerprintHashForPackage found: $method_found" \
+              >> "$REPORT"
+
+            echo "40-hex constant return found: $constant_return" \
+              >> "$REPORT"
+
+            echo "AndroidUtilsLight certificate lookup found: $android_utils_found" \
+              >> "$REPORT"
+
+            echo "X_ANDROID_CERT_HEADER_KEY found: $x_cert_found" \
+              >> "$REPORT"
+
+            echo >> "$REPORT"
+
+            echo "=== getFingerprintHashForPackage() ===" \
+              >> "$REPORT"
+
+            awk '
+              /getFingerprintHashForPackage[[:space:]]*\(/ {
+                found=1
+                count=0
+              }
+
+              found {
+                print
+                count++
+
+                if (count >= 35) {
+                  exit
+                }
+              }
+            ' "$file" >> "$REPORT" || true
+
+            echo >> "$REPORT"
+
+            echo "=== X-Android-Cert context ===" \
+              >> "$REPORT"
+
+            grep -n -B15 -A15 \
+              'X_ANDROID_CERT_HEADER_KEY' \
+              "$file" \
+              >> "$REPORT" \
+              || true
+
+            echo >> "$REPORT"
+
+            # Strong detection:
+            #
+            # Patched JADX output should have:
+            #
+            # return "40-hex-SHA1";
+            #
+            # and should NOT have the original
+            # AndroidUtilsLight certificate lookup.
+            #
+            if [[ "$method_found" -eq 1 ]] &&
+               [[ "$constant_return" -eq 1 ]] &&
+               [[ "$android_utils_found" -eq 0 ]]; then
+
+              echo "VERDICT: MORPHE_PATCH_DETECTED" \
+                >> "$REPORT"
+
+              patched=$((patched + 1))
+
+            elif [[ "$method_found" -eq 1 ]] &&
+                 [[ "$android_utils_found" -eq 1 ]]; then
+
+              echo "VERDICT: ORIGINAL_FIREBASE_IMPLEMENTATION_DETECTED" \
+                >> "$REPORT"
+
+              original=$((original + 1))
+
+            else
+
+              echo "VERDICT: UNKNOWN" \
+                >> "$REPORT"
+
+              unknown=$((unknown + 1))
+
+            fi
+
+            echo >> "$REPORT"
+
+          done < <(
+            find work/jadx \
+              -type f \
+              -name 'FirebaseInstallationServiceClient.java' \
+              -print0 |
+            sort -z
+          )
+
+          {
+            echo
+            echo "============================================================"
+            echo "SUMMARY"
+            echo "============================================================"
+            echo
+            echo "Total target files: $total"
+            echo "Morphe patch detected: $patched"
+            echo "Original implementation detected: $original"
+            echo "Unknown: $unknown"
+            echo
+
+            if [[ "$patched" -gt 0 ]]; then
+              echo "RESULT: PATCH DETECTED"
+            elif [[ "$original" -gt 0 ]]; then
+              echo "RESULT: NO PATCH DETECTED"
+            else
+              echo "RESULT: INCONCLUSIVE"
+            fi
+
+          } >> "$REPORT"
+
+          cat "$REPORT"
+
+      # ============================================================
+      # Search exact SHA-1 constants
+      # ============================================================
+
+      - name: Extract certificate-like constants
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OUTPUT="artifacts/firebase/certificate-constants.txt"
+
+          {
+            echo "40-character hexadecimal constants found in"
+            echo "FirebaseInstallationServiceClient.java"
+            echo
+          } > "$OUTPUT"
+
+          grep -RniE \
+            --include='FirebaseInstallationServiceClient.java' \
+            '"[0-9A-Fa-f]{40}"' \
+            work/jadx \
+            >> "$OUTPUT" \
+            || true
+
+          cat "$OUTPUT"
+
+      # ============================================================
+      # Copy original decompiled Firebase tree
+      # ============================================================
+
+      - name: Package Firebase analysis
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts/firebase/full-context
+
+          while IFS= read -r -d '' file; do
+            relative="${file#work/jadx/}"
+
+            destination="artifacts/firebase/full-context/$relative"
+
+            mkdir -p "$(dirname "$destination")"
+            cp "$file" "$destination"
+
+          done < <(
+            find work/jadx \
+              -type f \
+              \( \
+                -path '*/com/google/firebase/installations/remote/*' \
+                -o \
+                -name 'FirebaseInstallationServiceClient.java' \
+              \) \
+              -print0 |
+            sort -z
+          )
+
+      # ============================================================
+      # Upload result
+      # ============================================================
+
+      - name: Upload Firebase analysis
+        uses: actions/upload-artifact@v7
+        with:
+          name: firebase-morphe-analysis
+          path: |
+            artifacts/firebase/
+            artifacts/certs/
+          if-no-files-found: error
+          retention-days: 14

@@ -6,7 +6,7 @@ on:
       target_branch:
         description: "Branch to apply the patches to"
         required: true
-        default: "Test"
+        default: ""
         type: string
 
       patch_url:

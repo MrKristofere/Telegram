@@ -56,17 +56,13 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
-
-      - name: Install Android SDK packages
-        run: |
-          yes | sdkmanager --licenses > /dev/null || true
-
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "cmake;3.22.1" \
-            "ndk;27.2.12479018"
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-36
+            build-tools;36.0.0
+            ndk;27.2.12479018
+          
 
       # ============================================================
       # 5. Gradle

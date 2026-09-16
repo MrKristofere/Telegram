@@ -251,7 +251,7 @@ jobs:
           # --------------------------------------------------------
 
           pattern = (
-              r"com\\.google\\.firebase:"
+              r"com\.google\.firebase:"
               r"firebase-messaging:"
               r"[0-9.]+"
           )

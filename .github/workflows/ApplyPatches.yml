@@ -1905,16 +1905,13 @@ jobs:
             exit 1
           fi
 
-          echo
-          echo "Commit subjects:"
-          git log \
-            --format='%h %s' \
-            "${BASE_SHA}..HEAD"
-
-          if git log \
+          SUBJECTS="$(
+            git log \
               --format='%s' \
-              "${BASE_SHA}..HEAD" \
-              | grep -Fxq ""; then
+              "${BASE_SHA}..HEAD"
+          )"
+
+          if printf '%s\n' "$SUBJECTS" | grep -q '^$'; then
             echo "::error::At least one resulting commit has an empty subject."
             exit 1
           fi

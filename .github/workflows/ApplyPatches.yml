@@ -51,7 +51,6 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      PATCH_WORK: "{{ runner.temp }}/patch-work"
       TARGET_BRANCH: ${{ inputs.target_branch }}
       PATCH_URL: ${{ inputs.patch_url }}
       COMMIT_MESSAGE: ${{ inputs.commit_message }}
@@ -59,6 +58,11 @@ jobs:
       IGNORE_WHITESPACE: ${{ inputs.ignore_whitespace }}
 
     steps:
+      - name: Initialize global environment
+        shell: bash
+        run: |
+          echo "PATCH_WORK=$RUNNER_TEMP/patch-work" >> $GITHUB_ENV
+
       # ------------------------------------------------------------
       # 1. Checkout complete history
       # ------------------------------------------------------------

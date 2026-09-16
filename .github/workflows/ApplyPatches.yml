@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      PATCH_WORK: "$RUNNER_TEMP/patch-work"
+      PATCH_WORK: "{{ runner.temp }}/patch-work"
       TARGET_BRANCH: ${{ inputs.target_branch }}
       PATCH_URL: ${{ inputs.patch_url }}
       COMMIT_MESSAGE: ${{ inputs.commit_message }}

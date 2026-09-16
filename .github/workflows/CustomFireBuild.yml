@@ -203,9 +203,9 @@ jobs:
         working-directory: ${{ env.TELEGRAM_PATH }}
         env:
           FIREBASE_VERSION: ${{ steps.firebase_version.outputs.version }}
-          MAVEN_REPO_PATH: ${{ env.MAVEN_REPO }}
+          FIREBASE_MAVEN_REPO: /home/runner/.m2/repository
         run: |
-          python3 - "$FIREBASE_VERSION" "$MAVEN_REPO_PATH" <<'PY'
+          python3 - "$FIREBASE_VERSION" "$FIREBASE_MAVEN_REPO" <<'PY'
           from pathlib import Path
           import re
           import sys
@@ -217,17 +217,12 @@ jobs:
           text = path.read_text()
 
           # --------------------------------------------------------
-          # Remove any previous mavenLocal()
+          # Replace repositories block.
+          #
+          # DO NOT use mavenLocal().
+          # Use the exact Maven repository where Firebase was published.
           # --------------------------------------------------------
-          text = text.replace(
-              "repositories {\n    mavenLocal()\n",
-              "repositories {\n"
-          )
 
-          # --------------------------------------------------------
-          # Replace the repositories block with an explicit
-          # workspace-local Maven repository.
-          # --------------------------------------------------------
           old_repositories = """repositories {
               mavenCentral()
               google()
@@ -241,43 +236,30 @@ jobs:
               google()
           }}"""
 
-          if old_repositories in text:
-              text = text.replace(
-                  old_repositories,
-                  new_repositories,
-                  1
-              )
-          else:
-              # If mavenLocal() was already present or formatting differs,
-              # replace the first repositories block more defensively.
-              pattern = r"repositories\s*\{.*?\n\}"
+          if old_repositories not in text:
+              print("Expected repositories block was not found.")
+              sys.exit(1)
 
-              replacement = new_repositories
-
-              text, count = re.subn(
-                  pattern,
-                  replacement,
-                  text,
-                  count=1,
-                  flags=re.S
-              )
-
-              if count != 1:
-                  print("ERROR: Could not find repositories block.")
-                  sys.exit(1)
+          text = text.replace(
+              old_repositories,
+              new_repositories,
+              1
+          )
 
           # --------------------------------------------------------
           # Replace Firebase Messaging version.
           # --------------------------------------------------------
+
           pattern = (
-              r"com\.google\.firebase:"
+              r"com\\.google\\.firebase:"
               r"firebase-messaging:"
               r"[0-9.]+"
           )
 
           replacement = (
-              "com.google.firebase:"
-              f"firebase-messaging:{firebase_version}"
+              f"com.google.firebase:"
+              f"firebase-messaging:"
+              f"{firebase_version}"
           )
 
           text, count = re.subn(
@@ -288,25 +270,14 @@ jobs:
           )
 
           if count != 1:
-              print("ERROR: firebase-messaging dependency was not found.")
+              print("firebase-messaging dependency was not found.")
               sys.exit(1)
 
           path.write_text(text)
 
-          print()
-          print("Telegram Gradle configuration:")
-          print()
-          print(f"Using Firebase Messaging: {firebase_version}")
-          print(f"Using Maven repository: {maven_repo}")
-          print()
-
-          for line in text.splitlines():
-              if (
-                  "firebase-" in line
-                  or "maven" in line.lower()
-                  or "google()" in line
-              ):
-                  print(line)
+          print("Configured Telegram:")
+          print(f"  Firebase Messaging: {firebase_version}")
+          print(f"  Firebase Maven repo: {maven_repo}")
           PY
 
       # ============================================================
@@ -325,6 +296,32 @@ jobs:
           echo
           echo "Expected Firebase Maven repository:"
           echo "$MAVEN_REPO"
+
+      - name: Verify Firebase Maven repository
+        working-directory: ${{ env.TELEGRAM_PATH }}
+        env:
+          FIREBASE_VERSION: ${{ steps.firebase_version.outputs.version }}
+          FIREBASE_MAVEN_REPO: /home/runner/.m2/repository
+        run: |
+          echo "=== Firebase Maven repository ==="
+          find "$FIREBASE_MAVEN_REPO/com/google/firebase/firebase-messaging/$FIREBASE_VERSION" \
+            -type f \
+            -print
+
+          echo
+          echo "=== Firebase POM ==="
+          cat "$FIREBASE_MAVEN_REPO/com/google/firebase/firebase-messaging/$FIREBASE_VERSION/firebase-messaging-$FIREBASE_VERSION.pom"
+
+          echo
+          echo "=== Telegram repositories ==="
+          sed -n '/repositories {/,/}/p' TMessagesProj/build.gradle
+
+          echo
+          echo "=== Gradle Maven repository property ==="
+          ./gradlew properties \
+            --no-daemon \
+            | grep -E "maven|gradleUserHome" \
+            || true
 
       # ============================================================
       # 15. Resolve Firebase dependency

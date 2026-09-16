@@ -58,92 +58,205 @@ jobs:
       IGNORE_WHITESPACE: ${{ inputs.ignore_whitespace }}
 
     steps:
+      # ------------------------------------------------------------
+      # 1. Checkout complete history
+      # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ inputs.target_branch }}
 
+      # ------------------------------------------------------------
+      # 2. Configure Git
+      # ------------------------------------------------------------
       - name: Configure Git
         shell: bash
         run: |
           set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git config core.autocrlf false
           git config core.safecrlf false
+
+          echo "Git version:"
           git --version
 
+      # ------------------------------------------------------------
+      # 3. Prepare directories
+      # ------------------------------------------------------------
       - name: Prepare workspace
         shell: bash
         run: |
           set -euo pipefail
+
           rm -rf .patch-work
+
           mkdir -p \
             .patch-work/download \
             .patch-work/extracted \
             .patch-work/messages \
             .patch-work/patches \
             .patch-work/mailbox \
-            .patch-work/metadata \
             .patch-work/manifest \
             .patch-work/logs
 
+      # ------------------------------------------------------------
+      # 4. Download input
+      #
+      # Supports:
+      #   - ordinary HTTP(S) URL
+      #   - GitHub Actions artifact URL:
+      #       /actions/runs/<run>/artifacts/<artifact_id>
+      #
+      # Artifact is downloaded by artifact_id directly.
+      # ------------------------------------------------------------
       - name: Download patch input
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+
           URL="$PATCH_URL"
           OUT=".patch-work/download/input"
 
+          echo "Input URL:"
+          echo "$URL"
+
           if [[ "$URL" =~ /actions/runs/[0-9]+/artifacts/([0-9]+)($|[/?#]) ]]; then
             ARTIFACT_ID="${BASH_REMATCH[1]}"
-            curl --fail --show-error --silent --location --retry 5 --retry-delay 2 \
-              --connect-timeout 20 --max-time 900 \
+
+            echo "Detected GitHub Actions artifact."
+            echo "Artifact ID: $ARTIFACT_ID"
+
+            curl \
+              --fail \
+              --show-error \
+              --silent \
+              --location \
+              --retry 5 \
+              --retry-delay 2 \
+              --connect-timeout 20 \
+              --max-time 900 \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "X-GitHub-Api-Version: 2026-03-10" \
               "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
               -o "${OUT}.zip"
+
             mv "${OUT}.zip" "$OUT"
+
           else
-            curl --fail --show-error --silent --location --retry 5 --retry-delay 2 \
-              --connect-timeout 20 --max-time 900 "$URL" -o "$OUT"
+            echo "Downloading ordinary URL."
+
+            curl \
+              --fail \
+              --show-error \
+              --silent \
+              --location \
+              --retry 5 \
+              --retry-delay 2 \
+              --connect-timeout 20 \
+              --max-time 900 \
+              "$URL" \
+              -o "$OUT"
           fi
 
           test -s "$OUT"
+
+          echo
+          echo "Downloaded file:"
           file "$OUT"
           ls -lh "$OUT"
 
+      # ------------------------------------------------------------
+      # 5. Extract archives
+      #
+      # Supports:
+      #   zip
+      #   tar
+      #   tar.gz / tgz
+      #   tar.bz2
+      #   tar.xz
+      #   gzip-compressed single file
+      #   plain patch/diff/mailbox
+      # ------------------------------------------------------------
       - name: Extract input
         shell: bash
         run: |
           set -euo pipefail
+
           INPUT=".patch-work/download/input"
           OUT=".patch-work/extracted"
+
           rm -rf "$OUT"
           mkdir -p "$OUT"
+
           KIND="$(file -b "$INPUT")"
 
+          echo "Detected type:"
+          echo "$KIND"
+
           case "$KIND" in
-            *"Zip archive"*) unzip -q "$INPUT" -d "$OUT" ;;
-            *"POSIX tar archive"*|*"tar archive"*) tar -xf "$INPUT" -C "$OUT" ;;
+            *"Zip archive"*)
+              unzip -q "$INPUT" -d "$OUT"
+              ;;
+
+            *"POSIX tar archive"*|*"tar archive"*)
+              tar -xf "$INPUT" -C "$OUT"
+              ;;
+
             *"gzip compressed data"*)
-              if tar -tzf "$INPUT" >/dev/null 2>&1; then tar -xzf "$INPUT" -C "$OUT"; else gunzip -c "$INPUT" > "$OUT/input"; fi
+              if tar -tzf "$INPUT" >/dev/null 2>&1; then
+                tar -xzf "$INPUT" -C "$OUT"
+              else
+                gunzip -c "$INPUT" > "$OUT/input"
+              fi
               ;;
+
             *"bzip2 compressed data"*)
-              if tar -tjf "$INPUT" >/dev/null 2>&1; then tar -xjf "$INPUT" -C "$OUT"; else bunzip2 -c "$INPUT" > "$OUT/input"; fi
+              if tar -tjf "$INPUT" >/dev/null 2>&1; then
+                tar -xjf "$INPUT" -C "$OUT"
+              else
+                bunzip2 -c "$INPUT" > "$OUT/input"
+              fi
               ;;
+
             *"XZ compressed data"*)
-              if tar -tJf "$INPUT" >/dev/null 2>&1; then tar -xJf "$INPUT" -C "$OUT"; else xz -dc "$INPUT" > "$OUT/input"; fi
+              if tar -tJf "$INPUT" >/dev/null 2>&1; then
+                tar -xJf "$INPUT" -C "$OUT"
+              else
+                xz -dc "$INPUT" > "$OUT/input"
+              fi
               ;;
-            *) cp "$INPUT" "$OUT/input" ;;
+
+            *)
+              cp "$INPUT" "$OUT/input"
+              ;;
           esac
 
+          echo
+          echo "Extracted files:"
           find "$OUT" -type f -print | sort
 
+      # ------------------------------------------------------------
+      # 6. Parse input and build manifest
+      #
+      # The parser:
+      #
+      #   A) detects Git mailbox / format-patch files
+      #   B) splits mailbox with git mailsplit
+      #   C) extracts metadata with git mailinfo
+      #   D) ignores messages that contain no patch
+      #      (cover letters / discussion messages)
+      #   E) treats raw diff files as patches without source metadata
+      #   F) creates manifest.jsonl
+      #
+      # Nothing is applied during this stage.
+      # ------------------------------------------------------------
       - name: Build patch metadata manifest
         shell: bash
         run: |
@@ -154,20 +267,20 @@ jobs:
           MAILBOX="$ROOT/.patch-work/mailbox"
           PATCH_DIR="$ROOT/.patch-work/patches"
           MSG_DIR="$ROOT/.patch-work/messages"
-          META_DIR="$ROOT/.patch-work/metadata"
           MANIFEST="$ROOT/.patch-work/manifest/manifest.jsonl"
 
-          rm -rf "$MAILBOX" "$PATCH_DIR" "$MSG_DIR" "$META_DIR"
-          mkdir -p "$MAILBOX" "$PATCH_DIR" "$MSG_DIR" "$META_DIR"
+          rm -rf "$MAILBOX" "$PATCH_DIR" "$MSG_DIR"
+          mkdir -p "$MAILBOX" "$PATCH_DIR" "$MSG_DIR"
+
           : > "$MANIFEST"
 
           python3 <<'PY'
-          import hashlib
           import json
           import os
           import re
           import shutil
           import subprocess
+          import hashlib
           from pathlib import Path
 
           root = Path(os.environ["GITHUB_WORKSPACE"])
@@ -175,35 +288,76 @@ jobs:
           mailbox_root = root / ".patch-work" / "mailbox"
           patch_root = root / ".patch-work" / "patches"
           msg_root = root / ".patch-work" / "messages"
-          meta_root = root / ".patch-work" / "metadata"
           manifest_path = root / ".patch-work" / "manifest" / "manifest.jsonl"
 
-          DIFF_MAGIC = re.compile(rb"^diff --git ", re.MULTILINE)
-          MAILBOX_MAGIC = re.compile(rb"^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$", re.MULTILINE)
+          mailbox_root.mkdir(parents=True, exist_ok=True)
+          patch_root.mkdir(parents=True, exist_ok=True)
+          msg_root.mkdir(parents=True, exist_ok=True)
 
-          files = sorted(
-              [p for p in extracted.rglob("*") if p.is_file()],
-              key=lambda p: [int(x) if x.isdigit() else x.lower() for x in re.split(r"([0-9]+)", str(p))],
+          PATCH_MAGIC = re.compile(
+              rb"^From [0-9a-fA-F]{40} Mon Sep 17 00:00:00 2001$",
+              re.MULTILINE,
           )
+
+          DIFF_MAGIC = re.compile(
+              rb"^diff --git ",
+              re.MULTILINE,
+          )
+
+          files = [
+              p for p in extracted.rglob("*")
+              if p.is_file()
+          ]
+
           if not files:
               raise SystemExit("No files found after extraction.")
 
+          def natural_key(path: Path):
+              return [
+                  int(x) if x.isdigit() else x.lower()
+                  for x in re.split(r"([0-9]+)", str(path))
+              ]
+
+          files.sort(key=natural_key)
+
           candidates = []
+
           for path in files:
-              data = path.read_bytes()
+              try:
+                  data = path.read_bytes()
+              except Exception:
+                  continue
+
+              # Skip obviously unrelated binary files.
               if b"\x00" in data[:8192]:
                   continue
-              is_mailbox = bool(MAILBOX_MAGIC.search(data))
-              is_diff = bool(DIFF_MAGIC.search(data))
-              if is_mailbox or is_diff:
-                  candidates.append((path, is_mailbox))
+
+              has_diff = bool(DIFF_MAGIC.search(data))
+              has_mailbox_magic = bool(PATCH_MAGIC.search(data))
+
+              if has_diff or has_mailbox_magic:
+                  candidates.append((path, data, has_mailbox_magic))
 
           if not candidates:
-              raise SystemExit("No patch/diff/format-patch content was found in the input.")
+              raise SystemExit(
+                  "No patch/diff/format-patch content was found in the input."
+              )
 
-          kinds = {"mailbox" if mailbox else "raw" for _, mailbox in candidates}
+          # A mailbox and standalone raw patches in the same input are
+          # deliberately rejected. This avoids an ambiguous patch order.
+          kinds = set()
+
+          for _, _, is_mailbox in candidates:
+              kinds.add("mailbox" if is_mailbox else "raw")
+
           if len(kinds) > 1:
-              raise SystemExit("Mixed mailbox/format-patch and raw diff inputs are not accepted in the same import.")
+              raise SystemExit(
+                  "Mixed mailbox/format-patch and raw diff inputs are not "
+                  "accepted in the same import."
+              )
+
+          manifest = []
+          global_index = 0
 
           def sha256(path):
               h = hashlib.sha256()
@@ -212,397 +366,965 @@ jobs:
                       h.update(block)
               return h.hexdigest()
 
-          def split_message(message_path):
-              data = message_path.read_bytes()
-              if b"\n\n" in data:
-                  header, body = data.split(b"\n\n", 1)
-              else:
-                  header, body = data, b""
-              headers = {}
-              current = None
-              for raw in header.splitlines():
-                  line = raw.decode("utf-8", "replace")
-                  if line[:1] in (" ", "\t") and current:
-                      headers[current] += " " + line.strip()
-                      continue
-                  if ":" in line:
-                      key, value = line.split(":", 1)
-                      current = key.lower()
-                      headers[current] = value.strip()
-              return headers, body
-
           def run_mailinfo(message_file, msg_file, patch_file):
-              proc = subprocess.run(
-                  ["git", "mailinfo", "-b", "--no-scissors", "--quoted-cr=strip", str(msg_file), str(patch_file)],
-                  stdin=message_file.open("rb"),
-                  stdout=subprocess.PIPE,
-                  stderr=subprocess.PIPE,
-                  check=False,
-              )
+              command = [
+                  "git",
+                  "mailinfo",
+                  "-b",
+                  "--no-scissors",
+                  "--quoted-cr=strip",
+                  str(msg_file),
+                  str(patch_file),
+              ]
+
+              with message_file.open("rb") as src:
+                  proc = subprocess.run(
+                      command,
+                      stdin=src,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE,
+                      check=False,
+                  )
+
               if proc.returncode != 0:
-                  raise RuntimeError(proc.stderr.decode("utf-8", "replace"))
-              metadata = {"author_name": "", "author_email": "", "author_date": "", "subject": ""}
-              for line in proc.stdout.decode("utf-8", "replace").splitlines():
-                  if line.startswith("Author:"): metadata["author_name"] = line[7:].strip()
-                  elif line.startswith("Email:"): metadata["author_email"] = line[6:].strip()
-                  elif line.startswith("Date:"): metadata["author_date"] = line[5:].strip()
-                  elif line.startswith("Subject:"): metadata["subject"] = line[8:].strip()
+                  stderr = proc.stderr.decode("utf-8", "replace")
+                  raise RuntimeError(
+                      f"git mailinfo failed for {message_file}: {stderr}"
+                  )
+
+              output = proc.stdout.decode("utf-8", "replace")
+
+              metadata = {
+                  "author_name": "",
+                  "author_email": "",
+                  "author_date": "",
+                  "subject": "",
+              }
+
+              for line in output.splitlines():
+                  if line.startswith("Author:"):
+                      metadata["author_name"] = line[len("Author:"):].strip()
+                  elif line.startswith("Email:"):
+                      metadata["author_email"] = line[len("Email:"):].strip()
+                  elif line.startswith("Date:"):
+                      metadata["author_date"] = line[len("Date:"):].strip()
+                  elif line.startswith("Subject:"):
+                      metadata["subject"] = line[len("Subject:"):].strip()
+
               return metadata
 
-          def derive_subject(patch_file):
-              for line in patch_file.read_text(encoding="utf-8", errors="replace").splitlines():
-                  if line.startswith("diff --git "):
-                      parts = line.split()
-                      if len(parts) >= 4:
-                          return f"Apply patch: {parts[2][2:]}"
-                      break
-              return "Apply patch"
-
-          entries = []
-          index = 0
-
           if kinds == {"mailbox"}:
-              for source_path, _ in candidates:
+              for source_path, source_data, _ in candidates:
                   rel = source_path.relative_to(extracted)
-                  split_dir = mailbox_root / f"source-{index:04d}"
-                  split_dir.mkdir(parents=True, exist_ok=True)
-                  proc = subprocess.run(
-                      ["git", "mailsplit", "-b", "--keep-cr", "-o", str(split_dir), "--", str(source_path)],
-                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
-                  )
-                  if proc.returncode != 0:
-                      raise SystemExit(f"git mailsplit failed for {rel}:\n{proc.stderr}")
 
-                  for message_path in sorted(split_dir.iterdir()):
+                  split_dir = mailbox_root / f"source-{len(manifest):04d}"
+                  split_dir.mkdir(parents=True, exist_ok=True)
+
+                  proc = subprocess.run(
+                      [
+                          "git",
+                          "mailsplit",
+                          "-b",
+                          "--keep-cr",
+                          "-o",
+                          str(split_dir),
+                          "--",
+                          str(source_path),
+                      ],
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE,
+                      text=True,
+                      check=False,
+                  )
+
+                  if proc.returncode != 0:
+                      raise SystemExit(
+                          f"git mailsplit failed for {rel}:\n"
+                          f"{proc.stderr}"
+                      )
+
+                  messages = sorted(split_dir.iterdir())
+
+                  for message_path in messages:
                       if not message_path.is_file():
                           continue
-                      local = index + 1
-                      patch_file = patch_root / f"{local:04d}.patch"
-                      msg_file = msg_root / f"{local:04d}.txt"
-                      meta_file = meta_root / f"{local:04d}.json"
-                      metadata = run_mailinfo(message_path, msg_file, patch_file)
-                      if not patch_file.exists() or patch_file.stat().st_size == 0:
+
+                      local_id = global_index + 1
+
+                      msg_file = msg_root / f"{local_id:04d}.txt"
+                      patch_file = patch_root / f"{local_id:04d}.patch"
+
+                      metadata = run_mailinfo(
+                          message_path,
+                          msg_file,
+                          patch_file,
+                      )
+
+                      if patch_file.stat().st_size == 0:
+                          # Cover letter / non-patch mail.
+                          print(
+                              f"Skipping non-patch mail: "
+                              f"{source_path.name}:{message_path.name}"
+                          )
                           continue
 
-                      headers, raw_body = split_message(message_path)
-                      metadata["author_name"] = metadata["author_name"] or headers.get("from", "").rsplit("<", 1)[0].strip()
-                      if not metadata["author_email"] and "<" in headers.get("from", "") and " >" not in headers.get("from", ""):
-                          metadata["author_email"] = headers["from"].rsplit("<", 1)[-1].rstrip("> ").strip()
-                      metadata["author_date"] = metadata["author_date"] or headers.get("date", "")
-                      metadata["subject"] = metadata["subject"] or headers.get("subject", "")
+                      patch_sha = sha256(patch_file)
 
-                      body = msg_file.read_text(encoding="utf-8", errors="replace").strip()
+                      message_body = msg_file.read_text(
+                          encoding="utf-8",
+                          errors="replace",
+                      )
+
+                      # mailinfo normally puts the subject separately.
+                      # Reconstruct a normal Git commit message:
+                      # subject + blank line + body.
                       subject = metadata["subject"].strip()
-                      if subject and body:
-                          message = f"{subject}\n\n{body}"
-                      elif subject:
-                          message = subject
-                      else:
-                          message = body
+                      body = message_body.strip()
 
-                      meta_file.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                      if subject and body:
+                          full_message = f"{subject}\n\n{body}"
+                      elif subject:
+                          full_message = subject
+                      else:
+                          full_message = body
+
                       entry = {
-                          "index": local,
+                          "index": global_index + 1,
                           "source_file": str(rel),
                           "source_type": "mailbox",
                           "message_file": str(msg_file.relative_to(root)),
-                          "metadata_file": str(meta_file.relative_to(root)),
                           "patch_file": str(patch_file.relative_to(root)),
-                          "patch_sha256": sha256(patch_file),
+                          "patch_sha256": patch_sha,
                           "subject": subject,
-                          "body": body,
-                          "message": message,
+                          "message": full_message,
                           "author_name": metadata["author_name"].strip(),
                           "author_email": metadata["author_email"].strip(),
                           "author_date": metadata["author_date"].strip(),
                           "metadata_source": "git-mailinfo",
-                          "subject_source": "mailbox" if subject else "missing",
                       }
-                      entries.append(entry)
-                      index += 1
+
+                      manifest.append(entry)
+                      global_index += 1
+
           else:
-              for source_path, _ in candidates:
-                  local = index + 1
-                  patch_file = patch_root / f"{local:04d}.patch"
-                  meta_file = meta_root / f"{local:04d}.json"
+              # Raw diff mode.
+              for source_path, source_data, _ in candidates:
+                  rel = source_path.relative_to(extracted)
+
+                  local_id = global_index + 1
+
+                  patch_file = patch_root / f"{local_id:04d}.patch"
                   shutil.copyfile(source_path, patch_file)
+
                   if patch_file.stat().st_size == 0:
-                      raise SystemExit(f"Empty patch file: {source_path.relative_to(extracted)}")
-                  metadata = {"author_name": "", "author_email": "", "author_date": "", "subject": ""}
-                  meta_file.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                  entries.append({
-                      "index": local,
-                      "source_file": str(source_path.relative_to(extracted)),
+                      raise SystemExit(
+                          f"Empty patch file: {rel}"
+                      )
+
+                  patch_sha = sha256(patch_file)
+
+                  entry = {
+                      "index": local_id,
+                      "source_file": str(rel),
                       "source_type": "raw-diff",
                       "message_file": "",
-                      "metadata_file": str(meta_file.relative_to(root)),
                       "patch_file": str(patch_file.relative_to(root)),
-                      "patch_sha256": sha256(patch_file),
+                      "patch_sha256": patch_sha,
                       "subject": "",
-                      "body": "",
                       "message": "",
                       "author_name": "",
                       "author_email": "",
                       "author_date": "",
                       "metadata_source": "none",
-                      "subject_source": "missing",
-                  })
-                  index += 1
+                  }
+
+                  manifest.append(entry)
+                  global_index += 1
+
+          if not manifest:
+              raise SystemExit(
+                  "No actual patches were found. "
+                  "Input contained no patch-bearing messages."
+              )
 
           with manifest_path.open("w", encoding="utf-8") as f:
-              for entry in entries:
-                  f.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+              for entry in manifest:
+                  f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-          if not entries:
-              raise SystemExit("No patches were extracted from the input.")
+          print()
+          print("Manifest:")
+          for entry in manifest:
+              print(
+                  f"{entry['index']:04d} | "
+                  f"{entry['source_type']:10s} | "
+                  f"{entry['subject'] or '(no subject)'} | "
+                  f"{entry['author_name'] or '(no author)'} "
+                  f"<{entry['author_email'] or 'no-email'}>"
+              )
 
-          print(f"Manifest entries: {len(entries)}")
-          print(manifest_path.read_text(encoding="utf-8"))
+          print()
+          print(f"Patch count: {len(manifest)}")
           PY
 
+          test -s "$MANIFEST"
+
+          echo
+          echo "Manifest file:"
+          cat "$MANIFEST"
+
+      # ------------------------------------------------------------
+      # 7. Validate manifest BEFORE touching target history
+      # ------------------------------------------------------------
       - name: Validate manifest
         shell: bash
         run: |
           set -euo pipefail
-          python3 <<'PY'
-          import json
-          from pathlib import Path
-          p = Path(".patch-work/manifest/manifest.jsonl")
-          lines = [x for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
-          if not lines:
-              raise SystemExit("Manifest is empty.")
-          for expected, line in enumerate(lines, 1):
-              item = json.loads(line)
-              if item.get("index") != expected:
-                  raise SystemExit(f"Manifest index mismatch at entry {expected}.")
-              for key in ("patch_file", "patch_sha256", "source_file", "source_type"):
-                  if not item.get(key):
-                      raise SystemExit(f"Manifest entry {expected} is missing {key}.")
-          print(f"Validated {len(lines)} manifest entries.")
-          PY
 
-      - name: Record target SHA
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch origin "$TARGET_BRANCH"
-          BASE_SHA="$(git rev-parse "origin/$TARGET_BRANCH")"
-          echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
-          echo "Base SHA: $BASE_SHA"
-
-      - name: Create isolated patch branch
-        shell: bash
-        run: |
-          set -euo pipefail
-          BRANCH="patch-import/${GITHUB_RUN_ID}"
-          git switch -C "$BRANCH" "$BASE_SHA"
-          echo "PATCH_BRANCH=$BRANCH" >> "$GITHUB_ENV"
-
-      - name: Apply patches from manifest
-        shell: bash
-        env:
-          PATCH_MANIFEST: .patch-work/manifest/manifest.jsonl
-        run: |
-          set -euo pipefail
           python3 <<'PY'
           import hashlib
           import json
           import os
-          import subprocess
-          import tempfile
           from pathlib import Path
 
           root = Path(os.environ["GITHUB_WORKSPACE"])
-          manifest = root / os.environ["PATCH_MANIFEST"]
-          ignore_whitespace = os.environ.get("IGNORE_WHITESPACE", "false").lower() == "true"
-          override = os.environ.get("COMMIT_MESSAGE", "").strip()
-          entries = [json.loads(x) for x in manifest.read_text(encoding="utf-8").splitlines() if x.strip()]
+          manifest_path = root / ".patch-work" / "manifest" / "manifest.jsonl"
 
-          def run(cmd, check=True, **kwargs):
-              proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, **kwargs)
-              if check and proc.returncode != 0:
-                  raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{proc.stdout}\n{proc.stderr}")
-              return proc
+          entries = []
 
-          def output(cmd):
-              return run(cmd).stdout
+          with manifest_path.open(encoding="utf-8") as f:
+              for line in f:
+                  line = line.strip()
+                  if line:
+                      entries.append(json.loads(line))
 
-          def patch_sha(path):
+          if not entries:
+              raise SystemExit("Manifest is empty.")
+
+          indexes = [x["index"] for x in entries]
+
+          if indexes != list(range(1, len(entries) + 1)):
+              raise SystemExit(
+                  f"Manifest indexes are not continuous: {indexes}"
+              )
+
+          for entry in entries:
+              patch = root / entry["patch_file"]
+
+              if not patch.is_file():
+                  raise SystemExit(
+                      f"Patch file does not exist: {patch}"
+                  )
+
               h = hashlib.sha256()
+
+              with patch.open("rb") as f:
+                  for block in iter(lambda: f.read(1024 * 1024), b""):
+                      h.update(block)
+
+              actual_sha = h.hexdigest()
+
+              if actual_sha != entry["patch_sha256"]:
+                  raise SystemExit(
+                      f"Patch SHA mismatch for {patch}: "
+                      f"manifest={entry['patch_sha256']} "
+                      f"actual={actual_sha}"
+                  )
+
+              if not patch.stat().st_size:
+                  raise SystemExit(
+                      f"Patch is empty: {patch}"
+                  )
+
+          print(f"Validated {len(entries)} patch entries.")
+          PY
+
+      # ------------------------------------------------------------
+      # 8. Save the original target SHA
+      #
+      # This is used to prevent pushing over somebody else's changes.
+      # ------------------------------------------------------------
+      - name: Record target branch state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin "$TARGET_BRANCH"
+
+          BASE_SHA="$(git rev-parse "origin/$TARGET_BRANCH")"
+
+          echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
+
+          echo "Target branch: $TARGET_BRANCH"
+          echo "Base SHA:      $BASE_SHA"
+
+      # ------------------------------------------------------------
+      # 9. Create isolated patch branch
+      # ------------------------------------------------------------
+      - name: Create isolated patch branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PATCH_BRANCH="patch-import/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          echo "PATCH_BRANCH=$PATCH_BRANCH" >> "$GITHUB_ENV"
+
+          git checkout -B "$PATCH_BRANCH" "$BASE_SHA"
+
+          echo "Created:"
+          git branch --show-current
+
+      # ------------------------------------------------------------
+      # 10. Apply every patch and create a commit
+      #
+      # Important:
+      #
+      #   - patch metadata is read from the manifest
+      #   - patch SHA is checked again immediately before apply
+      #   - patch is applied to index + working tree
+      #   - fallback commit message is generated if necessary
+      #   - no empty commit messages are allowed
+      #   - author/date are restored when supplied by format-patch
+      #
+      # For multiple patches, COMMIT_MESSAGE is intentionally NOT used
+      # for individual commits.
+      # ------------------------------------------------------------
+      - name: Apply patches from manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          root = Path(os.environ["GITHUB_WORKSPACE"])
+          manifest_path = root / ".patch-work" / "manifest" / "manifest.jsonl"
+
+          target_commit_message = os.environ.get("COMMIT_MESSAGE", "").strip()
+          ignore_whitespace = os.environ.get(
+              "IGNORE_WHITESPACE", "true"
+          ).lower() == "true"
+
+          entries = []
+
+          with manifest_path.open(encoding="utf-8") as f:
+              for line in f:
+                  line = line.strip()
+                  if line:
+                      entries.append(json.loads(line))
+
+          if not entries:
+              raise SystemExit("Manifest is empty.")
+
+          single_patch = len(entries) == 1
+
+          def run(command, **kwargs):
+              print("+", " ".join(str(x) for x in command))
+              return subprocess.run(
+                  command,
+                  check=True,
+                  cwd=root,
+                  **kwargs,
+              )
+
+          def output(command):
+              return subprocess.check_output(
+                  command,
+                  cwd=root,
+                  text=True,
+                  stderr=subprocess.STDOUT,
+              )
+
+          def write_message(path, text):
+              text = text.strip()
+
+              if not text:
+                  raise RuntimeError(
+                      f"Refusing to create an empty commit message: {path}"
+                  )
+
+              path.write_text(
+                  text.rstrip() + "\n",
+                  encoding="utf-8",
+              )
+
+          def hash_file(path):
+              h = hashlib.sha256()
+
               with path.open("rb") as f:
                   for block in iter(lambda: f.read(1024 * 1024), b""):
                       h.update(block)
+
               return h.hexdigest()
 
-          def generated_subject():
-              text = output(["git", "diff", "--cached", "--name-only"])
-              names = [x for x in text.splitlines() if x]
-              if not names:
-                  raise RuntimeError("Unable to generate a commit subject: staged diff has no files.")
-              if len(names) == 1:
-                  return f"Apply patch: {names[0]}"
-              return f"Apply patch: {len(names)} files"
+          def generated_message():
+              """
+              Deterministic fallback based on the staged diff.
 
-          for index, entry in enumerate(entries, 1):
-              patch_file = root / entry["patch_file"]
-              actual_sha = patch_sha(patch_file)
+              This intentionally does not claim to reproduce an undocumented
+              GitHub UI algorithm. It uses the actual staged diff, so the
+              resulting message can never be empty merely because metadata
+              was unavailable.
+              """
+
+              name_status = output([
+                  "git",
+                  "diff",
+                  "--cached",
+                  "--name-status",
+                  "--find-renames",
+                  "--find-copies",
+              ]).strip()
+
+              if not name_status:
+                  raise RuntimeError(
+                      "The patch produced no staged changes, and there is "
+                      "no metadata from which to construct a commit message."
+                  )
+
+              rows = [
+                  line
+                  for line in name_status.splitlines()
+                  if line.strip()
+              ]
+
+              if len(rows) == 1:
+                  fields = rows[0].split("\t")
+
+                  status = fields[0]
+                  paths = fields[1:]
+
+                  if status.startswith("A") and paths:
+                      return f"Add {paths[-1]}"
+
+                  if status.startswith("D") and paths:
+                      return f"Delete {paths[-1]}"
+
+                  if status.startswith("R") and len(paths) >= 2:
+                      return f"Rename {paths[0]} to {paths[1]}"
+
+                  if status.startswith("C") and len(paths) >= 2:
+                      return f"Copy {paths[0]} to {paths[1]}"
+
+                  if paths:
+                      return f"Update {paths[-1]}"
+
+              count = len(rows)
+
+              if count == 1:
+                  return "Update files"
+
+              return f"Update {count} files"
+
+          for entry in entries:
+              index = entry["index"]
+
+              patch_path = root / entry["patch_file"]
+
+              if not patch_path.is_file():
+                  raise RuntimeError(
+                      f"[{index}] Missing patch: {patch_path}"
+                  )
+
+              actual_sha = hash_file(patch_path)
+
               if actual_sha != entry["patch_sha256"]:
-                  raise RuntimeError(f"[{index}] Patch SHA256 mismatch: expected {entry['patch_sha256']}, got {actual_sha}")
+                  raise RuntimeError(
+                      f"[{index}] Patch changed after manifest creation."
+                  )
 
-              run(["git", "reset", "--hard", "HEAD"])
-              run(["git", "clean", "-fd"])
+              print()
+              print("=" * 72)
+              print(f"Applying patch #{index}")
+              print(f"Source:  {entry['source_file']}")
+              print(f"SHA256:  {entry['patch_sha256']}")
+              print(f"Subject: {entry['subject'] or '(missing)'}")
+              print(
+                  f"Author:  "
+                  f"{entry['author_name'] or '(missing)'} "
+                  f"<{entry['author_email'] or 'missing'}>"
+              )
+              print(f"Date:    {entry['author_date'] or '(missing)'}")
+              print("=" * 72)
 
-              cmd = ["git", "apply", "--index"]
+              apply_args = [
+                  "git",
+                  "apply",
+                  "--index",
+              ]
+
               if ignore_whitespace:
-                  cmd.append("--ignore-whitespace")
-              cmd.append(str(patch_file))
-              run(cmd)
+                  apply_args.append("--ignore-whitespace")
 
-              staged = output(["git", "diff", "--cached", "--name-status"]).strip()
-              if not staged:
-                  raise RuntimeError(f"[{index}] Patch produced an empty staged diff.")
+              apply_args.append(str(patch_path))
 
-              subject = entry.get("subject", "").strip()
-              if not subject:
-                  subject = generated_subject()
+              run(apply_args)
 
-              body = entry.get("body", "")
-              if body is None:
-                  body = ""
-              body = str(body).strip()
+              # Make sure something was actually staged.
+              staged_check = subprocess.run(
+                  ["git", "diff", "--cached", "--quiet"],
+                  cwd=root,
+              )
 
-              if override and len(entries) == 1:
-                  subject = override
+              if staged_check.returncode == 0:
+                  raise RuntimeError(
+                      f"[{index}] Patch applied but produced no staged changes."
+                  )
 
-              message = subject
-              if body:
-                  message += "\n\n" + body
+              original_message = entry.get("message", "").strip()
 
-              with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
-                  f.write(message)
-                  message_file = f.name
+              if single_patch and target_commit_message:
+                  message = target_commit_message
+                  message_source = "workflow input commit_message"
 
-              try:
-                  commit_cmd = ["git", "commit", "--no-verify", "-F", message_file]
-                  author_name = entry.get("author_name", "").strip()
-                  author_email = entry.get("author_email", "").strip()
-                  author_date = entry.get("author_date", "").strip()
+              elif original_message:
+                  message = original_message
+                  message_source = "patch metadata"
 
-                  env = os.environ.copy()
-                  if author_name and author_email:
-                      env["GIT_AUTHOR_NAME"] = author_name
-                      env["GIT_AUTHOR_EMAIL"] = author_email
-                  if author_date:
-                      env["GIT_AUTHOR_DATE"] = author_date
+              else:
+                  message = generated_message()
+                  message_source = "generated from staged diff"
 
-                  run(commit_cmd, env=env)
-              finally:
-                  Path(message_file).unlink(missing_ok=True)
+              message = message.strip()
 
-              actual_subject = output(["git", "log", "-1", "--format=%s"]).strip()
-              actual_body = output(["git", "log", "-1", "--format=%b"]).strip()
-              actual_author = output(["git", "log", "-1", "--format=%an <%ae>"]).strip()
+              if not message:
+                  raise RuntimeError(
+                      f"[{index}] Final commit message is empty."
+                  )
 
-              if actual_subject != subject:
-                  raise RuntimeError(f"[{index}] Commit subject mismatch: expected {subject!r}, got {actual_subject!r}")
-              if actual_body != body:
-                  raise RuntimeError(f"[{index}] Commit body mismatch.")
-              if author_name and author_email and actual_author != f"{author_name} <{author_email}>":
-                  raise RuntimeError(f"[{index}] Commit author mismatch: {actual_author!r}")
+              message_file = (
+                  root
+                  / ".patch-work"
+                  / "manifest"
+                  / f"commit-{index:04d}.txt"
+              )
 
-              status = output(["git", "status", "--porcelain", "--untracked-files=no"]).strip()
+              write_message(message_file, message)
+
+              commit_args = [
+                  "git",
+                  "commit",
+                  "--no-verify",
+                  "-F",
+                  str(message_file),
+              ]
+
+              author_name = entry.get("author_name", "").strip()
+              author_email = entry.get("author_email", "").strip()
+              author_date = entry.get("author_date", "").strip()
+
+              if author_name and author_email:
+                  commit_args.extend([
+                      "--author",
+                      f"{author_name} <{author_email}>",
+                  ])
+
+              if author_date:
+                  commit_args.extend([
+                      "--date",
+                      author_date,
+                  ])
+
+              print(f"Commit message source: {message_source}")
+
+              run(commit_args)
+
+              commit_sha = output([
+                  "git",
+                  "rev-parse",
+                  "HEAD",
+              ]).strip()
+
+              print(f"Created commit: {commit_sha}")
+
+              # Verify commit message is non-empty.
+              actual_subject = output([
+                  "git",
+                  "show",
+                  "-s",
+                  "--format=%s",
+                  "HEAD",
+              ]).strip()
+
+              if not actual_subject:
+                  raise RuntimeError(
+                      f"[{index}] Git created a commit with an empty subject."
+                  )
+
+              # Verify author when metadata was available.
+              if author_email:
+                  actual_author_email = output([
+                      "git",
+                      "show",
+                      "-s",
+                      "--format=%ae",
+                      "HEAD",
+                  ]).strip()
+
+                  if actual_author_email.lower() != author_email.lower():
+                      raise RuntimeError(
+                          f"[{index}] Author email mismatch: "
+                          f"expected={author_email} "
+                          f"actual={actual_author_email}"
+                      )
+
+              # Verify the worktree/index is clean after the commit.
+              status = output([
+                  "git",
+                  "status",
+                  "--porcelain",
+                  "--untracked-files=no",
+              ]).strip()
+
               if status:
-                  raise RuntimeError(f"[{index}] Tracked repository files are dirty after commit:\n{status}")
+                  raise RuntimeError(
+                      f"[{index}] Tracked repository files are dirty after commit:\n"
+                      f"{tracked_status}"
+                  )
 
-          print(f"Applied and committed {len(entries)} patch(es).")
+          print()
+          print("All patches were applied successfully.")
           PY
 
+      # ------------------------------------------------------------
+      # 11. Verify imported commit count and metadata
+      # ------------------------------------------------------------
       - name: Verify imported commits
         shell: bash
         run: |
           set -euo pipefail
-          COUNT="$(git rev-list --count "${BASE_SHA}..HEAD")"
-          EXPECTED="$(wc -l < .patch-work/manifest/manifest.jsonl)"
-          if [[ "$COUNT" -ne "$EXPECTED" ]]; then
-            echo "::error::Expected $EXPECTED imported commits, found $COUNT."
+
+          PATCH_COUNT="$(wc -l < .patch-work/manifest/manifest.jsonl | tr -d ' ')"
+
+          ACTUAL_COUNT="$(
+            git rev-list \
+              --count \
+              "${BASE_SHA}..HEAD"
+          )"
+
+          echo "Manifest patches: $PATCH_COUNT"
+          echo "Created commits:  $ACTUAL_COUNT"
+
+          if [[ "$ACTUAL_COUNT" != "$PATCH_COUNT" ]]; then
+            echo "::error::Expected $PATCH_COUNT imported commits, got $ACTUAL_COUNT."
             exit 1
           fi
-          git log --format='%H %s' "${BASE_SHA}..HEAD"
 
+          echo
+          echo "Imported history:"
+          git log \
+            --format='%h | %an <%ae> | %ad | %s' \
+            --date=iso-strict \
+            "${BASE_SHA}..HEAD"
+
+      # ------------------------------------------------------------
+      # 12. Apply selected final strategy
+      # ------------------------------------------------------------
       - name: Apply final history strategy
         shell: bash
         run: |
           set -euo pipefail
+
+          PATCH_BRANCH="$(git branch --show-current)"
+
+          echo "Patch branch: $PATCH_BRANCH"
+          echo "Strategy:     $STRATEGY"
+
           case "$STRATEGY" in
-            commit|cherry-pick)
+
+            commit)
+              echo "Keeping individual patch commits."
               ;;
+
             squash)
-              git reset --soft "$BASE_SHA"
-              MESSAGE="$COMMIT_MESSAGE"
-              if [[ -z "$MESSAGE" ]]; then
-                MESSAGE="$(git log -1 --format='%B' HEAD)"
+              echo "Creating one squashed commit."
+
+              git checkout -B "$TARGET_BRANCH" "$BASE_SHA"
+
+              git merge --squash "$PATCH_BRANCH"
+
+              if git diff --cached --quiet; then
+                echo "::error::Squash produced no changes."
+                exit 1
               fi
-              git commit --no-verify -F <(printf '%s\n' "$MESSAGE")
+
+              if [[ -n "${COMMIT_MESSAGE//[[:space:]]/}" ]]; then
+                FINAL_MESSAGE="$COMMIT_MESSAGE"
+              else
+                FINAL_MESSAGE="$(
+                  python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["GITHUB_WORKSPACE"])
+          manifest = root / ".patch-work" / "manifest" / "manifest.jsonl"
+
+          entries = []
+
+          with manifest.open(encoding="utf-8") as f:
+              for line in f:
+                  if line.strip():
+                      entries.append(json.loads(line))
+
+          subjects = [
+              x.get("subject", "").strip()
+              for x in entries
+              if x.get("subject", "").strip()
+          ]
+
+          if subjects:
+              first = subjects[0]
+
+              if len(subjects) == 1:
+                  print(first)
+              else:
+                  print(first)
+                  print()
+                  print("Applied patch series:")
+                  for subject in subjects:
+                      print(f"- {subject}")
+          else:
+              print("Update files")
+          PY
+                  )"
+              fi
+
+              if [[ -z "${FINAL_MESSAGE//[[:space:]]/}" ]]; then
+                echo "::error::Generated squash commit message is empty."
+                exit 1
+              fi
+
+              printf '%s\n' "$FINAL_MESSAGE" \
+                > .patch-work/manifest/final-message.txt
+
+              git commit \
+                --no-verify \
+                -F .patch-work/manifest/final-message.txt
               ;;
+
             merge)
-              git switch -C "merge-result/${GITHUB_RUN_ID}" "$BASE_SHA"
-              git merge --no-ff --no-edit "$PATCH_BRANCH"
+              echo "Creating merge commit."
+
+              git checkout -B "$TARGET_BRANCH" "$BASE_SHA"
+
+              if [[ -n "${COMMIT_MESSAGE//[[:space:]]/}" ]]; then
+                FINAL_MESSAGE="$COMMIT_MESSAGE"
+              else
+                FINAL_MESSAGE="$(
+                  python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["GITHUB_WORKSPACE"])
+          manifest = root / ".patch-work" / "manifest" / "manifest.jsonl"
+
+          subjects = []
+
+          with manifest.open(encoding="utf-8") as f:
+              for line in f:
+                  if line.strip():
+                      obj = json.loads(line)
+                      subject = obj.get("subject", "").strip()
+                      if subject:
+                          subjects.append(subject)
+
+          if subjects:
+              print(f"Merge patch series: {subjects[0]}")
+          else:
+              print("Merge applied patch series")
+          PY
+                  )"
+              fi
+
+              if [[ -z "${FINAL_MESSAGE//[[:space:]]/}" ]]; then
+                echo "::error::Generated merge commit message is empty."
+                exit 1
+              fi
+
+              printf '%s\n' "$FINAL_MESSAGE" \
+                > .patch-work/manifest/final-message.txt
+
+              git merge \
+                --no-ff \
+                --no-edit \
+                "$PATCH_BRANCH"
+
+              # Replace Git's automatically generated merge message only
+              # when the user explicitly requested one or when our generated
+              # deterministic message differs.
+              git commit \
+                --amend \
+                --no-edit \
+                -F .patch-work/manifest/final-message.txt
               ;;
+
+            cherry-pick)
+              echo "Replaying patch commits with cherry-pick."
+
+              mapfile -t COMMITS < <(
+                git rev-list \
+                  --reverse \
+                  "${BASE_SHA}..${PATCH_BRANCH}"
+              )
+
+              if [[ "${#COMMITS[@]}" -eq 0 ]]; then
+                echo "::error::No commits available for cherry-pick."
+                exit 1
+              fi
+
+              git checkout -B "$TARGET_BRANCH" "$BASE_SHA"
+
+              for commit in "${COMMITS[@]}"; do
+                echo "Cherry-picking $commit"
+
+                git cherry-pick \
+                  --no-commit \
+                  "$commit"
+
+                if git diff --cached --quiet; then
+                  echo "::error::Cherry-pick $commit produced no changes."
+                  exit 1
+                fi
+
+                git commit \
+                  --no-verify \
+                  -C "$commit"
+              done
+
+              # If there is exactly one patch and an explicit commit_message
+              # was supplied, it is allowed to override that one commit.
+              if [[ "${#COMMITS[@]}" -eq 1 && -n "${COMMIT_MESSAGE//[[:space:]]/}" ]]; then
+                printf '%s\n' "$COMMIT_MESSAGE" \
+                  > .patch-work/manifest/final-message.txt
+
+                git commit \
+                  --amend \
+                  --no-verify \
+                  -F .patch-work/manifest/final-message.txt
+              fi
+              ;;
+
             *)
               echo "::error::Unknown strategy: $STRATEGY"
               exit 1
               ;;
           esac
 
+      # ------------------------------------------------------------
+      # 13. Final validation
+      # ------------------------------------------------------------
       - name: Final validation
         shell: bash
         run: |
           set -euo pipefail
 
-          git diff --check "${BASE_SHA}..HEAD"
+          echo "Current branch:"
+          git branch --show-current
 
-          SUBJECTS="$(
-            git log \
+          echo
+          echo "HEAD:"
+          git rev-parse HEAD
+
+          echo
+          echo "History:"
+          git log \
+            --graph \
+            --decorate \
+            --oneline \
+            -n 30
+
+          echo
+          echo "Working tree:"
+          git status --short
+
+          if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+            echo "::error::Working tree is dirty."
+            exit 1
+          fi
+
+          echo
+          echo "Commit subjects:"
+          git log \
+            --format='%h %s' \
+            "${BASE_SHA}..HEAD"
+
+          if git log \
               --format='%s' \
-              "${BASE_SHA}..HEAD"
-          )"
-
-          if printf '%s\n' "$SUBJECTS" | grep -q '^$'; then
+              "${BASE_SHA}..HEAD" \
+              | grep -Fxq ""; then
             echo "::error::At least one resulting commit has an empty subject."
             exit 1
           fi
 
-          if [[ -n "$(git status --porcelain)" ]]; then
-            echo "::error::Working tree is not clean after final history operation."
-            git status --short
-            exit 1
-          fi
-
-      - name: Verify remote target unchanged
+      # ------------------------------------------------------------
+      # 14. Verify target branch did not move
+      #
+      # Normal push is intentionally used.
+      #
+      # Because the resulting branch was created from BASE_SHA,
+      # a normal push will be rejected if someone changed the target
+      # branch while this workflow was running.
+      # ------------------------------------------------------------
+      - name: Verify remote target is unchanged
         shell: bash
         run: |
           set -euo pipefail
+
           git fetch origin "$TARGET_BRANCH"
-          REMOTE_SHA="$(git rev-parse "origin/$TARGET_BRANCH")"
-          if [[ "$REMOTE_SHA" != "$BASE_SHA" ]]; then
-            echo "::error::Target branch changed during the workflow."
-            echo "Expected: $BASE_SHA"
-            echo "Actual:   $REMOTE_SHA"
+
+          CURRENT_REMOTE_SHA="$(git rev-parse "origin/$TARGET_BRANCH")"
+
+          echo "Expected remote SHA: $BASE_SHA"
+          echo "Current remote SHA:  $CURRENT_REMOTE_SHA"
+
+          if [[ "$CURRENT_REMOTE_SHA" != "$BASE_SHA" ]]; then
+            echo "::error::Target branch changed while the workflow was running."
+            echo "::error::Nothing will be pushed."
             exit 1
           fi
 
-      - name: Push result
+      # ------------------------------------------------------------
+      # 15. Push only after ALL validation succeeded
+      # ------------------------------------------------------------
+      - name: Push final history
         shell: bash
         run: |
           set -euo pipefail
-          git push --force-with-lease origin HEAD:"$TARGET_BRANCH"
 
+          echo "Pushing:"
+          echo "  HEAD -> $TARGET_BRANCH"
+
+          git push \
+            origin \
+            "HEAD:refs/heads/${TARGET_BRANCH}"
+
+      # ------------------------------------------------------------
+      # 16. Print resulting history after push
+      # ------------------------------------------------------------
       - name: Show final result
         shell: bash
         run: |
           set -euo pipefail
-          echo "Target branch: $TARGET_BRANCH"
-          echo "Strategy: $STRATEGY"
-          echo "Final SHA: $(git rev-parse HEAD)"
+
+          git fetch origin "$TARGET_BRANCH"
+
           echo
-          git log -10 --oneline --decorate
+          echo "Final remote HEAD:"
+          git rev-parse "origin/$TARGET_BRANCH"
+
+          echo
+          echo "Final imported history:"
+          git log \
+            --graph \
+            --decorate \
+            --format='%h | %an <%ae> | %ad | %s' \
+            --date=iso-strict \
+            -n 30 \
+            "origin/$TARGET_BRANCH"

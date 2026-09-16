@@ -429,9 +429,9 @@ jobs:
                   Date: ...
                   Subject: ...
 
-              The body starts after the metadata header block.
-
-              Continuation lines for Subject are supported.
+              For standalone/raw patches without an explicit Subject:
+              the first paragraph after the metadata headers is the
+              subject and the following paragraphs form the body.
               """
 
               metadata_part, diff_part = split_patch_content(data)
@@ -442,23 +442,24 @@ jobs:
               author_email = ""
               author_date = ""
               subject = ""
-
-              body_start = None
-              current_header = None
+              body = ""
 
               header_re = re.compile(
                   r"^(Author|From|Date|Subject):\s*(.*)$",
                   re.IGNORECASE,
               )
 
-              for i, line in enumerate(lines):
+              i = 0
+              explicit_subject = False
+
+              # Parse metadata headers.
+              while i < len(lines):
+                  line = lines[i]
                   match = header_re.match(line)
 
                   if match:
                       key = match.group(1).lower()
                       value = match.group(2).strip()
-
-                      current_header = key
 
                       if key == "author":
                           author_name, author_email = parse_author(value)
@@ -472,44 +473,60 @@ jobs:
 
                       elif key == "subject":
                           subject = value
+                          explicit_subject = True
 
+                      i += 1
                       continue
 
-                  # RFC/mail-style continuation lines.
+                  # RFC/mail-style continuation lines for Subject.
                   if (
                       line[:1].isspace()
-                      and current_header == "subject"
+                      and explicit_subject
                   ):
                       subject += " " + line.strip()
+                      i += 1
                       continue
 
-                  # A completely blank line after headers starts body.
-                  if not line.strip() and any([
-                      author_name,
-                      author_email,
-                      author_date,
-                      subject,
-                  ]):
-                      body_start = i + 1
+                  # The metadata header block ends at the first blank line.
+                  if not line.strip():
+                      i += 1
                       break
 
-                  # Non-header text before diff is body.
-                  if (
-                      line.strip()
-                      and any([
-                          author_name,
-                          author_email,
-                          author_date,
-                          subject,
-                      ])
-                  ):
-                      body_start = i
-                      break
+                  # Non-header text starts the commit message.
+                  break
 
-              body = ""
+              # Skip blank lines between metadata and commit message.
+              while i < len(lines) and not lines[i].strip():
+                  i += 1
 
-              if body_start is not None:
-                  body = "\n".join(lines[body_start:]).strip()
+              message_lines = lines[i:]
+
+              # Standalone format:
+              #
+              #   Author: ...
+              #
+              #   Subject
+              #
+              #   Body
+              #
+              # If Subject: was not explicitly supplied, the first
+              # paragraph is the subject and everything after the next
+              # blank line is the body.
+              if not subject and message_lines:
+                  subject_lines = []
+
+                  while message_lines and message_lines[0].strip():
+                      subject_lines.append(
+                          message_lines.pop(0).strip()
+                      )
+
+                  subject = " ".join(subject_lines).strip()
+
+                  # Remove the separator between subject and body.
+                  while message_lines and not message_lines[0].strip():
+                      message_lines.pop(0)
+
+              body = "\n".join(message_lines).strip()
 
               return {
                   "author_name": author_name.strip(),

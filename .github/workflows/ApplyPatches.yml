@@ -731,19 +731,17 @@ jobs:
 
                       metadata["body"] = body
 
-                      subject, body = normalize_commit_message(
-                           metadata["subject"],
-                           body,
-                       )
+                      subject = metadata["subject"].strip()
+                      body = body.strip()
 
-                       if subject and body:
-                           full_message = (
-                               f"{subject}\n\n{body}"
-                           )
-                       elif subject:
-                           full_message = subject
-                       else:
-                           full_message = body
+                      if subject and body:
+                          full_message = (
+                              f"{subject}\n\n{body}"
+                          )
+                      elif subject:
+                          full_message = subject
+                      else:
+                          full_message = body
                       meta_file.write_text(
                           json.dumps(
                               metadata,
@@ -833,20 +831,17 @@ jobs:
                       newline="",
                   )
 
-                  subject, body = normalize_commit_message(
-                       parsed["subject"],
-                       parsed["body"],
-                   )
+                  subject = parsed["subject"].strip()
+                  body = parsed["body"].strip()
 
-                   if subject and body:
-                       full_message = (
-                           f"{subject}\n\n{body}"
-                       )
-                   elif subject:
-                       full_message = subject
-                   else:
-                       full_message = body
-
+                  if subject and body:
+                      full_message = (
+                          f"{subject}\n\n{body}"
+                      )
+                  elif subject:
+                      full_message = subject
+                  else:
+                      full_message = body
                   metadata = {
                       "author_name": parsed[
                           "author_name"

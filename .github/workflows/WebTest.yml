@@ -11,7 +11,7 @@ on:
       pkg-name:
         description: "use another pkg name"
         type: string
-        default: ft.telegram.messenger
+        default: aex.telegram
       appidhash:
         description: "use another APP_ID/APP_HASH"
         type: boolean

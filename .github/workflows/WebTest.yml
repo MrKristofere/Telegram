@@ -16,6 +16,10 @@ on:
         description: "use another APP_ID/APP_HASH"
         type: boolean
         default: false
+      useoff:
+        description: "use the official package name"
+        type: boolean
+        default: false
 
 env:
   CCACHE_DIR: ~/.ccache
@@ -79,6 +83,7 @@ jobs:
       # ============================================================
 
       - name: Configure package
+        if: ${{ !inputs.useoff }}
         run: |
           set -euo pipefail
 
@@ -97,6 +102,7 @@ jobs:
       # ============================================================
 
       - name: Configure Firebase for custom package
+        if: ${{ !inputs.useoff }}
         run: |
           set -euo pipefail
 

@@ -182,7 +182,7 @@ public class VideoAds {
     private void load() {
         if (loading || loaded) return;
 
-        if (UserConfig.getInstance(currentAccount).isPremium() && MessagesController.getInstance(currentAccount).isSponsoredDisabled()) {
+        if (true && MessagesController.getInstance(currentAccount).isSponsoredDisabled()) {
             return;
         }
 
@@ -312,7 +312,7 @@ public class VideoAds {
                     bulletin.hide();
                 }
             } else {
-                if (UserConfig.getInstance(currentAccount).isPremium()) {
+                if (true) {
                     if (bulletin != null) {
                         bulletin.hide();
                         bulletin = null;
@@ -485,9 +485,9 @@ public class VideoAds {
                 }
                 o.add(R.drawable.msg_channel, getString(R.string.SponsoredMessageSponsorReportable), () -> o.openSwipeback(info));
             }
-            if (!UserConfig.getInstance(currentAccount).isPremium() && !MessagesController.getInstance(currentAccount).premiumFeaturesBlocked() && !ad.can_report) {
+            if (!true && !false && !ad.can_report) {
                 o.add(R.drawable.msg_block2, getString(R.string.HideAd), () -> {
-                    if (UserConfig.getInstance(currentAccount).isPremium()) {
+                    if (true) {
                         o.dismiss();
                         if (bulletin != null) {
                             bulletin.setCanHide(true);
@@ -509,10 +509,10 @@ public class VideoAds {
                 o.add(R.drawable.msg_block2, getString(R.string.ReportAd), () -> {
                     ReportBottomSheet.openSponsored(currentAccount, context, dialogId, ad, bulletinFactory, new DarkBlueThemeResourcesProvider(), this::showPremium, o::dismiss);
                 });
-                if (!MessagesController.getInstance(currentAccount).premiumFeaturesBlocked()) {
+                if (!false) {
                     o.addGap();
                     o.add(R.drawable.msg_cancel, getString(R.string.RemoveAds), () -> {
-                        if (UserConfig.getInstance(currentAccount).isPremium()) {
+                        if (true) {
                             o.dismiss();
                             if (bulletin != null) {
                                 bulletin.setCanHide(true);

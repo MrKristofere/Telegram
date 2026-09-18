@@ -42,17 +42,56 @@ jobs:
         env:
           APK_URL: ${{ inputs.apk_url }}
         run: |
-          curl \
-            --fail \
-            --location \
-            --retry 3 \
-            --retry-all-errors \
-            --max-filesize 524288000 \
-            "$APK_URL" \
-            --output input.apk
+          set -euo pipefail
 
+          echo "Downloading APK..."
+
+          curl \
+            --location \
+            --fail-with-body \
+            --retry 3 \
+            --retry-delay 4 \
+            --connect-timeout 30 \
+            --max-time 600 \
+            --output download \
+            "$APK_URL"
+
+          echo "Downloaded file:"
+          ls -lh download
+
+          FILE_TYPE="$(file -b download)"
+          echo "File type: $FILE_TYPE"
+
+          # Прямой APK
+          if unzip -t download >/dev/null 2>&1; then
+            if unzip -l download | grep -q 'AndroidManifest.xml'; then
+              mv download input.apk
+              echo "Detected APK"
+              exit 0
+            fi
+          fi
+
+          # ZIP с APK внутри
+          if unzip -t download >/dev/null 2>&1; then
+            mkdir -p downloaded-artifact
+            unzip -q download -d downloaded-artifact
+
+            APK="$(find downloaded-artifact -type f -name '*.apk' | head -n 1)"
+
+            if [ -n "$APK" ]; then
+              cp "$APK" input.apk
+              echo "Found APK inside archive: $APK"
+              exit 0
+            fi
+          fi
+
+          echo "ERROR: URL did not provide an APK or an archive containing an APK."
+          exit 1
+
+      - name: Show APK
+        run: |
+          ls -lh input.apk
           file input.apk
-          unzip -t input.apk >/dev/null
 
       - name: Build Firebase patcher
         working-directory: patcher

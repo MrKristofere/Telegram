@@ -55,7 +55,7 @@ jobs:
             echo "run_id=${BASH_REMATCH[3]}" >> "$GITHUB_OUTPUT"
             echo "artifact_id=${BASH_REMATCH[4]}" >> "$GITHUB_OUTPUT"
 
-            echo "GitHub Actions artifact detected."
+            echo "GitHub Actions artifact detected"
             echo "Repository: ${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
             echo "Run ID: ${BASH_REMATCH[3]}"
             echo "Artifact ID: ${BASH_REMATCH[4]}"
@@ -63,7 +63,7 @@ jobs:
             echo "type=direct" >> "$GITHUB_OUTPUT"
             echo "url=$APK_URL" >> "$GITHUB_OUTPUT"
 
-            echo "Direct URL detected."
+            echo "Direct URL detected"
           fi
 
       - name: Download GitHub Artifact
@@ -83,6 +83,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          mkdir -p downloaded
+
           curl \
             --location \
             --fail-with-body \
@@ -90,42 +92,55 @@ jobs:
             --retry-delay 4 \
             --connect-timeout 30 \
             --max-time 600 \
-            --output downloaded.apk \
+            --output downloaded/app.apk \
             "$APK_URL"
-
-          mkdir -p downloaded
-          mv downloaded.apk downloaded/input.apk
 
       - name: Prepare APK
         run: |
           set -euo pipefail
 
-          echo "Downloaded files:"
-          find downloaded -type f -print
-
-          APK="$(find downloaded -type f -name '*.apk' -print -quit)"
+          APK="$(find downloaded -type f -iname '*.apk' -print -quit || true)"
 
           if [ -z "$APK" ]; then
-            echo "ERROR: APK not found"
+            echo "ERROR: No APK found."
+            echo "Downloaded files:"
+            find downloaded -type f -print
             exit 1
           fi
+
+          echo "APK found: $APK"
 
           cp "$APK" input.apk
 
           echo "Input APK:"
           ls -lh input.apk
 
+          echo "APK type:"
+          file input.apk
+
+          echo "Testing APK ZIP structure..."
+
           if ! unzip -t input.apk >/dev/null 2>&1; then
-            echo "ERROR: input.apk is not a valid APK"
+            echo "ERROR: File is not a valid APK/ZIP."
             exit 1
           fi
 
-          if ! unzip -l input.apk | grep -qE '(^|/)AndroidManifest\.xml$'; then
-            echo "ERROR: AndroidManifest.xml not found"
+          echo "Checking DEX..."
+
+          if ! unzip -l input.apk | grep -qE '(^|/)classes([0-9]*)\.dex$'; then
+            echo "ERROR: No classes.dex found."
             exit 1
           fi
 
           echo "APK is valid."
+
+      - name: APK information
+        run: |
+          echo "APK size:"
+          ls -lh input.apk
+
+          echo "DEX files:"
+          unzip -l input.apk | grep -E '(^|/)classes([0-9]*)\.dex$' || true
       
       - name: Show APK
         run: |

@@ -42,59 +42,15 @@ jobs:
       # ============================================================
 
       - name: Free up disk space
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/dotnet
-
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/.ghcup
-
-          sudo rm -rf /opt/hostedtoolcache/Rust
-          sudo rm -rf "$HOME/.rustup"
-          sudo rm -rf "$HOME/.cargo"
-
-          sudo rm -rf /opt/hostedtoolcache/go
-          sudo rm -rf /opt/hostedtoolcache/Ruby
-          sudo rm -rf /opt/hostedtoolcache/PyPy
-
-          sudo rm -rf /opt/hostedtoolcache/Java/8*
-          sudo rm -rf /opt/hostedtoolcache/Java/11*
-          sudo rm -rf /opt/hostedtoolcache/Java/17*
-          sudo rm -rf /opt/hostedtoolcache/Java/25*
-
-          sudo rm -rf /opt/hostedtoolcache/node
-
-          sudo rm -rf /opt/hostedtoolcache/Python/3.10*
-          sudo rm -rf /opt/hostedtoolcache/Python/3.11*
-          sudo rm -rf /opt/hostedtoolcache/Python/3.13*
-          sudo rm -rf /opt/hostedtoolcache/Python/3.14*
-
-          sudo rm -rf /opt/google/chrome
-          sudo rm -rf /opt/microsoft/msedge
-          sudo rm -rf /usr/lib/firefox
-          sudo rm -rf /usr/lib/firefox-esr
-          sudo rm -rf /usr/local/share/chromedriver
-          sudo rm -rf /usr/local/share/gecko_driver
-          sudo rm -rf /usr/local/share/edge_driver
-
-          sudo rm -f /usr/bin/google-chrome*
-          sudo rm -f /usr/bin/microsoft-edge*
-          sudo rm -f /usr/bin/firefox*
-
-          sudo swapoff -a || true
-          sudo rm -f /swapfile
-          sudo rm -f /mnt/swapfile
-
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/*
-
-          docker system prune -af || true
-          docker builder prune -af || true
-
-          df -h /
+        uses: jlumbroso/free-disk-space@main
+        with:
+          preinstalled-runtimes: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
 
       # ============================================================
       # CHECKOUT

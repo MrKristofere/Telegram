@@ -41,53 +41,88 @@ jobs:
       - name: Download APK
         env:
           APK_URL: ${{ inputs.apk_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          echo "Downloading APK..."
+          echo "Source URL:"
+          echo "$APK_URL"
 
-          curl \
-            --location \
-            --fail-with-body \
-            --retry 3 \
-            --retry-delay 4 \
-            --connect-timeout 30 \
-            --max-time 600 \
-            --output download \
-            "$APK_URL"
+          # GitHub Actions artifact
+          if [[ "$APK_URL" =~ ^https://github\.com/([^/]+)/([^/]+)/actions/runs/([0-9]+)/artifacts/([0-9]+) ]]; then
+            OWNER="${BASH_REMATCH[1]}"
+            REPO="${BASH_REMATCH[2]}"
+            ARTIFACT_ID="${BASH_REMATCH[4]}"
 
-          echo "Downloaded file:"
-          ls -lh download
+            echo "Detected GitHub Actions artifact"
+            echo "Repository: $OWNER/$REPO"
+            echo "Artifact ID: $ARTIFACT_ID"
 
-          FILE_TYPE="$(file -b download)"
-          echo "File type: $FILE_TYPE"
+            curl \
+              --location \
+              --fail-with-body \
+              --retry 3 \
+              --retry-delay 4 \
+              --connect-timeout 30 \
+              --max-time 600 \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2026-03-10" \
+              --output artifact.zip \
+              "https://api.github.com/repos/$OWNER/$REPO/actions/artifacts/$ARTIFACT_ID/zip"
 
-          # Прямой APK
-          if unzip -t download >/dev/null 2>&1; then
-            if unzip -l download | grep -q 'AndroidManifest.xml'; then
+            mkdir -p artifact
+            unzip -q artifact.zip -d artifact
+
+            APK="$(find artifact -type f -name '*.apk' | head -n 1)"
+
+            if [ -z "$APK" ]; then
+              echo "ERROR: No APK found inside GitHub artifact"
+              exit 1
+            fi
+
+            cp "$APK" input.apk
+
+          else
+            # Обычный прямой URL
+            echo "Detected direct download URL"
+
+            curl \
+              --location \
+              --fail-with-body \
+              --retry 3 \
+              --retry-delay 4 \
+              --connect-timeout 30 \
+              --max-time 600 \
+              --output download \
+              "$APK_URL"
+
+            # Проверяем, является ли скачанное непосредственно APK
+            if unzip -t download >/dev/null 2>&1 &&
+               unzip -l download | grep -q 'AndroidManifest.xml'; then
+
               mv download input.apk
-              echo "Detected APK"
-              exit 0
-            fi
-          fi
 
-          # ZIP с APK внутри
-          if unzip -t download >/dev/null 2>&1; then
-            mkdir -p downloaded-artifact
-            unzip -q download -d downloaded-artifact
+            else
+              # Возможно, это ZIP с APK внутри
+              mkdir -p artifact
+              unzip -q download -d artifact
 
-            APK="$(find downloaded-artifact -type f -name '*.apk' | head -n 1)"
+              APK="$(find artifact -type f -name '*.apk' | head -n 1)"
 
-            if [ -n "$APK" ]; then
+              if [ -z "$APK" ]; then
+                echo "ERROR: URL did not contain an APK"
+                exit 1
+              fi
+
               cp "$APK" input.apk
-              echo "Found APK inside archive: $APK"
-              exit 0
             fi
           fi
 
-          echo "ERROR: URL did not provide an APK or an archive containing an APK."
-          exit 1
-
+          echo "APK successfully obtained:"
+          ls -lh input.apk
+          file input.apk
+      
       - name: Show APK
         run: |
           ls -lh input.apk

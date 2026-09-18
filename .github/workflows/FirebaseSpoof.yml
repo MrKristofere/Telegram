@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   patch:
@@ -45,18 +46,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Source URL:"
+          echo "Downloading:"
           echo "$APK_URL"
 
-          # GitHub Actions artifact
+          # GitHub Actions Artifact URL
           if [[ "$APK_URL" =~ ^https://github\.com/([^/]+)/([^/]+)/actions/runs/([0-9]+)/artifacts/([0-9]+) ]]; then
-            OWNER="${BASH_REMATCH[1]}"
-            REPO="${BASH_REMATCH[2]}"
-            ARTIFACT_ID="${BASH_REMATCH[4]}"
-
-            echo "Detected GitHub Actions artifact"
-            echo "Repository: $OWNER/$REPO"
-            echo "Artifact ID: $ARTIFACT_ID"
+            echo "GitHub Actions artifact detected"
 
             curl \
               --location \
@@ -65,27 +60,13 @@ jobs:
               --retry-delay 4 \
               --connect-timeout 30 \
               --max-time 600 \
-              --header "Accept: application/vnd.github+json" \
               --header "Authorization: Bearer $GH_TOKEN" \
-              --header "X-GitHub-Api-Version: 2026-03-10" \
-              --output artifact.zip \
-              "https://api.github.com/repos/$OWNER/$REPO/actions/artifacts/$ARTIFACT_ID/zip"
-
-            mkdir -p artifact
-            unzip -q artifact.zip -d artifact
-
-            APK="$(find artifact -type f -name '*.apk' | head -n 1)"
-
-            if [ -z "$APK" ]; then
-              echo "ERROR: No APK found inside GitHub artifact"
-              exit 1
-            fi
-
-            cp "$APK" input.apk
+              --header "Accept: application/octet-stream" \
+              --output download \
+              "$APK_URL"
 
           else
-            # Обычный прямой URL
-            echo "Detected direct download URL"
+            echo "Direct download URL detected"
 
             curl \
               --location \
@@ -96,30 +77,88 @@ jobs:
               --max-time 600 \
               --output download \
               "$APK_URL"
-
-            # Проверяем, является ли скачанное непосредственно APK
-            if unzip -t download >/dev/null 2>&1 &&
-               unzip -l download | grep -q 'AndroidManifest.xml'; then
-
-              mv download input.apk
-
-            else
-              # Возможно, это ZIP с APK внутри
-              mkdir -p artifact
-              unzip -q download -d artifact
-
-              APK="$(find artifact -type f -name '*.apk' | head -n 1)"
-
-              if [ -z "$APK" ]; then
-                echo "ERROR: URL did not contain an APK"
-                exit 1
-              fi
-
-              cp "$APK" input.apk
-            fi
           fi
 
-          echo "APK successfully obtained:"
+          echo ""
+          echo "Downloaded file:"
+          ls -lh download
+
+          echo ""
+          echo "File information:"
+          file download
+
+          # --------------------------------------------------
+          # 1. Проверяем: это непосредственно APK?
+          # APK является ZIP-контейнером, поэтому проверяем
+          # наличие AndroidManifest.xml.
+          # --------------------------------------------------
+
+          if unzip -t download >/dev/null 2>&1 && \
+             unzip -l download | grep -qE '(^|/)AndroidManifest\.xml$'; then
+
+            echo "Detected APK directly."
+
+            mv download input.apk
+
+          # --------------------------------------------------
+          # 2. Если это ZIP, возможно это старый/архивированный
+          # GitHub Artifact с APK внутри.
+          # --------------------------------------------------
+
+          elif unzip -t download >/dev/null 2>&1; then
+
+            echo "Detected ZIP archive."
+            echo "Searching for APK..."
+
+            rm -rf artifact
+            mkdir -p artifact
+
+            unzip -q download -d artifact
+
+            APK="$(find artifact -type f -iname '*.apk' -print -quit || true)"
+
+            if [ -z "$APK" ]; then
+              echo "ERROR: ZIP does not contain an APK."
+              echo ""
+              echo "Archive contents:"
+              find artifact -type f -print
+              exit 1
+            fi
+
+            echo "Found APK:"
+            echo "$APK"
+
+            cp "$APK" input.apk
+
+          # --------------------------------------------------
+          # 3. Не APK и не ZIP.
+          # --------------------------------------------------
+
+          else
+            echo "ERROR: Downloaded file is neither an APK nor a ZIP archive."
+            file download
+            exit 1
+          fi
+
+          # --------------------------------------------------
+          # Финальная проверка APK.
+          # --------------------------------------------------
+
+          echo ""
+          echo "Validating APK..."
+
+          if ! unzip -t input.apk >/dev/null 2>&1; then
+            echo "ERROR: input.apk is not a valid ZIP/APK."
+            exit 1
+          fi
+
+          if ! unzip -l input.apk | grep -qE '(^|/)AndroidManifest\.xml$'; then
+            echo "ERROR: input.apk does not contain AndroidManifest.xml."
+            exit 1
+          fi
+
+          echo ""
+          echo "APK successfully downloaded:"
           ls -lh input.apk
           file input.apk
       

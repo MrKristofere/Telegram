@@ -64,7 +64,7 @@ jobs:
           CERTIFICATE_HASH: ${{ inputs.certificate_hash }}
         run: |
           java -jar \
-            patcher/firebase-apk-patcher-1.0.0-all.jar \
+            patcher/target/firebase-apk-patcher-1.0.0-all.jar \
             input.apk \
             patched-unsigned.apk \
             "$CERTIFICATE_HASH"

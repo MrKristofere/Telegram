@@ -99,16 +99,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          APK="$(find downloaded -type f -iname '*.apk' -print -quit || true)"
+          echo "Downloaded files:"
+          find downloaded -type f -printf '%p (%s bytes)\n'
+
+          APK="$(find downloaded -type f -name '*.apk' -print -quit)"
 
           if [ -z "$APK" ]; then
-            echo "ERROR: No APK found."
-            echo "Downloaded files:"
-            find downloaded -type f -print
+            echo "ERROR: APK not found"
             exit 1
           fi
-
-          echo "APK found: $APK"
 
           cp "$APK" input.apk
 
@@ -119,18 +118,18 @@ jobs:
           file input.apk
 
           echo "Testing APK ZIP structure..."
+          unzip -t input.apk >/dev/null
 
-          if ! unzip -t input.apk >/dev/null 2>&1; then
-            echo "ERROR: File is not a valid APK/ZIP."
+          echo "Checking DEX files..."
+          DEX_FILES="$(unzip -Z1 input.apk | grep -E '^classes([0-9]+)?\.dex$' || true)"
+
+          if [ -z "$DEX_FILES" ]; then
+            echo "ERROR: No DEX files found"
             exit 1
           fi
 
-          echo "Checking DEX..."
-
-          if ! unzip -l input.apk | grep -qE '(^|/)classes([0-9]*)\.dex$'; then
-            echo "ERROR: No classes.dex found."
-            exit 1
-          fi
+          echo "DEX files found:"
+          echo "$DEX_FILES"
 
           echo "APK is valid."
 

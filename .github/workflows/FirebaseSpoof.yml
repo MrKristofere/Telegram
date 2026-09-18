@@ -151,6 +151,24 @@ jobs:
         run: |
           mvn -B -DskipTests package
 
+      - name: Inspect patcher JAR
+        working-directory: patcher
+        run: |
+          set -euo pipefail
+
+          JAR="target/firebase-apk-patcher-1.0.0-all.jar"
+
+          echo "JAR:"
+          ls -lh "$JAR"
+
+          echo
+          echo "Manifest:"
+          unzip -p "$JAR" META-INF/MANIFEST.MF || true
+
+          echo
+          echo "Patcher classes:"
+          jar tf "$JAR" | grep -E 'FirebasePatcher|Patcher' || true
+
       - name: Patch Firebase certificate
         env:
           CERTIFICATE_HASH: ${{ inputs.certificate_hash }}

@@ -1307,16 +1307,86 @@ jobs:
       # Official apksigner output
       # ============================================================
 
-      - name: Export apksigner output
+      # ============================================================
+      # Export certificate information
+      # ============================================================
+
+      - name: Export certificate outputs
         run: |
           set -euo pipefail
 
-          apksigner verify \
-            --print-certs-pem \
-            telegram.apk \
-            > certificate-output.txt
+          echo "=================================================="
+          echo "EXTRACTED CERTIFICATES"
+          echo "=================================================="
 
-          cat certificate-output.txt
+          found=0
+
+          for der in telegram-cert-v*.der; do
+            [ -f "$der" ] || continue
+
+            found=1
+
+            echo
+            echo "--------------------------------------------------"
+            echo "$der"
+            echo "--------------------------------------------------"
+
+            echo "SHA-256:"
+            openssl x509 \
+              -inform DER \
+              -in "$der" \
+              -noout \
+              -fingerprint \
+              -sha256
+
+            echo "SHA-1:"
+            openssl x509 \
+              -inform DER \
+              -in "$der" \
+              -noout \
+              -fingerprint \
+              -sha1
+
+            echo "Subject:"
+            openssl x509 \
+              -inform DER \
+              -in "$der" \
+              -noout \
+              -subject
+
+            echo "Issuer:"
+            openssl x509 \
+              -inform DER \
+              -in "$der" \
+              -noout \
+              -issuer
+
+            echo "Validity:"
+            openssl x509 \
+              -inform DER \
+              -in "$der" \
+              -noout \
+              -dates
+
+            pem="${der%.der}.pem"
+
+            openssl x509 \
+              -inform DER \
+              -in "$der" \
+              -out "$pem"
+
+            echo "PEM: $pem"
+          done
+
+          if [ "$found" -eq 0 ]; then
+            echo "ERROR: No extracted certificates found"
+            exit 1
+          fi
+
+          echo
+          echo "=================================================="
+          echo "Export completed successfully"
+          echo "=================================================="
 
       # ============================================================
       # Kotlin byte arrays

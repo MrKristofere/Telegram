@@ -38,20 +38,14 @@ jobs:
     steps:
 
       # ============================================================
-      # FREE DISK SPACE
+      # SWAP SPACE
       # ============================================================
 
-      - name: Free up disk space
+      - name: Set swap space
         if: false
-        uses: jlumbroso/free-disk-space@main
+        uses: pierotofy/set-swap-space@master
         with:
-          preinstalled-runtimes: true
-          android: false
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: false
-          swap-storage: true
+          swap-size-gb: 20
 
       # ============================================================
       # CHECKOUT

@@ -154,7 +154,7 @@ jobs:
           repository: ${{ steps.source.outputs.repository }}
           run-id: ${{ steps.source.outputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: downloaded
+          path: work/input/package
 
       - name: Download Direct APK
         if: steps.source.outputs.type == 'direct'

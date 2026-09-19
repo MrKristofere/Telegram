@@ -1,5 +1,4 @@
 import org.jf.dexlib2.DexFileFactory;
-import org.jf.dexlib2.Opcodes;
 import org.jf.dexlib2.Opcode;
 import org.jf.dexlib2.builder.MutableMethodImplementation;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction11x;
@@ -12,7 +11,6 @@ import org.jf.dexlib2.iface.MultiDexContainer;
 import org.jf.dexlib2.iface.instruction.FiveRegisterInstruction;
 import org.jf.dexlib2.iface.instruction.Instruction;
 import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
-import org.jf.dexlib2.iface.instruction.RegisterRangeInstruction;
 import org.jf.dexlib2.iface.reference.MethodReference;
 import org.jf.dexlib2.iface.reference.StringReference;
 import org.jf.dexlib2.immutable.ImmutableClassDef;
@@ -24,8 +22,6 @@ import org.jf.dexlib2.writer.pool.DexPool;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -51,6 +47,9 @@ public class FirebasePatcher {
 
     private static final String CONNECTION_METHOD =
             "openHttpUrlConnection";
+
+    private static final String CERT_HEADER =
+            "X-Android-Cert";
 
     private static final String ADD_REQUEST_PROPERTY =
             "addRequestProperty";
@@ -190,12 +189,7 @@ public class FirebasePatcher {
             }
 
             /*
-             * Important:
-             *
-             * At least ONE patch must be found.
-             *
-             * If Firebase changes one of the two methods,
-             * the other patch is still enough.
+             * Success if at least one of the two patches was applied.
              */
             if (!fingerprintPatched && !headerPatched) {
                 throw new IllegalStateException(
@@ -216,10 +210,6 @@ public class FirebasePatcher {
                     (headerPatched ? "patched" : "not found")
             );
 
-            /*
-             * Even if only one of the two patches was found,
-             * rebuild the APK.
-             */
             rebuildApk(
                     input,
                     output,
@@ -320,7 +310,7 @@ public class FirebasePatcher {
             }
 
             /*
-             * Keep every class, including untouched classes.
+             * Rebuild only classes that changed.
              */
             if (classChanged) {
 
@@ -375,10 +365,12 @@ public class FirebasePatcher {
          * FirebaseInstallationServiceClient
          * -> getFingerprintHashForPackage()
          *
-         * Replace implementation with:
+         * Replace the entire implementation with:
          *
-         * const-string v0, "SHA1"
-         * return-object v0
+         *     const-string v0, "SHA1"
+         *     return-object v0
+         *
+         * This is the primary patch.
          * ============================================================
          */
 
@@ -435,32 +427,37 @@ public class FirebasePatcher {
          * ============================================================
          * FIX 2
          *
-         * We DO NOT search for the literal string:
+         * Morphe-style call-site patch.
+         *
+         * Preferred anchor:
          *
          *     "X-Android-Cert"
          *
-         * because the APK can keep it in a static field:
+         * If the literal is present in this method, use its index
+         * exactly like the Morphe patch.
          *
-         *     X_ANDROID_CERT_HEADER_KEY
+         * However, in your current Firebase APK the Java source is:
          *
-         * Instead we inspect addRequestProperty().
+         *     addRequestProperty(
+         *         X_ANDROID_CERT_HEADER_KEY,
+         *         getFingerprintHashForPackage()
+         *     );
          *
-         * Expected source-level code:
+         * X_ANDROID_CERT_HEADER_KEY is a field, so the literal
+         * "X-Android-Cert" is NOT necessarily present in this method.
          *
-         * httpURLConnection.addRequestProperty(
-         *     X_ANDROID_CERT_HEADER_KEY,
-         *     getFingerprintHashForPackage()
-         * );
-         *
-         * We find the invocation of:
-         *
-         *     addRequestProperty(String, String)
-         *
-         * and check whether its value register was populated by:
+         * Therefore we use a fallback anchor:
          *
          *     getFingerprintHashForPackage()
          *
-         * If yes, replace that value with our SHA-1.
+         * and then find the next addRequestProperty().
+         *
+         * We intentionally do NOT require move-result-object or
+         * inspect the data flow between the two instructions.
+         *
+         * This follows the same basic strategy as Morphe:
+         *
+         *     anchor -> next addRequestProperty -> registerE
          * ============================================================
          */
 
@@ -471,256 +468,187 @@ public class FirebasePatcher {
                             implementation.getInstructions()
                     );
 
-            for (int i = 0; i < instructions.size(); i++) {
+            /*
+             * First try the literal "X-Android-Cert".
+             */
+            int anchorIndex =
+                    findCertificateHeaderString(
+                            instructions
+                    );
 
-                Instruction instruction =
-                        instructions.get(i);
+            String anchorType;
 
-                if (!(instruction instanceof ReferenceInstruction)) {
-                    continue;
-                }
-
-                Object reference =
-                        ((ReferenceInstruction) instruction)
-                                .getReference();
-
-                if (!(reference instanceof MethodReference)) {
-                    continue;
-                }
-
-                MethodReference methodReference =
-                        (MethodReference) reference;
-
-                if (!ADD_REQUEST_PROPERTY.equals(
-                        methodReference.getName())) {
-                    continue;
-                }
-
+            if (anchorIndex >= 0) {
+                anchorType = "X-Android-Cert string";
+            } else {
                 /*
-                 * addRequestProperty must have:
+                 * Fallback for your current APK:
                  *
-                 * (String, String)
-                 *
-                 * We only want the two-string overload.
+                 * find getFingerprintHashForPackage()
                  */
-                if (methodReference.getParameterTypes().size() != 2) {
-                    continue;
-                }
-
-                if (!"Ljava/lang/String;".equals(
-                        methodReference.getParameterTypes().get(0))) {
-                    continue;
-                }
-
-                if (!"Ljava/lang/String;".equals(
-                        methodReference.getParameterTypes().get(1))) {
-                    continue;
-                }
-
-                int valueRegister =
-                        getThirdArgumentRegister(instruction);
-
-                if (valueRegister < 0) {
-                    continue;
-                }
-
-                /*
-                 * Check the instructions immediately before this
-                 * invocation for:
-                 *
-                 * invoke-virtual {...}, getFingerprintHashForPackage()
-                 *
-                 * followed by:
-                 *
-                 * move-result-object <valueRegister>
-                 *
-                 * This matches the normal DEX representation of:
-                 *
-                 * addRequestProperty(...,
-                 *     getFingerprintHashForPackage())
-                 */
-                int moveResultIndex =
-                        findMoveResultForRegister(
-                                instructions,
-                                i,
-                                valueRegister
-                        );
-
-                if (moveResultIndex < 0) {
-                    continue;
-                }
-
-                int fingerprintInvokeIndex =
+                anchorIndex =
                         findFingerprintInvocation(
-                                instructions,
-                                moveResultIndex
+                                instructions
                         );
 
-                if (fingerprintInvokeIndex < 0) {
-                    continue;
-                }
-
-                /*
-                 * We have positively identified the
-                 * X-Android-Cert value.
-                 *
-                 * Insert:
-                 *
-                 * const-string <valueRegister>, "<SHA1>"
-                 *
-                 * immediately before addRequestProperty().
-                 */
-                MutableMethodImplementation mutable =
-                        new MutableMethodImplementation(
-                                implementation
-                        );
-
-                mutable.addInstruction(
-                        i,
-                        new BuilderInstruction21c(
-                                Opcode.CONST_STRING,
-                                valueRegister,
-                                new ImmutableStringReference(hash)
-                        )
-                );
-
-                Method patchedMethod =
-                        new ImmutableMethod(
-                                method.getDefiningClass(),
-                                method.getName(),
-                                method.getParameters(),
-                                method.getReturnType(),
-                                method.getAccessFlags(),
-                                method.getAnnotations(),
-                                method.getHiddenApiRestrictions(),
-                                mutable
-                        );
-
-                return new PatchMethodResult(
-                        patchedMethod,
-                        false,
-                        true
-                );
+                anchorType =
+                        "getFingerprintHashForPackage()";
             }
+
+            if (anchorIndex < 0) {
+
+                System.out.println(
+                        "  Fix 2: no Firebase certificate anchor in " +
+                        method.getDefiningClass() +
+                        "->" +
+                        method.getName()
+                );
+
+                return PatchMethodResult.unchanged(method);
+            }
+
+            /*
+             * Exactly like Morphe:
+             *
+             * start AFTER the anchor
+             * find the first addRequestProperty()
+             */
+            int requestPropertyIndex =
+                    findAddRequestPropertyAfter(
+                            instructions,
+                            anchorIndex
+                    );
+
+            if (requestPropertyIndex < 0) {
+
+                System.out.println(
+                        "  Fix 2: anchor found (" +
+                        anchorType +
+                        "), but addRequestProperty() was not found after it."
+                );
+
+                return PatchMethodResult.unchanged(method);
+            }
+
+            Instruction addRequestProperty =
+                    instructions.get(
+                            requestPropertyIndex
+                    );
+
+            /*
+             * Morphe uses FiveRegisterInstruction.registerE.
+             *
+             * This corresponds to:
+             *
+             *     invoke-virtual {
+             *         vConnection,
+             *         vHeader,
+             *         vValue
+             *     }, addRequestProperty(...)
+             *
+             * registerE = vValue
+             */
+            if (!(addRequestProperty
+                    instanceof FiveRegisterInstruction)) {
+
+                System.out.println(
+                        "  Fix 2: addRequestProperty() is not a " +
+                        "FiveRegisterInstruction; skipping."
+                );
+
+                return PatchMethodResult.unchanged(method);
+            }
+
+            int valueRegister =
+                    ((FiveRegisterInstruction)
+                            addRequestProperty)
+                            .getRegisterE();
+
+            /*
+             * CONST_STRING is a 21c instruction and therefore
+             * can only address v0..v255.
+             *
+             * registerE from a normal invoke-virtual (35c)
+             * is only 4-bit, so v0..v15.
+             */
+            if (valueRegister < 0 ||
+                    valueRegister > 15) {
+
+                System.out.println(
+                        "  Fix 2: invalid register v" +
+                        valueRegister +
+                        "; skipping."
+                );
+
+                return PatchMethodResult.unchanged(method);
+            }
+
+            /*
+             * Insert directly BEFORE addRequestProperty().
+             *
+             * This is the same operation as the Morphe patch:
+             *
+             *     method.addInstruction(
+             *         insertIndex,
+             *         "const-string v$valueRegister, \"$hash\""
+             *     )
+             */
+            MutableMethodImplementation mutable =
+                    new MutableMethodImplementation(
+                            implementation
+                    );
+
+            mutable.addInstruction(
+                    requestPropertyIndex,
+                    new BuilderInstruction21c(
+                            Opcode.CONST_STRING,
+                            valueRegister,
+                            new ImmutableStringReference(hash)
+                    )
+            );
+
+            Method patchedMethod =
+                    new ImmutableMethod(
+                            method.getDefiningClass(),
+                            method.getName(),
+                            method.getParameters(),
+                            method.getReturnType(),
+                            method.getAccessFlags(),
+                            method.getAnnotations(),
+                            method.getHiddenApiRestrictions(),
+                            mutable
+                    );
+
+            System.out.println(
+                    "  Fix 2: patched " +
+                    anchorType +
+                    " -> addRequestProperty(), " +
+                    "value register v" +
+                    valueRegister
+            );
+
+            return new PatchMethodResult(
+                    patchedMethod,
+                    false,
+                    true
+            );
         }
 
         return PatchMethodResult.unchanged(method);
     }
 
     /*
-     * Returns the register containing the third argument of:
+     * Find the literal:
      *
-     * addRequestProperty(connection, header, value)
+     *     "X-Android-Cert"
      *
-     * Supports:
-     *
-     * invoke-virtual {...}       -> FiveRegisterInstruction
-     * invoke-virtual/range {...} -> RegisterRangeInstruction
+     * inside the current method.
      */
-    private static int getThirdArgumentRegister(
-            Instruction instruction
+    private static int findCertificateHeaderString(
+            List<Instruction> instructions
     ) {
 
-        if (instruction instanceof FiveRegisterInstruction) {
-
-            FiveRegisterInstruction five =
-                    (FiveRegisterInstruction) instruction;
-
-            /*
-             * For a 3-register invoke:
-             *
-             * {vConnection, vHeader, vValue}
-             *
-             * vValue is register E.
-             */
-            return five.getRegisterE();
-        }
-
-        if (instruction instanceof RegisterRangeInstruction) {
-
-            RegisterRangeInstruction range =
-                    (RegisterRangeInstruction) instruction;
-
-            if (range.getRegisterCount() < 3) {
-                return -1;
-            }
-
-            return range.getStartRegister() + 2;
-        }
-
-        return -1;
-    }
-
-    /*
-     * Find:
-     *
-     * move-result-object <targetRegister>
-     *
-     * directly before the addRequestProperty() call.
-     *
-     * We allow a small number of harmless instructions between
-     * the result and the invocation.
-     */
-    private static int findMoveResultForRegister(
-            List<Instruction> instructions,
-            int requestPropertyIndex,
-            int targetRegister
-    ) {
-
-        int start =
-                Math.max(
-                        0,
-                        requestPropertyIndex - 4
-                );
-
-        for (int i = requestPropertyIndex - 1;
-             i >= start;
-             i--) {
-
-            Instruction instruction =
-                    instructions.get(i);
-
-            if (instruction.getOpcode() ==
-                    Opcode.MOVE_RESULT_OBJECT) {
-
-                if (instruction instanceof org.jf.dexlib2.iface.instruction.OneRegisterInstruction) {
-
-                    int register =
-                            ((org.jf.dexlib2.iface.instruction.OneRegisterInstruction)
-                                    instruction)
-                                    .getRegisterA();
-
-                    if (register == targetRegister) {
-                        return i;
-                    }
-                }
-            }
-        }
-
-        return -1;
-    }
-
-    /*
-     * Find an invocation of:
-     *
-     * getFingerprintHashForPackage()
-     *
-     * immediately before move-result-object.
-     */
-    private static int findFingerprintInvocation(
-            List<Instruction> instructions,
-            int moveResultIndex
-    ) {
-
-        int start =
-                Math.max(
-                        0,
-                        moveResultIndex - 3
-                );
-
-        for (int i = moveResultIndex - 1;
-             i >= start;
-             i--) {
+        for (int i = 0; i < instructions.size(); i++) {
 
             Instruction instruction =
                     instructions.get(i);
@@ -730,7 +658,50 @@ public class FirebasePatcher {
             }
 
             Object reference =
-                    ((ReferenceInstruction) instruction)
+                    ((ReferenceInstruction)
+                            instruction)
+                            .getReference();
+
+            if (!(reference instanceof StringReference)) {
+                continue;
+            }
+
+            String value =
+                    ((StringReference) reference)
+                            .getString();
+
+            if (CERT_HEADER.equals(value)) {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /*
+     * Find:
+     *
+     *     invoke-virtual {...},
+     *         getFingerprintHashForPackage()Ljava/lang/String;
+     *
+     * inside the current method.
+     */
+    private static int findFingerprintInvocation(
+            List<Instruction> instructions
+    ) {
+
+        for (int i = 0; i < instructions.size(); i++) {
+
+            Instruction instruction =
+                    instructions.get(i);
+
+            if (!(instruction instanceof ReferenceInstruction)) {
+                continue;
+            }
+
+            Object reference =
+                    ((ReferenceInstruction)
+                            instruction)
                             .getReference();
 
             if (!(reference instanceof MethodReference)) {
@@ -745,8 +716,12 @@ public class FirebasePatcher {
                 continue;
             }
 
-            if (!"()Ljava/lang/String;".equals(
-                    buildMethodSignature(methodReference))) {
+            if (!methodReference.getParameterTypes().isEmpty()) {
+                continue;
+            }
+
+            if (!"Ljava/lang/String;".equals(
+                    methodReference.getReturnType())) {
                 continue;
             }
 
@@ -756,25 +731,68 @@ public class FirebasePatcher {
         return -1;
     }
 
-    private static String buildMethodSignature(
-            MethodReference methodReference
+    /*
+     * Morphe-style:
+     *
+     *     instructions.drop(anchorIndex)
+     *         .firstOrNull { invoke-virtual addRequestProperty }
+     *
+     * We deliberately do not inspect how the arguments were produced.
+     */
+    private static int findAddRequestPropertyAfter(
+            List<Instruction> instructions,
+            int anchorIndex
     ) {
 
-        StringBuilder result =
-                new StringBuilder();
+        for (int i = anchorIndex + 1;
+             i < instructions.size();
+             i++) {
 
-        result.append("(");
+            Instruction instruction =
+                    instructions.get(i);
 
-        for (CharSequence parameter :
-                methodReference.getParameterTypes()) {
+            if (!(instruction instanceof ReferenceInstruction)) {
+                continue;
+            }
 
-            result.append(parameter);
+            Object reference =
+                    ((ReferenceInstruction)
+                            instruction)
+                            .getReference();
+
+            if (!(reference instanceof MethodReference)) {
+                continue;
+            }
+
+            MethodReference methodReference =
+                    (MethodReference) reference;
+
+            if (!ADD_REQUEST_PROPERTY.equals(
+                    methodReference.getName())) {
+                continue;
+            }
+
+            /*
+             * addRequestProperty(String, String)
+             */
+            if (methodReference.getParameterTypes().size() != 2) {
+                continue;
+            }
+
+            if (!"Ljava/lang/String;".equals(
+                    methodReference.getParameterTypes().get(0))) {
+                continue;
+            }
+
+            if (!"Ljava/lang/String;".equals(
+                    methodReference.getParameterTypes().get(1))) {
+                continue;
+            }
+
+            return i;
         }
 
-        result.append(")");
-        result.append(methodReference.getReturnType());
-
-        return result.toString();
+        return -1;
     }
 
     private static List<Method> toMethodList(

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       link:
-        description: "apk link"
+        description: "APK link"
         type: string
         default: ""
         required: true
@@ -19,12 +19,7 @@ jobs:
       BUILD_TOOLS_VERSION: "36.1.0"
 
     steps:
-
-      # ============================================================
-      # Android SDK / apksigner
-      # ============================================================
       - name: Install Android SDK Build Tools
-        shell: bash
         run: |
           set -euo pipefail
 
@@ -51,1193 +46,1218 @@ jobs:
 
           echo "$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION" >> "$GITHUB_PATH"
 
-      # ============================================================
-      # Download APK
-      # ============================================================
       - name: Download APK
-        shell: bash
         run: |
           set -euo pipefail
 
-          curl -fL --retry 5 --retry-all-errors \
+          curl -fL --retry 3 \
             -o telegram.apk \
             "$APK_URL"
 
           file telegram.apk
           ls -lh telegram.apk
 
-      # ============================================================
-      # Basic APK inspection
-      # ============================================================
-      - name: Inspect APK
-        shell: bash
-        run: |
-          set +e
+      # ------------------------------------------------------------
+      # Independent verification using Google's apksigner
+      # ------------------------------------------------------------
 
-          echo "============================================================"
-          echo "APK FILE"
-          echo "============================================================"
-
-          file telegram.apk
-          ls -lh telegram.apk
-
-          echo
-          echo "============================================================"
-          echo "ZIP ENTRIES"
-          echo "============================================================"
-
-          unzip -l telegram.apk 2>/dev/null | head -100 || true
-
-          echo
-          echo "============================================================"
-          echo "META-INF"
-          echo "============================================================"
-
-          unzip -l telegram.apk 2>/dev/null \
-            | grep -Ei 'META-INF/.*\.(RSA|DSA|EC|SF)$' \
-            || echo "No traditional META-INF signature files found"
-
-      # ============================================================
-      # Official Android signature verification
-      #
-      # apksigner/apksig understands:
-      #   v1
-      #   v2
-      #   v3
-      #   newer supported schemes
-      # ============================================================
       - name: Verify APK with apksigner
-        shell: bash
         run: |
           set +e
 
-          echo "============================================================"
-          echo "apksigner --verbose"
-          echo "============================================================"
+          echo "=================================================="
+          echo "apksigner verify"
+          echo "=================================================="
 
           apksigner verify \
             --verbose \
-            telegram.apk \
-            2>&1 | tee apksigner-verify.txt
+            telegram.apk
+
+          VERIFY_EXIT=$?
 
           echo
-          echo "============================================================"
-          echo "apksigner --print-certs"
-          echo "============================================================"
+          echo "=================================================="
+          echo "apksigner certificate information"
+          echo "=================================================="
 
           apksigner verify \
             --print-certs \
-            telegram.apk \
-            2>&1 | tee apksigner-certs.txt
+            telegram.apk
 
           echo
-          echo "============================================================"
-          echo "apksigner --print-certs-pem"
-          echo "============================================================"
+          echo "apksigner exit code: $VERIFY_EXIT"
+
+          exit $VERIFY_EXIT
+
+      # ------------------------------------------------------------
+      # Deep APK Signing Block parser
+      # ------------------------------------------------------------
+
+      - name: Deep extract v2/v3 certificates
+        run: |
+          set -euo pipefail
+
+          cat > inspect_apk_signature.py <<'PY'
+          #!/usr/bin/env python3
+
+          import hashlib
+          import struct
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+
+          APK_SIG_BLOCK_MAGIC = b"APK Sig Block 42"
+
+          V2_ID = 0x7109871A
+          V3_ID = 0xF05368C0
+
+          UINT32_MAX = 0xFFFFFFFF
+
+
+          def u32(data, offset):
+              if offset + 4 > len(data):
+                  raise ValueError(
+                      f"u32 out of bounds at 0x{offset:X}"
+                  )
+              return struct.unpack_from("<I", data, offset)[0]
+
+
+          def u64(data, offset):
+              if offset + 8 > len(data):
+                  raise ValueError(
+                      f"u64 out of bounds at 0x{offset:X}"
+                  )
+              return struct.unpack_from("<Q", data, offset)[0]
+
+
+          def read_lp(data, offset, end, name):
+              if offset + 4 > end:
+                  raise ValueError(
+                      f"{name}: missing uint32 length at "
+                      f"0x{offset:X}"
+                  )
+
+              size = u32(data, offset)
+              value_start = offset + 4
+              value_end = value_start + size
+
+              if value_end > end:
+                  raise ValueError(
+                      f"{name}: length {size} exceeds container "
+                      f"(remaining {end - value_start})"
+                  )
+
+              return (
+                  data[value_start:value_end],
+                  offset,
+                  value_start,
+                  value_end,
+                  value_end,
+              )
+
+
+          def sha256(data):
+              return hashlib.sha256(data).hexdigest().upper()
+
+
+          def sha1(data):
+              return hashlib.sha1(data).hexdigest().upper()
+
+
+          def find_eocd(data):
+              signature = b"PK\x05\x06"
+
+              # EOCD must be inside the final 65557 bytes.
+              start = max(0, len(data) - 65557)
+
+              pos = data.rfind(signature, start)
+
+              if pos < 0:
+                  raise ValueError("ZIP EOCD not found")
+
+              if pos + 22 > len(data):
+                  raise ValueError("Truncated ZIP EOCD")
+
+              return pos
+
+
+          def find_central_directory(data):
+              eocd = find_eocd(data)
+
+              cd_size = u32(data, eocd + 12)
+              cd_offset = u32(data, eocd + 16)
+
+              # ZIP64 is intentionally rejected here because this workflow
+              # is intended for normal Android APKs.
+              if cd_offset == UINT32_MAX or cd_size == UINT32_MAX:
+                  raise ValueError(
+                      "ZIP64 APK is not supported by this parser"
+                  )
+
+              if cd_offset + cd_size > len(data):
+                  raise ValueError(
+                      "Central Directory exceeds APK size"
+                  )
+
+              return cd_offset, cd_size
+
+
+          def find_apk_signing_block(data, cd_offset):
+              footer_size_offset = cd_offset - 24
+
+              if footer_size_offset < 0:
+                  raise ValueError(
+                      "Not enough data before Central Directory"
+                  )
+
+              block_size = u64(data, footer_size_offset)
+
+              magic = data[
+                  footer_size_offset + 8:
+                  footer_size_offset + 24
+              ]
+
+              if magic != APK_SIG_BLOCK_MAGIC:
+                  raise ValueError(
+                      "APK Signing Block magic not found"
+                  )
+
+              total_size = block_size + 8
+
+              block_offset = cd_offset - total_size
+
+              if block_offset < 0:
+                  raise ValueError(
+                      "Invalid APK Signing Block offset"
+                  )
+
+              first_size = u64(data, block_offset)
+
+              if first_size != block_size:
+                  raise ValueError(
+                      "APK Signing Block size mismatch"
+                  )
+
+              return block_offset, total_size
+
+
+          def parse_signing_block(data, block_offset, total_size):
+              pair_start = block_offset + 8
+              pair_end = block_offset + total_size - 24
+
+              pos = pair_start
+              entries = []
+
+              while pos < pair_end:
+                  if pos + 8 > pair_end:
+                      raise ValueError(
+                          f"Truncated signing block pair at "
+                          f"0x{pos:X}"
+                      )
+
+                  pair_size = u64(data, pos)
+
+                  if pair_size < 4:
+                      raise ValueError(
+                          f"Invalid pair size {pair_size} "
+                          f"at 0x{pos:X}"
+                      )
+
+                  pair_value_start = pos + 8
+                  pair_end_offset = pair_value_start + pair_size
+
+                  if pair_end_offset > pair_end:
+                      raise ValueError(
+                          f"Pair at 0x{pos:X} exceeds signing block"
+                      )
+
+                  pair_id = u32(data, pair_value_start)
+
+                  value_start = pair_value_start + 4
+                  value_end = pair_end_offset
+
+                  entries.append({
+                      "id": pair_id,
+                      "pair_offset": pos,
+                      "pair_size": pair_size,
+                      "value_offset": value_start,
+                      "value_end": value_end,
+                      "value": data[value_start:value_end],
+                  })
+
+                  pos = pair_end_offset
+
+              if pos != pair_end:
+                  raise ValueError(
+                      "Signing block pair area does not end exactly"
+                  )
+
+              return entries
+
+
+          def parse_digest_sequence(blob, absolute_offset):
+              """
+              AOSP format:
+
+                digests =
+                  length-prefixed digest record
+                  length-prefixed digest record
+                  ...
+
+                digest record =
+                  uint32 algorithm ID
+                  length-prefixed digest
+              """
+
+              result = []
+
+              pos = 0
+
+              while pos < len(blob):
+                  record, record_header, record_start, record_end, pos = \
+                      read_lp(
+                          blob,
+                          pos,
+                          len(blob),
+                          "digest record"
+                      )
+
+                  if len(record) < 8:
+                      raise ValueError(
+                          "Digest record is too short"
+                      )
+
+                  algorithm_id = u32(record, 0)
+
+                  digest, _, digest_start, digest_end, digest_pos = \
+                      read_lp(
+                          record,
+                          4,
+                          len(record),
+                          "digest"
+                      )
+
+                  if digest_pos != len(record):
+                      raise ValueError(
+                          "Trailing bytes in digest record"
+                      )
+
+                  result.append({
+                      "algorithm_id": algorithm_id,
+                      "algorithm_offset":
+                          absolute_offset + record_start,
+                      "digest_offset":
+                          absolute_offset + record_start + digest_start,
+                      "digest": digest,
+                      "digest_size": len(digest),
+                  })
+
+              return result
+
+
+          def parse_certificates(blob, absolute_offset):
+              result = []
+
+              pos = 0
+              number = 0
+
+              while pos < len(blob):
+                  number += 1
+
+                  cert, _, cert_start, cert_end, pos = \
+                      read_lp(
+                          blob,
+                          pos,
+                          len(blob),
+                          "certificate"
+                      )
+
+                  result.append({
+                      "number": number,
+                      "offset": absolute_offset + cert_start,
+                      "size": len(cert),
+                      "data": cert,
+                  })
+
+              return result
+
+
+          def parse_additional_attributes(blob, absolute_offset):
+              result = []
+
+              pos = 0
+
+              while pos < len(blob):
+                  attr, _, attr_start, attr_end, pos = \
+                      read_lp(
+                          blob,
+                          pos,
+                          len(blob),
+                          "additional attribute"
+                      )
+
+                  if len(attr) < 4:
+                      raise ValueError(
+                          "Additional attribute is too short"
+                      )
+
+                  attr_id = u32(attr, 0)
+
+                  result.append({
+                      "id": attr_id,
+                      "offset": absolute_offset + attr_start,
+                      "size": len(attr),
+                      "value": attr[4:],
+                  })
+
+              return result
+
+
+          def parse_signatures(blob):
+              result = []
+
+              pos = 0
+
+              while pos < len(blob):
+                  record, _, record_start, record_end, pos = \
+                      read_lp(
+                          blob,
+                          pos,
+                          len(blob),
+                          "signature record"
+                      )
+
+                  if len(record) < 8:
+                      raise ValueError(
+                          "Signature record is too short"
+                      )
+
+                  algorithm_id = u32(record, 0)
+
+                  signature, _, signature_start, signature_end, signature_pos = \
+                      read_lp(
+                          record,
+                          4,
+                          len(record),
+                          "signature"
+                      )
+
+                  if signature_pos != len(record):
+                      raise ValueError(
+                          "Trailing bytes in signature record"
+                      )
+
+                  result.append({
+                      "algorithm_id": algorithm_id,
+                      "signature": signature,
+                  })
+
+              return result
+
+
+          def parse_v2(value, value_absolute_offset):
+              result = {
+                  "version": 2,
+                  "signers": [],
+              }
+
+              pos = 0
+
+              while pos < len(value):
+                  signer_blob, _, signer_start, signer_end, pos = \
+                      read_lp(
+                          value,
+                          pos,
+                          len(value),
+                          "v2 signer"
+                      )
+
+                  signer_absolute = (
+                      value_absolute_offset + signer_start
+                  )
+
+                  signer_pos = 0
+
+                  signed_data, _, signed_data_start, signed_data_end, \
+                      signer_pos = read_lp(
+                          signer_blob,
+                          signer_pos,
+                          len(signer_blob),
+                          "v2 signed data"
+                      )
+
+                  signed_data_absolute = (
+                      signer_absolute + signed_data_start
+                  )
+
+                  sd_pos = 0
+
+                  digest_blob, _, digest_start, digest_end, sd_pos = \
+                      read_lp(
+                          signed_data,
+                          sd_pos,
+                          len(signed_data),
+                          "v2 digests"
+                      )
+
+                  digest_absolute = (
+                      signed_data_absolute + digest_start
+                  )
+
+                  certificates_blob, _, certificates_start, \
+                      certificates_end, sd_pos = read_lp(
+                          signed_data,
+                          sd_pos,
+                          len(signed_data),
+                          "v2 certificates"
+                      )
+
+                  certificates_absolute = (
+                      signed_data_absolute + certificates_start
+                  )
+
+                  attributes_blob, _, attributes_start, \
+                      attributes_end, sd_pos = read_lp(
+                          signed_data,
+                          sd_pos,
+                          len(signed_data),
+                          "v2 additional attributes"
+                      )
+
+                  attributes_absolute = (
+                      signed_data_absolute + attributes_start
+                  )
+
+                  # Some signing implementations leave an additional
+                  # empty LP field here. Accept it when present.
+                  reserved = b""
+
+                  if sd_pos < len(signed_data):
+                      reserved, _, reserved_start, \
+                          reserved_end, sd_pos = read_lp(
+                              signed_data,
+                              sd_pos,
+                              len(signed_data),
+                              "v2 reserved field"
+                          )
+
+                  if sd_pos != len(signed_data):
+                      raise ValueError(
+                          f"v2 SignedData has "
+                          f"{len(signed_data) - sd_pos} trailing bytes"
+                      )
+
+                  signatures_blob, _, signatures_start, \
+                      signatures_end, signer_pos = read_lp(
+                          signer_blob,
+                          signer_pos,
+                          len(signer_blob),
+                          "v2 signatures"
+                      )
+
+                  public_key_blob, _, public_key_start, \
+                      public_key_end, signer_pos = read_lp(
+                          signer_blob,
+                          signer_pos,
+                          len(signer_blob),
+                          "v2 public key"
+                      )
+
+                  if signer_pos != len(signer_blob):
+                      raise ValueError(
+                          f"v2 signer has "
+                          f"{len(signer_blob) - signer_pos} trailing bytes"
+                      )
+
+                  certificates = parse_certificates(
+                      certificates_blob,
+                      certificates_absolute
+                  )
+
+                  result["signers"].append({
+                      "signed_data": signed_data,
+                      "signed_data_offset": signed_data_absolute,
+                      "digests": parse_digest_sequence(
+                          digest_blob,
+                          digest_absolute
+                      ),
+                      "certificates": certificates,
+                      "attributes": parse_additional_attributes(
+                          attributes_blob,
+                          attributes_absolute
+                      ),
+                      "signatures": parse_signatures(
+                          signatures_blob
+                      ),
+                      "public_key": public_key_blob,
+                  })
+
+              return result
+
+
+          def parse_v3(value, value_absolute_offset):
+              result = {
+                  "version": 3,
+                  "signers": [],
+              }
+
+              pos = 0
+
+              while pos < len(value):
+                  signer_blob, _, signer_start, signer_end, pos = \
+                      read_lp(
+                          value,
+                          pos,
+                          len(value),
+                          "v3 signer"
+                      )
+
+                  signer_absolute = (
+                      value_absolute_offset + signer_start
+                  )
+
+                  signer_pos = 0
+
+                  signed_data, _, signed_data_start, \
+                      signed_data_end, signer_pos = read_lp(
+                          signer_blob,
+                          signer_pos,
+                          len(signer_blob),
+                          "v3 signed data"
+                      )
+
+                  signed_data_absolute = (
+                      signer_absolute + signed_data_start
+                  )
+
+                  sd_pos = 0
+
+                  digest_blob, _, digest_start, \
+                      digest_end, sd_pos = read_lp(
+                          signed_data,
+                          sd_pos,
+                          len(signed_data),
+                          "v3 digests"
+                      )
+
+                  digest_absolute = (
+                      signed_data_absolute + digest_start
+                  )
+
+                  certificates_blob, _, certificates_start, \
+                      certificates_end, sd_pos = read_lp(
+                          signed_data,
+                          sd_pos,
+                          len(signed_data),
+                          "v3 certificates"
+                      )
+
+                  certificates_absolute = (
+                      signed_data_absolute + certificates_start
+                  )
+
+                  min_sdk = u32(signed_data, sd_pos)
+                  min_sdk_offset = (
+                      signed_data_absolute + sd_pos
+                  )
+                  sd_pos += 4
+
+                  max_sdk = u32(signed_data, sd_pos)
+                  max_sdk_offset = (
+                      signed_data_absolute + sd_pos
+                  )
+                  sd_pos += 4
+
+                  attributes_blob, _, attributes_start, \
+                      attributes_end, sd_pos = read_lp(
+                          signed_data,
+                          sd_pos,
+                          len(signed_data),
+                          "v3 additional attributes"
+                      )
+
+                  attributes_absolute = (
+                      signed_data_absolute + attributes_start
+                  )
+
+                  if sd_pos != len(signed_data):
+                      raise ValueError(
+                          f"v3 SignedData has "
+                          f"{len(signed_data) - sd_pos} trailing bytes"
+                      )
+
+                  signer_min_sdk = u32(signer_blob, signer_pos)
+                  signer_min_sdk_offset = (
+                      signer_absolute + signer_pos
+                  )
+                  signer_pos += 4
+
+                  signer_max_sdk = u32(signer_blob, signer_pos)
+                  signer_max_sdk_offset = (
+                      signer_absolute + signer_pos
+                  )
+                  signer_pos += 4
+
+                  signatures_blob, _, signatures_start, \
+                      signatures_end, signer_pos = read_lp(
+                          signer_blob,
+                          signer_pos,
+                          len(signer_blob),
+                          "v3 signatures"
+                      )
+
+                  public_key_blob, _, public_key_start, \
+                      public_key_end, signer_pos = read_lp(
+                          signer_blob,
+                          signer_pos,
+                          len(signer_blob),
+                          "v3 public key"
+                      )
+
+                  if signer_pos != len(signer_blob):
+                      raise ValueError(
+                          f"v3 signer has "
+                          f"{len(signer_blob) - signer_pos} trailing bytes"
+                      )
+
+                  certificates = parse_certificates(
+                      certificates_blob,
+                      certificates_absolute
+                  )
+
+                  result["signers"].append({
+                      "signed_data": signed_data,
+                      "signed_data_offset": signed_data_absolute,
+                      "digests": parse_digest_sequence(
+                          digest_blob,
+                          digest_absolute
+                      ),
+                      "certificates": certificates,
+                      "attributes": parse_additional_attributes(
+                          attributes_blob,
+                          attributes_absolute
+                      ),
+                      "min_sdk": min_sdk,
+                      "max_sdk": max_sdk,
+                      "min_sdk_offset": min_sdk_offset,
+                      "max_sdk_offset": max_sdk_offset,
+                      "signer_min_sdk": signer_min_sdk,
+                      "signer_max_sdk": signer_max_sdk,
+                      "signer_min_sdk_offset":
+                          signer_min_sdk_offset,
+                      "signer_max_sdk_offset":
+                          signer_max_sdk_offset,
+                      "signatures": parse_signatures(
+                          signatures_blob
+                      ),
+                      "public_key": public_key_blob,
+                  })
+
+              return result
+
+
+          def openssl_certificate_info(cert):
+              with tempfile.NamedTemporaryFile(
+                  suffix=".der",
+                  delete=False
+              ) as f:
+                  path = Path(f.name)
+                  f.write(cert)
+
+              try:
+                  proc = subprocess.run(
+                      [
+                          "openssl",
+                          "x509",
+                          "-inform",
+                          "DER",
+                          "-in",
+                          str(path),
+                          "-noout",
+                          "-subject",
+                          "-issuer",
+                          "-serial",
+                          "-dates",
+                      ],
+                      capture_output=True,
+                      text=True,
+                  )
+
+                  if proc.returncode != 0:
+                      return proc.stderr.strip()
+
+                  return proc.stdout.strip()
+
+              finally:
+                  path.unlink(missing_ok=True)
+
+
+          def algorithm_name(algorithm_id):
+              names = {
+                  0x0101:
+                      "RSASSA-PSS / SHA-256",
+                  0x0102:
+                      "RSASSA-PSS / SHA-512",
+                  0x0103:
+                      "RSASSA-PKCS1-v1_5 / SHA-256",
+                  0x0104:
+                      "RSASSA-PKCS1-v1_5 / SHA-512",
+                  0x0201:
+                      "ECDSA / SHA-256",
+                  0x0202:
+                      "ECDSA / SHA-512",
+                  0x0301:
+                      "DSA / SHA-256",
+              }
+
+              return names.get(
+                  algorithm_id,
+                  f"UNKNOWN (0x{algorithm_id:08X})"
+              )
+
+
+          def print_certificates(apk_path, version, scheme):
+              certificates = []
+
+              for signer_index, signer in enumerate(
+                  scheme["signers"],
+                  1
+              ):
+                  print()
+                  print(f"  Signer #{signer_index}")
+
+                  print(
+                      f"    SignedData: "
+                      f"{len(signer['signed_data'])} bytes"
+                  )
+
+                  print(
+                      f"    Digests: "
+                      f"{len(signer['digests'])}"
+                  )
+
+                  for digest_index, digest in enumerate(
+                      signer["digests"],
+                      1
+                  ):
+                      print(
+                          f"      Digest #{digest_index}"
+                      )
+                      print(
+                          f"        Algorithm: "
+                          f"0x{digest['algorithm_id']:08X}"
+                      )
+                      print(
+                          f"        Algorithm name: "
+                          f"{algorithm_name(digest['algorithm_id'])}"
+                      )
+                      print(
+                          f"        Offset: "
+                          f"0x{digest['digest_offset']:08X}"
+                      )
+                      print(
+                          f"        Size: "
+                          f"{digest['digest_size']} bytes"
+                      )
+                      print(
+                          f"        Digest: "
+                          f"{digest['digest'].hex().upper()}"
+                      )
+
+                  print(
+                      f"    Certificates: "
+                      f"{len(signer['certificates'])}"
+                  )
+
+                  for cert_index, cert in enumerate(
+                      signer["certificates"],
+                      1
+                  ):
+                      cert_data = cert["data"]
+
+                      print()
+                      print(
+                          f"      Certificate #{cert_index}"
+                      )
+                      print(
+                          f"        Offset: "
+                          f"0x{cert['offset']:08X}"
+                      )
+                      print(
+                          f"        Size: "
+                          f"{cert['size']} bytes"
+                      )
+                      print(
+                          f"        SHA-256: "
+                          f"{sha256(cert_data)}"
+                      )
+                      print(
+                          f"        SHA-1:   "
+                          f"{sha1(cert_data)}"
+                      )
+
+                      print(
+                          "        "
+                          + openssl_certificate_info(cert_data)
+                          .replace("\n", "\n        ")
+                      )
+
+                      out = Path(
+                          f"telegram-cert-v{version}-"
+                          f"signer{signer_index}-"
+                          f"cert{cert_index}.der"
+                      )
+
+                      out.write_bytes(cert_data)
+
+                      print(
+                          f"        Saved: {out}"
+                      )
+
+                      certificates.append(cert_data)
+
+                  if version == 3:
+                      print(
+                          f"    minSDK: "
+                          f"{signer['min_sdk']}"
+                      )
+                      print(
+                          f"    maxSDK: "
+                          f"{signer['max_sdk']}"
+                      )
+
+                      print(
+                          f"    Signer minSDK: "
+                          f"{signer['signer_min_sdk']}"
+                      )
+
+                      print(
+                          f"    Signer maxSDK: "
+                          f"{signer['signer_max_sdk']}"
+                      )
+
+                  print(
+                      f"    Signatures: "
+                      f"{len(signer['signatures'])}"
+                  )
+
+                  for sig_index, signature in enumerate(
+                      signer["signatures"],
+                      1
+                  ):
+                      print(
+                          f"      Signature #{sig_index}: "
+                          f"algorithm "
+                          f"0x{signature['algorithm_id']:08X} "
+                          f"({algorithm_name(signature['algorithm_id'])}), "
+                          f"{len(signature['signature'])} bytes"
+                      )
+
+                  print(
+                      f"    Public key: "
+                      f"{len(signer['public_key'])} bytes"
+                  )
+
+              return certificates
+
+
+          def main():
+              if len(sys.argv) != 2:
+                  print(
+                      f"Usage: {sys.argv[0]} APK",
+                      file=sys.stderr
+                  )
+                  return 2
+
+              apk_path = Path(sys.argv[1])
+
+              data = apk_path.read_bytes()
+
+              print("==================================================")
+              print("DEEP APK SIGNATURE INSPECTION")
+              print("==================================================")
+              print(f"APK: {apk_path}")
+              print(f"Size: {len(data)} bytes")
+              print()
+
+              cd_offset, cd_size = find_central_directory(data)
+
+              print("ZIP Central Directory")
+              print(
+                  f"  offset: 0x{cd_offset:08X}"
+              )
+              print(
+                  f"  size: {cd_size} bytes"
+              )
+              print(
+                  f"  end: 0x{cd_offset + cd_size:08X}"
+              )
+              print()
+
+              block_offset, block_size = \
+                  find_apk_signing_block(
+                      data,
+                      cd_offset
+                  )
+
+              print("APK Signing Block")
+              print(
+                  f"  offset: 0x{block_offset:08X}"
+              )
+              print(
+                  f"  size: {block_size} bytes"
+              )
+              print(
+                  f"  end: 0x{cd_offset:08X}"
+              )
+              print(
+                  f"  magic: {APK_SIG_BLOCK_MAGIC.decode()}"
+              )
+              print()
+
+              entries = parse_signing_block(
+                  data,
+                  block_offset,
+                  block_size
+              )
+
+              print("Signing blocks:")
+              print()
+
+              v2 = None
+              v3 = None
+
+              for entry in entries:
+                  entry_id = entry["id"]
+
+                  print(
+                      f"  ID: 0x{entry_id:08X}"
+                  )
+
+                  print(
+                      f"  pair size: "
+                      f"{entry['pair_size']} bytes"
+                  )
+
+                  print(
+                      f"  value offset: "
+                      f"0x{entry['value_offset']:08X}"
+                  )
+
+                  print(
+                      f"  value size: "
+                      f"{len(entry['value'])} bytes"
+                  )
+
+                  if entry_id == V2_ID:
+                      print(
+                          "  APK Signature Scheme v2"
+                      )
+
+                      v2 = parse_v2(
+                          entry["value"],
+                          entry["value_offset"]
+                      )
+
+                      print_certificates(
+                          apk_path,
+                          2,
+                          v2
+                      )
+
+                  elif entry_id == V3_ID:
+                      print(
+                          "  APK Signature Scheme v3"
+                      )
+
+                      v3 = parse_v3(
+                          entry["value"],
+                          entry["value_offset"]
+                      )
+
+                      print_certificates(
+                          apk_path,
+                          3,
+                          v3
+                      )
+
+                  else:
+                      print(
+                          "  Other Signing Block entry"
+                      )
+
+                  print()
+
+              print("==================================================")
+              print("RESULT")
+              print("==================================================")
+
+              if v2:
+                  print(
+                      f"v2 signers: "
+                      f"{len(v2['signers'])}"
+                  )
+
+                  for signer_index, signer in enumerate(
+                      v2["signers"],
+                      1
+                  ):
+                      print(
+                          f"  v2 signer #{signer_index}: "
+                          f"{len(signer['certificates'])} certificate(s)"
+                      )
+              else:
+                  print("v2: NOT FOUND")
+
+              if v3:
+                  print(
+                      f"v3 signers: "
+                      f"{len(v3['signers'])}"
+                  )
+
+                  for signer_index, signer in enumerate(
+                      v3["signers"],
+                      1
+                  ):
+                      print(
+                          f"  v3 signer #{signer_index}: "
+                          f"{len(signer['certificates'])} certificate(s)"
+                      )
+              else:
+                  print("v3: NOT FOUND")
+
+              print()
+              print(
+                  f"Total Signing Block entries: "
+                  f"{len(entries)}"
+              )
+
+
+          if __name__ == "__main__":
+              main()
+          PY
+
+          chmod +x inspect_apk_signature.py
+
+          python3 inspect_apk_signature.py telegram.apk
+
+      # ------------------------------------------------------------
+      # Convert every extracted v2/v3 certificate to PEM
+      # ------------------------------------------------------------
+
+      - name: Convert extracted certificates to PEM
+        run: |
+          set -euo pipefail
+
+          found=0
+
+          for der in telegram-cert-v*.der; do
+            [ -f "$der" ] || continue
+
+            found=1
+
+            pem="${der%.der}.pem"
+
+            openssl x509 \
+              -inform DER \
+              -in "$der" \
+              -out "$pem"
+
+            echo
+            echo "=================================================="
+            echo "$pem"
+            echo "=================================================="
+
+            openssl x509 \
+              -in "$pem" \
+              -noout \
+              -subject \
+              -issuer \
+              -serial \
+              -dates \
+              -fingerprint \
+              -sha256 \
+              -fingerprint \
+              -sha1
+          done
+
+          if [ "$found" -eq 0 ]; then
+            echo "ERROR: No v2/v3 certificates extracted"
+            exit 1
+          fi
+
+      # ------------------------------------------------------------
+      # Keep the old apksigner PEM output as a comparison artifact
+      # ------------------------------------------------------------
+
+      - name: Export apksigner output
+        run: |
+          set -euo pipefail
 
           apksigner verify \
             --print-certs-pem \
             telegram.apk \
-            2>&1 | tee apksigner-certs-pem.txt
+            > certificate-output.txt
 
-          exit 0
+          cat certificate-output.txt
 
-      # ============================================================
-      # Extract ALL certificates returned by apksigner
-      # ============================================================
-      - name: Extract certificates from apksigner
-        shell: bash
+      # ------------------------------------------------------------
+      # Kotlin byte arrays for every extracted certificate
+      # ------------------------------------------------------------
+
+      - name: Generate Kotlin byte arrays
         run: |
           set -euo pipefail
 
-          rm -rf certs
-          mkdir -p certs
-
-          python3 <<'PY'
-          import re
-          from pathlib import Path
-
-          source = Path("apksigner-certs-pem.txt")
-
-          if not source.exists():
-              print("apksigner output does not exist")
-              raise SystemExit(0)
-
-          data = source.read_text(errors="replace")
-
-          pattern = re.compile(
-              r"-----BEGIN CERTIFICATE-----.*?"
-              r"-----END CERTIFICATE-----",
-              re.S,
-          )
-
-          certs = pattern.findall(data)
-
-          print(f"Certificates found by apksigner: {len(certs)}")
-
-          for index, cert in enumerate(certs, 1):
-              path = Path("certs") / f"apksigner-cert-{index}.pem"
-
-              path.write_text(
-                  cert.strip() + "\n"
-              )
-
-              print(f"  {path}")
-
-          if not certs:
-              print("No PEM certificates found in apksigner output.")
-          PY
-
-          ls -lah certs || true
-
-      # ============================================================
-      # Deep parser
-      #
-      # Searches the APK Signing Block directly.
-      #
-      # APK Signing Block:
-      #
-      #   size
-      #   ID/value pairs
-      #   size
-      #   magic:
-      #       APK Sig Block 42
-      #
-      # v2 ID = 0x7109871a
-      # v3 ID = 0xf05368c0
-      # ============================================================
-      - name: Deep scan APK Signing Block
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf deep-certs
-          mkdir -p deep-certs
-
           python3 <<'PY'
           from pathlib import Path
-          import struct
-          import hashlib
-          import subprocess
 
-          APK = Path("telegram.apk")
-          data = APK.read_bytes()
-
-          MAGIC = b"APK Sig Block 42"
-
-          V2_ID = 0x7109871a
-          V3_ID = 0xf05368c0
-
-          print("=" * 70)
-          print("DEEP APK SIGNATURE BLOCK SCAN")
-          print("=" * 70)
-
-          print(f"APK size: {len(data)} bytes")
-
-          # ----------------------------------------------------------
-          # Helpers
-          # ----------------------------------------------------------
-
-          def read_u32(buf, offset):
-              if offset + 4 > len(buf):
-                  raise ValueError("u32 outside buffer")
-
-              return struct.unpack_from("<I", buf, offset)[0]
-
-
-          def read_u64(buf, offset):
-              if offset + 8 > len(buf):
-                  raise ValueError("u64 outside buffer")
-
-              return struct.unpack_from("<Q", buf, offset)[0]
-
-
-          def read_length_prefixed(buf, offset):
-              """
-              Android APK signature structures use:
-                  uint32 length
-                  byte[length] value
-              """
-
-              length = read_u32(buf, offset)
-
-              start = offset + 4
-              end = start + length
-
-              if end > len(buf):
-                  raise ValueError(
-                      f"length-prefixed field outside buffer: "
-                      f"start={start}, length={length}"
-                  )
-
-              return buf[start:end], end
-
-
-          # ----------------------------------------------------------
-          # Find ZIP EOCD
-          # ----------------------------------------------------------
-
-          eocd = data.rfind(b"PK\x05\x06")
-
-          if eocd < 0:
-              print("ERROR: ZIP EOCD not found.")
-              raise SystemExit(1)
-
-          print(f"EOCD offset: 0x{eocd:x}")
-
-          if eocd + 22 > len(data):
-              print("ERROR: truncated EOCD.")
-              raise SystemExit(1)
-
-          # ZIP EOCD:
-          #
-          # +16 = offset of central directory
-          # +12 = size of central directory
-          #
-
-          central_dir_offset = read_u32(
-              data,
-              eocd + 16
-          )
-
-          central_dir_size = read_u32(
-              data,
-              eocd + 12
-          )
-
-          print(
-              f"Central directory offset: "
-              f"0x{central_dir_offset:x}"
-          )
-
-          print(
-              f"Central directory size: "
-              f"{central_dir_size}"
-          )
-
-          # ----------------------------------------------------------
-          # Find APK Signing Block footer
-          #
-          # Footer:
-          #
-          #   uint64 size
-          #   16 bytes "APK Sig Block 42"
-          #
-          # It is immediately before Central Directory.
-          # ----------------------------------------------------------
-
-          footer_start = central_dir_offset - 24
-
-          if footer_start < 0:
-              print("No room for APK Signing Block.")
-              raise SystemExit(10)
-
-          footer_size = read_u64(
-              data,
-              footer_start
-          )
-
-          footer_magic = data[
-              footer_start + 8:
-              footer_start + 24
-          ]
-
-          print(
-              f"Signing block footer size: "
-              f"{footer_size}"
-          )
-
-          print(
-              f"Signing block magic: "
-              f"{footer_magic!r}"
-          )
-
-          if footer_magic != MAGIC:
-              print(
-                  "Standard APK Signing Block was not found."
-              )
-              raise SystemExit(10)
-
-          # ----------------------------------------------------------
-          # Signing Block start
-          #
-          # First field is size-of-block excluding this uint64.
-          # ----------------------------------------------------------
-
-          block_start = (
-              footer_start
-              - footer_size
-              + 8
-          )
-
-          if block_start < 0:
-              print("Invalid Signing Block start.")
-              raise SystemExit(1)
-
-          block_size = read_u64(
-              data,
-              block_start
-          )
-
-          print(
-              f"Signing block start: "
-              f"0x{block_start:x}"
-          )
-
-          print(
-              f"Signing block size: "
-              f"{block_size}"
-          )
-
-          if block_size != footer_size:
-              print(
-                  "WARNING: Signing Block size fields differ."
-              )
-
-          # ----------------------------------------------------------
-          # Parse ID/value pairs
-          # ----------------------------------------------------------
-
-          pairs_start = block_start + 8
-          pairs_end = footer_start
-
-          position = pairs_start
-
-          v2_blocks = []
-          v3_blocks = []
-
-          while position < pairs_end:
-
-              if position + 8 > pairs_end:
-                  print("Truncated pair length.")
-                  break
-
-              pair_size = read_u64(
-                  data,
-                  position
-              )
-
-              if pair_size < 4:
-                  print(
-                      f"Invalid pair size: {pair_size}"
-                  )
-                  break
-
-              pair_end = (
-                  position
-                  + 8
-                  + pair_size
-              )
-
-              if pair_end > pairs_end:
-                  print(
-                      "Pair extends beyond Signing Block."
-                  )
-                  break
-
-              pair_id = read_u32(
-                  data,
-                  position + 8
-              )
-
-              value_start = position + 12
-              value_end = pair_end
-
-              value = data[
-                  value_start:value_end
-              ]
-
-              print()
-              print(
-                  f"ID: 0x{pair_id:08x}"
-              )
-
-              print(
-                  f"Value size: {len(value)}"
-              )
-
-              print(
-                  f"Value offset: "
-                  f"0x{value_start:x}"
-              )
-
-              if pair_id == V2_ID:
-                  print("Detected APK Signature Scheme v2")
-                  v2_blocks.append(value)
-
-              elif pair_id == V3_ID:
-                  print("Detected APK Signature Scheme v3")
-                  v3_blocks.append(value)
-
-              position = pair_end
-
-          print()
-          print(
-              f"v2 blocks: {len(v2_blocks)}"
-          )
-
-          print(
-              f"v3 blocks: {len(v3_blocks)}"
-          )
-
-          # ----------------------------------------------------------
-          # Extract certificates from v2/v3 block
-          #
-          # v2:
-          #
-          #   signers
-          #     signer
-          #       signed data
-          #         digests
-          #         certificates
-          #
-          # v3:
-          #
-          #   signers
-          #     signer
-          #       signed data
-          #         digests
-          #         certificates
-          #         minSDK
-          #         maxSDK
-          # ----------------------------------------------------------
-
-          cert_hashes = set()
-          cert_counter = 0
-
-          def save_certificate(cert_der, source):
-              global cert_counter
-
-              if len(cert_der) < 64:
-                  return
-
-              # Validate with OpenSSL.
-              temp = Path(
-                  "deep-certs/.candidate.der"
-              )
-
-              temp.write_bytes(cert_der)
-
-              result = subprocess.run(
-                  [
-                      "openssl",
-                      "x509",
-                      "-inform",
-                      "DER",
-                      "-in",
-                      str(temp),
-                      "-noout",
-                  ],
-                  stdout=subprocess.PIPE,
-                  stderr=subprocess.PIPE,
-              )
-
-              temp.unlink(missing_ok=True)
-
-              if result.returncode != 0:
-                  return
-
-              digest = hashlib.sha256(
-                  cert_der
-              ).hexdigest()
-
-              if digest in cert_hashes:
-                  print(
-                      f"Duplicate certificate ignored: "
-                      f"{digest}"
-                  )
-                  return
-
-              cert_hashes.add(digest)
-
-              cert_counter += 1
-
-              output = Path(
-                  "deep-certs"
-              ) / f"deep-cert-{cert_counter}.der"
-
-              output.write_bytes(cert_der)
-
-              print()
-              print(
-                  "VALID X.509 CERTIFICATE"
-              )
-
-              print(
-                  f"Source: {source}"
-              )
-
-              print(
-                  f"File: {output}"
-              )
-
-              print(
-                  f"Size: {len(cert_der)}"
-              )
-
-              print(
-                  f"SHA-256: {digest}"
-              )
-
-
-          def parse_v2_v3_signature_block(
-              block,
-              version
+          for der in sorted(
+              Path(".").glob("telegram-cert-v*.der")
           ):
-              print()
-              print("=" * 70)
-              print(
-                  f"PARSING APK SIGNATURE SCHEME {version}"
-              )
-              print("=" * 70)
+              data = der.read_bytes()
 
-              # Top-level:
-              #
-              # length-prefixed signers
+              lines = []
 
-              try:
-                  signers, end = read_length_prefixed(
-                      block,
-                      0
+              for i in range(0, len(data), 16):
+                  chunk = data[i:i + 16]
+
+                  values = ", ".join(
+                      f"0x{b:02x}.toByte()"
+                      for b in chunk
                   )
 
-              except Exception as exc:
-                  print(
-                      f"Unable to read signers: {exc}"
-                  )
-                  return
-
-              print(
-                  f"Signers container size: "
-                  f"{len(signers)}"
-              )
-
-              position = 0
-              signer_index = 0
-
-              while position < len(signers):
-
-                  signer_index += 1
-
-                  try:
-                      signer, next_position = (
-                          read_length_prefixed(
-                              signers,
-                              position
-                          )
-                      )
-
-                  except Exception as exc:
-                      print(
-                          f"Signer #{signer_index} "
-                          f"parse error: {exc}"
-                      )
-                      break
-
-                  position = next_position
-
-                  print()
-                  print(
-                      f"Signer #{signer_index}"
+                  lines.append(
+                      f"    {values},"
                   )
 
-                  # signer begins with:
-                  #
-                  # length-prefixed signedData
+              output = "byteArrayOf(\n"
+              output += "\n".join(lines)
+              output += "\n)\n"
 
-                  try:
-                      signed_data, signer_pos = (
-                          read_length_prefixed(
-                              signer,
-                              0
-                          )
-                      )
-
-                  except Exception as exc:
-                      print(
-                          f"Unable to read signedData: "
-                          f"{exc}"
-                      )
-                      continue
-
-                  print(
-                      f"Signed data size: "
-                      f"{len(signed_data)}"
-                  )
-
-                  # signedData:
-                  #
-                  # length-prefixed digests
-                  # length-prefixed certificates
-                  #
-
-                  try:
-                      digests, sd_pos = (
-                          read_length_prefixed(
-                              signed_data,
-                              0
-                          )
-                      )
-
-                      certificates, sd_pos = (
-                          read_length_prefixed(
-                              signed_data,
-                              sd_pos
-                          )
-                      )
-
-                  except Exception as exc:
-                      print(
-                          f"Unable to read certificates: "
-                          f"{exc}"
-                      )
-                      continue
-
-                  print(
-                      f"Certificates container size: "
-                      f"{len(certificates)}"
-                  )
-
-                  # --------------------------------------------------
-                  # Certificate sequence
-                  #
-                  # It is a sequence of:
-                  #
-                  #   uint32 length
-                  #   DER certificate
-                  # --------------------------------------------------
-
-                  cert_position = 0
-                  certificate_index = 0
-
-                  while (
-                      cert_position
-                      < len(certificates)
-                  ):
-                      certificate_index += 1
-
-                      try:
-                          certificate, next_cert = (
-                              read_length_prefixed(
-                                  certificates,
-                                  cert_position
-                              )
-                          )
-
-                      except Exception as exc:
-                          print(
-                              f"Certificate #{certificate_index} "
-                              f"parse error: {exc}"
-                          )
-                          break
-
-                      cert_position = next_cert
-
-                      save_certificate(
-                          certificate,
-                          (
-                              f"APK Signature Scheme "
-                              f"{version}, "
-                              f"signer #{signer_index}, "
-                              f"certificate "
-                              f"#{certificate_index}"
-                          )
-                      )
-
-
-          # ----------------------------------------------------------
-          # Parse v2
-          # ----------------------------------------------------------
-
-          for block in v2_blocks:
-              parse_v2_v3_signature_block(
-                  block,
-                  "v2"
-              )
-
-          # ----------------------------------------------------------
-          # Parse v3
-          # ----------------------------------------------------------
-
-          for block in v3_blocks:
-              parse_v2_v3_signature_block(
-                  block,
-                  "v3"
-              )
-
-          # ----------------------------------------------------------
-          # Report
-          # ----------------------------------------------------------
-
-          print()
-          print("=" * 70)
-          print(
-              f"Certificates extracted from Signing Block: "
-              f"{cert_counter}"
-          )
-          print("=" * 70)
-
-          Path(
-              "deep-scan-report.txt"
-          ).write_text(
-              "\n".join(
-                  [
-                      "APK Signing Block scan",
-                      f"APK size: {len(data)}",
-                      f"v2 blocks: {len(v2_blocks)}",
-                      f"v3 blocks: {len(v3_blocks)}",
-                      (
-                          "certificates extracted: "
-                          f"{cert_counter}"
-                      ),
-                  ]
-              )
-              + "\n"
-          )
-
-          PY
-      # ============================================================
-      # Raw fallback scan
-      #
-      # If the APK does not have a normal Signing Block, search the
-      # entire binary for valid DER X.509 certificates.
-      # ============================================================
-      - name: Raw X.509 certificate fallback
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p raw-certs
-
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-          import subprocess
-          import hashlib
-
-          apk = Path("telegram.apk").read_bytes()
-
-          print("=" * 70)
-          print("RAW X.509 FALLBACK SCAN")
-          print("=" * 70)
-
-          candidates = []
-
-          # DER SEQUENCE with two-byte length.
-          for m in re.finditer(
-              b"\x30\x82",
-              apk
-          ):
-              start = m.start()
-
-              if start + 4 > len(apk):
-                  continue
-
-              length = int.from_bytes(
-                  apk[start + 2:start + 4],
-                  "big"
-              )
-
-              end = start + 4 + length
-
-              if end > len(apk):
-                  continue
-
-              candidates.append(
-                  apk[start:end]
-              )
-
-          # DER SEQUENCE with one-byte length.
-          for m in re.finditer(
-              b"\x30\x81",
-              apk
-          ):
-              start = m.start()
-
-              if start + 3 > len(apk):
-                  continue
-
-              length = apk[start + 2]
-
-              end = start + 3 + length
-
-              if end > len(apk):
-                  continue
-
-              candidates.append(
-                  apk[start:end]
-              )
-
-          print(
-              f"Raw DER candidates: {len(candidates)}"
-          )
-
-          seen = set()
-          valid = 0
-
-          for candidate in candidates:
-              digest = hashlib.sha256(
-                  candidate
-              ).hexdigest()
-
-              if digest in seen:
-                  continue
-
-              seen.add(digest)
-
-              temp = Path(
-                  "raw-certs/.candidate.der"
-              )
-
-              temp.write_bytes(candidate)
-
-              result = subprocess.run(
-                  [
-                      "openssl",
-                      "x509",
-                      "-inform",
-                      "DER",
-                      "-in",
-                      str(temp),
-                      "-noout",
-                  ],
-                  stdout=subprocess.PIPE,
-                  stderr=subprocess.PIPE,
-              )
-
-              temp.unlink(missing_ok=True)
-
-              if result.returncode != 0:
-                  continue
-
-              valid += 1
-
-              output = Path(
-                  "raw-certs"
-              ) / f"raw-cert-{valid}.der"
-
-              output.write_bytes(candidate)
+              out = der.with_suffix(".kt.txt")
+              out.write_text(output)
 
               print(
-                  f"VALID X.509: {output} "
-                  f"size={len(candidate)} "
-                  f"sha256={digest}"
+                  f"Generated {out} "
+                  f"({len(data)} bytes)"
               )
-
-          print(
-              f"Valid raw X.509 certificates: {valid}"
-          )
           PY
 
-      # ============================================================
-      # Convert every discovered certificate to PEM
-      # ============================================================
-      - name: Normalize all certificates
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p normalized
-
-          counter=0
-
-          # Deep parser certificates
-          for cert in deep-certs/*.der; do
-            [ -f "$cert" ] || continue
-
-            counter=$((counter + 1))
-
-            openssl x509 \
-              -inform DER \
-              -in "$cert" \
-              -out "normalized/cert-${counter}.pem"
-          done
-
-          # Raw fallback certificates
-          for cert in raw-certs/*.der; do
-            [ -f "$cert" ] || continue
-
-            counter=$((counter + 1))
-
-            openssl x509 \
-              -inform DER \
-              -in "$cert" \
-              -out "normalized/cert-${counter}.pem"
-          done
-
-          # apksigner certificates
-          for cert in certs/*.pem; do
-            [ -f "$cert" ] || continue
-
-            counter=$((counter + 1))
-
-            cp "$cert" \
-              "normalized/cert-${counter}.pem"
-          done
-
-          echo "Total certificate files:"
-          find normalized \
-            -type f \
-            -name '*.pem' \
-            -print \
-            | sort
-
-      # ============================================================
-      # Deduplicate certificates by SHA-256
-      # ============================================================
-      - name: Deduplicate certificates
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf unique-certs
-          mkdir -p unique-certs
-
-          declare -A seen
-
-          counter=0
-
-          for cert in normalized/*.pem; do
-            [ -f "$cert" ] || continue
-
-            fingerprint=$(
-              openssl x509 \
-                -in "$cert" \
-                -outform DER \
-                | sha256sum \
-                | awk '{print $1}'
-            )
-
-            if [[ -n "${seen[$fingerprint]:-}" ]]; then
-              echo "Duplicate: $cert"
-              continue
-            fi
-
-            seen[$fingerprint]=1
-
-            counter=$((counter + 1))
-
-            openssl x509 \
-              -in "$cert" \
-              -out "unique-certs/cert-${counter}.pem"
-
-            openssl x509 \
-              -in "$cert" \
-              -outform DER \
-              -out "unique-certs/cert-${counter}.der"
-
-            echo "Unique certificate #$counter"
-            echo "SHA-256: $fingerprint"
-            echo
-          done
-
-          echo "Unique certificates: $counter"
-
-          if [ "$counter" -eq 0 ]; then
-            echo
-            echo "============================================================"
-            echo "NO CERTIFICATE FOUND"
-            echo "============================================================"
-            echo
-            echo "The APK does not expose an X.509 certificate through:"
-            echo "  1. apksigner"
-            echo "  2. APK Signing Block v2/v3"
-            echo "  3. raw DER fallback scan"
-            echo
-            echo "This may mean:"
-            echo "  - the file is not a normal APK;"
-            echo "  - the APK is not signed;"
-            echo "  - the signature/certificate is outside the APK;"
-            echo "  - the file uses a signing mechanism not covered by this parser."
-            echo
-          fi
-
-      # ============================================================
-      # Print information for every unique certificate
-      # ============================================================
-      - name: Print certificate information
-        shell: bash
-        run: |
-          set +e
-
-          echo "============================================================"
-          echo "CERTIFICATE INFORMATION"
-          echo "============================================================"
-
-          for cert in unique-certs/*.pem; do
-            [ -f "$cert" ] || continue
-
-            echo
-            echo "############################################################"
-            echo "CERTIFICATE: $cert"
-            echo "############################################################"
-
-            echo
-            echo "--- SHA-256 ---"
-            openssl x509 \
-              -in "$cert" \
-              -noout \
-              -fingerprint \
-              -sha256
-
-            echo
-            echo "--- SHA-1 ---"
-            openssl x509 \
-              -in "$cert" \
-              -noout \
-              -fingerprint \
-              -sha1
-
-            echo
-            echo "--- Subject ---"
-            openssl x509 \
-              -in "$cert" \
-              -noout \
-              -subject
-
-            echo
-            echo "--- Issuer ---"
-            openssl x509 \
-              -in "$cert" \
-              -noout \
-              -issuer
-
-            echo
-            echo "--- Serial ---"
-            openssl x509 \
-              -in "$cert" \
-              -noout \
-              -serial
-
-            echo
-            echo "--- Validity ---"
-            openssl x509 \
-              -in "$cert" \
-              -noout \
-              -dates
-          done
-
-      # ============================================================
-      # Select primary certificate
-      #
-      # Priority:
-      #   1. unique certificate #1
-      #
-      # This preserves the original workflow behavior while still
-      # saving all discovered certificates.
-      # ============================================================
-      - name: Select primary certificate
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ ! -f "unique-certs/cert-1.pem" ]; then
-            echo "No certificate available."
-            exit 1
-          fi
-
-          cp \
-            unique-certs/cert-1.pem \
-            telegram-cert.pem
-
-          cp \
-            unique-certs/cert-1.der \
-            telegram-cert.der
-
-          echo "Primary certificate selected:"
-          echo "telegram-cert.pem"
-          echo "telegram-cert.der"
-
-      # ============================================================
-      # Generate Kotlin byte array from primary certificate
-      # ============================================================
-      - name: Generate Kotlin byte array
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 <<'PY'
-          from pathlib import Path
-
-          data = Path(
-              "telegram-cert.der"
-          ).read_bytes()
-
-          lines = []
-
-          for i in range(0, len(data), 16):
-              chunk = data[i:i + 16]
-
-              values = ", ".join(
-                  f"0x{b:02x}.toByte()"
-                  for b in chunk
-              )
-
-              lines.append(
-                  f"    {values},"
-              )
-
-          output = "byteArrayOf(\n"
-          output += "\n".join(lines)
-          output += "\n)\n"
-
-          Path(
-              "telegram-cert.kt.txt"
-          ).write_text(output)
-
-          print(
-              f"Certificate size: {len(data)} bytes"
-          )
-          PY
-
-      # ============================================================
-      # Print primary certificate
-      # ============================================================
-      - name: Show primary certificate
-        shell: bash
-        run: |
-          set +e
-
-          echo "============================================================"
-          echo "PRIMARY CERTIFICATE"
-          echo "============================================================"
-
-          cat telegram-cert.pem
-
-          echo
-          echo "============================================================"
-          echo "PRIMARY CERTIFICATE DER SHA-256"
-          echo "============================================================"
-
-          sha256sum telegram-cert.der
-
-          echo
-          echo "============================================================"
-          echo "KOTLIN BYTE ARRAY"
-          echo "============================================================"
-
-          cat telegram-cert.kt.txt
-
-      # ============================================================
+      # ------------------------------------------------------------
       # Upload everything
-      # ============================================================
+      # ------------------------------------------------------------
+
       - name: Upload certificate artifacts
         uses: actions/upload-artifact@v7
         with:
           name: telegram-certificate
           path: |
-            telegram-cert.pem
-            telegram-cert.der
-            telegram-cert.kt.txt
-
-            apksigner-verify.txt
-            apksigner-certs.txt
-            apksigner-certs-pem.txt
-
-            deep-scan-report.txt
-
-            certs/
-            deep-certs/
-            raw-certs/
-            normalized/
-            unique-certs/
+            telegram.apk
+            telegram-cert-v*.der
+            telegram-cert-v*.pem
+            telegram-cert-v*.kt.txt
+            certificate-output.txt
+            inspect_apk_signature.py

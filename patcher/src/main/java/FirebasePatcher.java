@@ -1,5 +1,8 @@
 import org.jf.dexlib2.DexFileFactory;
 import org.jf.dexlib2.Opcode;
+import org.jf.dexlib2.builder.MutableMethodImplementation;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction11x;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction21c;
 import org.jf.dexlib2.iface.ClassDef;
 import org.jf.dexlib2.iface.DexFile;
 import org.jf.dexlib2.iface.Method;
@@ -7,15 +10,9 @@ import org.jf.dexlib2.iface.MethodImplementation;
 import org.jf.dexlib2.iface.MultiDexContainer;
 import org.jf.dexlib2.iface.instruction.FiveRegisterInstruction;
 import org.jf.dexlib2.iface.instruction.Instruction;
-import org.jf.dexlib2.iface.instruction.OneRegisterInstruction;
+import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
 import org.jf.dexlib2.iface.reference.MethodReference;
 import org.jf.dexlib2.iface.reference.StringReference;
-import org.jf.dexlib2.iface.ReferenceInstruction;
-
-import org.jf.dexlib2.builder.MutableMethodImplementation;
-import org.jf.dexlib2.builder.instruction.BuilderInstruction11x;
-import org.jf.dexlib2.builder.instruction.BuilderInstruction21c;
-
 import org.jf.dexlib2.immutable.ImmutableClassDef;
 import org.jf.dexlib2.immutable.ImmutableDexFile;
 import org.jf.dexlib2.immutable.ImmutableMethod;
@@ -28,7 +25,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -50,8 +46,16 @@ public class FirebasePatcher {
             "getFingerprintHashForPackage";
 
     /*
-     * Firebase versions may use slightly different capitalization.
-     * Your APK uses openHttpURLConnection.
+     * IMPORTANT:
+     *
+     * Your actual smali uses:
+     *
+     * openHttpURLConnection
+     *
+     * with capital "C".
+     *
+     * We support both spellings just in case another Firebase version
+     * uses openHttpUrlConnection.
      */
     private static final String CONNECTION_METHOD =
             "openHttpURLConnection";
@@ -130,7 +134,8 @@ public class FirebasePatcher {
         Path tempDirectory =
                 Files.createTempDirectory("firebase-patcher-");
 
-        Map<String, byte[]> replacementDex = new HashMap<>();
+        Map<String, byte[]> replacementDex =
+                new HashMap<>();
 
         boolean fingerprintPatched = false;
         boolean headerPatched = false;
@@ -153,7 +158,7 @@ public class FirebasePatcher {
             for (String dexEntryName : dexEntries) {
 
                 System.out.println(
-                        "Scanning " + dexEntryName + "..."
+                        "Scanning " + dexEntryName
                 );
 
                 MultiDexContainer.DexEntry<?> entry =
@@ -167,7 +172,10 @@ public class FirebasePatcher {
                         (DexFile) entry.getDexFile();
 
                 PatchResult result =
-                        patchDex(dexFile, hash);
+                        patchDex(
+                                dexFile,
+                                hash
+                        );
 
                 if (!result.changed) {
                     continue;
@@ -201,20 +209,17 @@ public class FirebasePatcher {
                         result.headerPatched;
 
                 System.out.println(
-                        "  -> modified: " + dexEntryName
+                        "  modified: " + dexEntryName
                 );
             }
 
             /*
-             * IMPORTANT:
+             * SUCCESS CONDITION:
              *
-             * At least ONE of the two fixes must succeed.
+             * At least one of the two patches must work.
              *
-             * Fix 1:
-             * getFingerprintHashForPackage()
-             *
-             * Fix 2:
-             * X-Android-Cert request value
+             * Fix 1 = getFingerprintHashForPackage()
+             * Fix 2 = X-Android-Cert call site
              */
             if (!fingerprintPatched && !headerPatched) {
 
@@ -226,17 +231,18 @@ public class FirebasePatcher {
             }
 
             System.out.println();
+
             System.out.println(
                     "getFingerprintHashForPackage(): " +
                     (fingerprintPatched
-                            ? "PATCHED"
+                            ? "patched"
                             : "not found")
             );
 
             System.out.println(
                     "X-Android-Cert request: " +
                     (headerPatched
-                            ? "PATCHED"
+                            ? "patched"
                             : "not found")
             );
 
@@ -266,107 +272,92 @@ public class FirebasePatcher {
         for (ClassDef classDef : dexFile.getClasses()) {
 
             boolean isFirebaseClass =
-                    FIREBASE_CLASS.equals(classDef.getType());
+                    FIREBASE_CLASS.equals(
+                            classDef.getType()
+                    );
+
+            List<Method> directMethods =
+                    toMethodList(
+                            classDef.getDirectMethods()
+                    );
+
+            List<Method> virtualMethods =
+                    toMethodList(
+                            classDef.getVirtualMethods()
+                    );
 
             boolean classChanged = false;
 
-            List<Method> directMethods =
-                    new ArrayList<>();
-
-            List<Method> virtualMethods =
-                    new ArrayList<>();
-
             /*
-             * Direct methods
+             * Direct methods.
              */
-            for (Method method : classDef.getDirectMethods()) {
+            for (int i = 0;
+                 i < directMethods.size();
+                 i++) {
 
-                Method patched =
+                Method method =
+                        directMethods.get(i);
+
+                PatchMethodResult result =
                         patchMethod(
                                 method,
                                 isFirebaseClass,
                                 hash
                         );
 
-                if (patched != method) {
+                if (result.method != method) {
+
+                    directMethods.set(
+                            i,
+                            result.method
+                    );
 
                     classChanged = true;
 
-                    if (FINGERPRINT_METHOD.equals(
-                            method.getName()
-                    )) {
-                        fingerprintPatched = true;
+                    fingerprintPatched |=
+                            result.fingerprintPatched;
 
-                        System.out.println(
-                                "  [Fix 1] Patched " +
-                                classDef.getType() +
-                                "->" +
-                                method.getName()
-                        );
-                    }
-
-                    if (containsCertificateHeader(method)) {
-                        headerPatched = true;
-
-                        System.out.println(
-                                "  [Fix 2] Patched " +
-                                classDef.getType() +
-                                "->" +
-                                method.getName()
-                        );
-                    }
+                    headerPatched |=
+                            result.headerPatched;
                 }
-
-                directMethods.add(patched);
             }
 
             /*
-             * Virtual methods
+             * Virtual methods.
              */
-            for (Method method : classDef.getVirtualMethods()) {
+            for (int i = 0;
+                 i < virtualMethods.size();
+                 i++) {
 
-                Method patched =
+                Method method =
+                        virtualMethods.get(i);
+
+                PatchMethodResult result =
                         patchMethod(
                                 method,
                                 isFirebaseClass,
                                 hash
                         );
 
-                if (patched != method) {
+                if (result.method != method) {
+
+                    virtualMethods.set(
+                            i,
+                            result.method
+                    );
 
                     classChanged = true;
 
-                    if (FINGERPRINT_METHOD.equals(
-                            method.getName()
-                    )) {
-                        fingerprintPatched = true;
+                    fingerprintPatched |=
+                            result.fingerprintPatched;
 
-                        System.out.println(
-                                "  [Fix 1] Patched " +
-                                classDef.getType() +
-                                "->" +
-                                method.getName()
-                        );
-                    }
-
-                    if (containsCertificateHeader(method)) {
-                        headerPatched = true;
-
-                        System.out.println(
-                                "  [Fix 2] Patched " +
-                                classDef.getType() +
-                                "->" +
-                                method.getName()
-                        );
-                    }
+                    headerPatched |=
+                            result.headerPatched;
                 }
-
-                virtualMethods.add(patched);
             }
 
             /*
-             * Preserve every class.
-             * Replace only modified classes.
+             * Rebuild only changed classes.
              */
             if (classChanged) {
 
@@ -401,7 +392,7 @@ public class FirebasePatcher {
         );
     }
 
-    private static Method patchMethod(
+    private static PatchMethodResult patchMethod(
             Method method,
             boolean isFirebaseClass,
             String hash
@@ -411,7 +402,9 @@ public class FirebasePatcher {
                 method.getImplementation();
 
         if (implementation == null) {
-            return method;
+            return PatchMethodResult.unchanged(
+                    method
+            );
         }
 
         /*
@@ -428,9 +421,11 @@ public class FirebasePatcher {
          * const-string v0, "<SHA1>"
          * return-object v0
          */
-        if (isFirebaseClass &&
-                FINGERPRINT_METHOD.equals(method.getName()) &&
-                "Ljava/lang/String;".equals(method.getReturnType())) {
+        if (isFirebaseClass
+                && FINGERPRINT_METHOD.equals(
+                        method.getName())
+                && "Ljava/lang/String;".equals(
+                        method.getReturnType())) {
 
             int registers =
                     Math.max(
@@ -447,7 +442,9 @@ public class FirebasePatcher {
                     new BuilderInstruction21c(
                             Opcode.CONST_STRING,
                             0,
-                            new ImmutableStringReference(hash)
+                            new ImmutableStringReference(
+                                    hash
+                            )
                     )
             );
 
@@ -458,15 +455,29 @@ public class FirebasePatcher {
                     )
             );
 
-            return new ImmutableMethod(
-                    method.getDefiningClass(),
-                    method.getName(),
-                    method.getParameters(),
-                    method.getReturnType(),
-                    method.getAccessFlags(),
-                    method.getAnnotations(),
-                    method.getHiddenApiRestrictions(),
-                    replacement
+            Method patchedMethod =
+                    new ImmutableMethod(
+                            method.getDefiningClass(),
+                            method.getName(),
+                            method.getParameters(),
+                            method.getReturnType(),
+                            method.getAccessFlags(),
+                            method.getAnnotations(),
+                            method.getHiddenApiRestrictions(),
+                            replacement
+                    );
+
+            System.out.println(
+                    "  [Fix 1] Patched " +
+                    method.getDefiningClass() +
+                    "->" +
+                    method.getName()
+            );
+
+            return new PatchMethodResult(
+                    patchedMethod,
+                    true,
+                    false
             );
         }
 
@@ -475,279 +486,148 @@ public class FirebasePatcher {
          * FIX 2
          * ============================================================
          *
-         * Exact structure from your APK:
+         * Your actual smali is:
          *
          * const-string v0, "X-Android-Cert"
          *
          * invoke-direct {p0},
-         *   ...->getFingerprintHashForPackage()Ljava/lang/String;
+         *   Lcom/google/firebase/installations/remote/
+         *   FirebaseInstallationServiceClient;
+         *   ->getFingerprintHashForPackage()Ljava/lang/String;
          *
          * move-result-object v1
          *
          * invoke-virtual {p1, v0, v1},
-         *   Ljava/net/HttpURLConnection;->addRequestProperty(...)
+         *   Ljava/net/HttpURLConnection;
+         *   ->addRequestProperty(
+         *      Ljava/lang/String;
+         *      Ljava/lang/String;
+         *   )V
          *
-         * We insert:
+         * We find the X-Android-Cert string,
+         * then the next addRequestProperty(),
+         * and overwrite its value register.
          *
-         * const-string v1, "<SHA1>"
-         *
-         * immediately AFTER move-result-object.
-         *
-         * This means we do not depend on a hardcoded v1.
-         * The destination register is read from the DEX.
+         * In your actual APK this is v1.
+         * ============================================================
          */
-        if (isConnectionMethod(method.getName())) {
+        if (isConnectionMethod(
+                method.getName()
+        )) {
 
             List<Instruction> instructions =
-                    toList(
+                    toInstructionList(
                             implementation.getInstructions()
                     );
 
-            int headerIndex = -1;
-
-            /*
-             * Find:
-             *
-             * const-string ..., "X-Android-Cert"
-             */
-            for (int i = 0; i < instructions.size(); i++) {
-
-                Instruction instruction =
-                        instructions.get(i);
-
-                if (!(instruction instanceof ReferenceInstruction)) {
-                    continue;
-                }
-
-                Object reference =
-                        ((ReferenceInstruction) instruction)
-                                .getReference();
-
-                if (!(reference instanceof StringReference)) {
-                    continue;
-                }
-
-                String value =
-                        ((StringReference) reference)
-                                .getString();
-
-                if (CERT_HEADER.equals(value)) {
-
-                    headerIndex = i;
-
-                    System.out.println(
-                            "  [Fix 2] Found X-Android-Cert in " +
-                            method.getDefiningClass() +
-                            "->" +
-                            method.getName()
+            int anchorIndex =
+                    findCertificateHeaderString(
+                            instructions
                     );
 
-                    break;
-                }
-            }
-
-            if (headerIndex < 0) {
-                return method;
-            }
-
-            /*
-             * Search forward for:
-             *
-             * invoke-direct ... getFingerprintHashForPackage()
-             */
-            int fingerprintInvokeIndex = -1;
-
-            for (
-                    int i = headerIndex + 1;
-                    i < instructions.size();
-                    i++
-            ) {
-
-                Instruction instruction =
-                        instructions.get(i);
-
-                if (!(instruction instanceof ReferenceInstruction)) {
-                    continue;
-                }
-
-                Object reference =
-                        ((ReferenceInstruction) instruction)
-                                .getReference();
-
-                if (!(reference instanceof MethodReference)) {
-                    continue;
-                }
-
-                MethodReference methodReference =
-                        (MethodReference) reference;
-
-                if (!FINGERPRINT_METHOD.equals(
-                        methodReference.getName()
-                )) {
-                    continue;
-                }
-
-                if (!"Ljava/lang/String;".equals(
-                        methodReference.getReturnType()
-                )) {
-                    continue;
-                }
-
-                fingerprintInvokeIndex = i;
-                break;
-            }
-
-            if (fingerprintInvokeIndex < 0) {
+            if (anchorIndex < 0) {
 
                 System.out.println(
-                        "  [Fix 2] getFingerprintHashForPackage() " +
-                        "call not found after X-Android-Cert"
+                        "  [Fix 2] X-Android-Cert string " +
+                        "not found in " +
+                        method.getDefiningClass() +
+                        "->" +
+                        method.getName()
                 );
 
-                return method;
+                return PatchMethodResult.unchanged(
+                        method
+                );
             }
+
+            System.out.println(
+                    "  [Fix 2] Found X-Android-Cert in " +
+                    method.getDefiningClass() +
+                    "->" +
+                    method.getName()
+            );
 
             /*
-             * The next instruction must be:
+             * Find the next addRequestProperty().
              *
-             * move-result-object vX
+             * This is intentionally exactly the Morphe-style
+             * anchor -> next invoke approach.
              */
-            int moveResultIndex =
-                    fingerprintInvokeIndex + 1;
-
-            if (moveResultIndex >= instructions.size()) {
-                return method;
-            }
-
-            Instruction moveResult =
-                    instructions.get(moveResultIndex);
-
-            if (moveResult.getOpcode() !=
-                    Opcode.MOVE_RESULT_OBJECT) {
-
-                System.out.println(
-                        "  [Fix 2] Expected move-result-object " +
-                        "after getFingerprintHashForPackage()"
-                );
-
-                return method;
-            }
-
-            if (!(moveResult instanceof OneRegisterInstruction)) {
-
-                System.out.println(
-                        "  [Fix 2] move-result-object does not " +
-                        "expose a destination register"
-                );
-
-                return method;
-            }
-
-            int valueRegister =
-                    ((OneRegisterInstruction) moveResult)
-                            .getRegisterA();
-
-            /*
-             * Verify that the register really reaches
-             * addRequestProperty().
-             *
-             * We search a short distance forward because the
-             * Firebase method has the exact sequence:
-             *
-             * move-result-object
-             * invoke-virtual addRequestProperty
-             */
-            int requestPropertyIndex = -1;
-
-            for (
-                    int i = moveResultIndex + 1;
-                    i < instructions.size() &&
-                    i <= moveResultIndex + 8;
-                    i++
-            ) {
-
-                Instruction instruction =
-                        instructions.get(i);
-
-                if (!(instruction instanceof ReferenceInstruction)) {
-                    continue;
-                }
-
-                Object reference =
-                        ((ReferenceInstruction) instruction)
-                                .getReference();
-
-                if (!(reference instanceof MethodReference)) {
-                    continue;
-                }
-
-                MethodReference methodReference =
-                        (MethodReference) reference;
-
-                if (!ADD_REQUEST_PROPERTY.equals(
-                        methodReference.getName()
-                )) {
-                    continue;
-                }
-
-                if (!(instruction instanceof FiveRegisterInstruction)) {
-
-                    System.out.println(
-                            "  [Fix 2] addRequestProperty() is not " +
-                            "a five-register instruction"
+            int requestPropertyIndex =
+                    findAddRequestPropertyAfter(
+                            instructions,
+                            anchorIndex
                     );
-
-                    return method;
-                }
-
-                FiveRegisterInstruction invoke =
-                        (FiveRegisterInstruction) instruction;
-
-                /*
-                 * In:
-                 *
-                 * invoke-virtual {p1, v0, v1}, ...
-                 *
-                 * v1 is registerE.
-                 */
-                int requestValueRegister =
-                        invoke.getRegisterE();
-
-                if (requestValueRegister != valueRegister) {
-
-                    System.out.println(
-                            "  [Fix 2] Register mismatch: " +
-                            "move-result=v" + valueRegister +
-                            ", addRequestProperty=v" +
-                            requestValueRegister
-                    );
-
-                    return method;
-                }
-
-                requestPropertyIndex = i;
-                break;
-            }
 
             if (requestPropertyIndex < 0) {
 
                 System.out.println(
-                        "  [Fix 2] addRequestProperty() was not " +
-                        "found after getFingerprintHashForPackage()"
+                        "  [Fix 2] addRequestProperty() " +
+                        "not found after X-Android-Cert"
                 );
 
-                return method;
+                return PatchMethodResult.unchanged(
+                        method
+                );
+            }
+
+            Instruction addRequestProperty =
+                    instructions.get(
+                            requestPropertyIndex
+                    );
+
+            /*
+             * invoke-virtual {p1, v0, v1}, ...
+             *
+             * registerE = v1
+             *
+             * This is exactly what Morphe uses.
+             */
+            if (!(addRequestProperty
+                    instanceof FiveRegisterInstruction)) {
+
+                System.out.println(
+                        "  [Fix 2] addRequestProperty() " +
+                        "is not FiveRegisterInstruction"
+                );
+
+                return PatchMethodResult.unchanged(
+                        method
+                );
+            }
+
+            int valueRegister =
+                    ((FiveRegisterInstruction)
+                            addRequestProperty)
+                            .getRegisterE();
+
+            /*
+             * const-string is format 21c.
+             * The register must therefore fit in 8 bits.
+             */
+            if (valueRegister < 0
+                    || valueRegister > 255) {
+
+                System.out.println(
+                        "  [Fix 2] Invalid value register v" +
+                        valueRegister
+                );
+
+                return PatchMethodResult.unchanged(
+                        method
+                );
             }
 
             /*
-             * Insert:
+             * Insert immediately BEFORE:
              *
-             * const-string vX, "<SHA1>"
+             * invoke-virtual {p1, v0, v1},
+             *     ...->addRequestProperty(...)
              *
-             * immediately AFTER move-result-object.
+             * Result:
              *
-             * This leaves the original Firebase call intact,
-             * but overwrites its result before it is sent.
+             * const-string v1, "<SHA1>"
+             * invoke-virtual {p1, v0, v1}, ...
              */
             MutableMethodImplementation mutable =
                     new MutableMethodImplementation(
@@ -755,33 +635,44 @@ public class FirebasePatcher {
                     );
 
             mutable.addInstruction(
-                    moveResultIndex + 1,
+                    requestPropertyIndex,
                     new BuilderInstruction21c(
                             Opcode.CONST_STRING,
                             valueRegister,
-                            new ImmutableStringReference(hash)
+                            new ImmutableStringReference(
+                                    hash
+                            )
                     )
             );
 
+            Method patchedMethod =
+                    new ImmutableMethod(
+                            method.getDefiningClass(),
+                            method.getName(),
+                            method.getParameters(),
+                            method.getReturnType(),
+                            method.getAccessFlags(),
+                            method.getAnnotations(),
+                            method.getHiddenApiRestrictions(),
+                            mutable
+                    );
+
             System.out.println(
-                    "  [Fix 2] Injected SHA-1 into v" +
-                    valueRegister +
-                    " before X-Android-Cert request"
+                    "  [Fix 2] Patched X-Android-Cert " +
+                    "request, value register v" +
+                    valueRegister
             );
 
-            return new ImmutableMethod(
-                    method.getDefiningClass(),
-                    method.getName(),
-                    method.getParameters(),
-                    method.getReturnType(),
-                    method.getAccessFlags(),
-                    method.getAnnotations(),
-                    method.getHiddenApiRestrictions(),
-                    mutable
+            return new PatchMethodResult(
+                    patchedMethod,
+                    false,
+                    true
             );
         }
 
-        return method;
+        return PatchMethodResult.unchanged(
+                method
+        );
     }
 
     private static boolean isConnectionMethod(
@@ -791,43 +682,129 @@ public class FirebasePatcher {
                 || CONNECTION_METHOD_ALT.equals(name);
     }
 
-    private static boolean containsCertificateHeader(
-            Method method
+    private static int findCertificateHeaderString(
+            List<Instruction> instructions
     ) {
 
-        MethodImplementation implementation =
-                method.getImplementation();
+        for (int i = 0;
+             i < instructions.size();
+             i++) {
 
-        if (implementation == null) {
-            return false;
-        }
+            Instruction instruction =
+                    instructions.get(i);
 
-        for (Instruction instruction :
-                implementation.getInstructions()) {
-
-            if (!(instruction instanceof ReferenceInstruction)) {
+            if (!(instruction
+                    instanceof ReferenceInstruction)) {
                 continue;
             }
 
             Object reference =
-                    ((ReferenceInstruction) instruction)
+                    ((ReferenceInstruction)
+                            instruction)
                             .getReference();
 
-            if (!(reference instanceof StringReference)) {
+            if (!(reference
+                    instanceof StringReference)) {
                 continue;
             }
 
-            if (CERT_HEADER.equals(
-                    ((StringReference) reference).getString()
-            )) {
-                return true;
+            String value =
+                    ((StringReference)
+                            reference)
+                            .getString();
+
+            if (CERT_HEADER.equals(value)) {
+                return i;
             }
         }
 
-        return false;
+        return -1;
     }
 
-    private static List<Instruction> toList(
+    private static int findAddRequestPropertyAfter(
+            List<Instruction> instructions,
+            int anchorIndex
+    ) {
+
+        for (int i = anchorIndex + 1;
+             i < instructions.size();
+             i++) {
+
+            Instruction instruction =
+                    instructions.get(i);
+
+            if (!(instruction
+                    instanceof ReferenceInstruction)) {
+                continue;
+            }
+
+            Object reference =
+                    ((ReferenceInstruction)
+                            instruction)
+                            .getReference();
+
+            if (!(reference
+                    instanceof MethodReference)) {
+                continue;
+            }
+
+            MethodReference methodReference =
+                    (MethodReference) reference;
+
+            if (!ADD_REQUEST_PROPERTY.equals(
+                    methodReference.getName()
+            )) {
+                continue;
+            }
+
+            /*
+             * We need:
+             *
+             * addRequestProperty(String, String)
+             */
+            if (methodReference
+                    .getParameterTypes()
+                    .size() != 2) {
+                continue;
+            }
+
+            if (!"Ljava/lang/String;".equals(
+                    methodReference
+                            .getParameterTypes()
+                            .get(0)
+            )) {
+                continue;
+            }
+
+            if (!"Ljava/lang/String;".equals(
+                    methodReference
+                            .getParameterTypes()
+                            .get(1)
+            )) {
+                continue;
+            }
+
+            return i;
+        }
+
+        return -1;
+    }
+
+    private static List<Method> toMethodList(
+            Iterable<? extends Method> methods
+    ) {
+
+        List<Method> result =
+                new ArrayList<>();
+
+        for (Method method : methods) {
+            result.add(method);
+        }
+
+        return result;
+    }
+
+    private static List<Instruction> toInstructionList(
             Iterable<? extends Instruction> instructions
     ) {
 
@@ -876,8 +853,8 @@ public class FirebasePatcher {
                         entry.getName();
 
                 /*
-                 * Remove old APK signing files.
-                 * APK will be signed again later.
+                 * Remove old APK signatures.
+                 * The APK will be signed again by apksigner.
                  */
                 if (isSignatureFile(name)) {
                     continue;
@@ -890,21 +867,26 @@ public class FirebasePatcher {
                         entry.getTime()
                 );
 
-                zos.putNextEntry(newEntry);
+                zos.putNextEntry(
+                        newEntry
+                );
 
                 byte[] replacement =
                         replacementDex.get(name);
 
                 if (replacement != null) {
 
-                    zos.write(replacement);
+                    zos.write(
+                            replacement
+                    );
 
                 } else {
 
                     int read;
 
                     while (
-                            (read = zis.read(buffer)) != -1
+                            (read = zis.read(buffer))
+                                    != -1
                     ) {
 
                         zos.write(
@@ -929,7 +911,9 @@ public class FirebasePatcher {
         }
 
         String upper =
-                name.toUpperCase(Locale.ROOT);
+                name.toUpperCase(
+                        Locale.ROOT
+                );
 
         return upper.endsWith(".SF")
                 || upper.endsWith(".RSA")
@@ -960,11 +944,49 @@ public class FirebasePatcher {
                     .forEach(
                             p -> {
                                 try {
-                                    Files.deleteIfExists(p);
+                                    Files.deleteIfExists(
+                                            p
+                                    );
                                 } catch (IOException ignored) {
                                 }
                             }
                     );
+        }
+    }
+
+    private static final class PatchMethodResult {
+
+        final Method method;
+
+        final boolean fingerprintPatched;
+
+        final boolean headerPatched;
+
+        PatchMethodResult(
+                Method method,
+                boolean fingerprintPatched,
+                boolean headerPatched
+        ) {
+
+            this.method =
+                    method;
+
+            this.fingerprintPatched =
+                    fingerprintPatched;
+
+            this.headerPatched =
+                    headerPatched;
+        }
+
+        static PatchMethodResult unchanged(
+                Method method
+        ) {
+
+            return new PatchMethodResult(
+                    method,
+                    false,
+                    false
+            );
         }
     }
 

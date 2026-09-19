@@ -269,9 +269,9 @@ public class FirebasePatcher {
             }
 
             if (!directMethods.equals(
-                    new ArrayList<Method>(classDef.getDirectMethods()))
+                    toMethodList(classDef.getDirectMethods()))
                     || !virtualMethods.equals(
-                    new ArrayList<Method>(classDef.getVirtualMethods()))) {
+                    toMethodList(classDef.getVirtualMethods()))) {
 
                 modifiedClasses.add(
                         new ImmutableClassDef(

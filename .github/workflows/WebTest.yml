@@ -20,6 +20,10 @@ on:
         description: "use the official package name"
         type: boolean
         default: false
+      app-name:
+        description: "artifact name"
+        type: string
+        default: Telegram-Mod
 
 env:
   CCACHE_DIR: ~/.ccache
@@ -412,6 +416,7 @@ jobs:
 
           ./gradlew \
             :TMessagesProj_AppStandalone:assembleAfatStandalone
+          mv TMessagesProj_AppStandalone/build/outputs/apk/afat/release/app.apk ${{ inputs.app-name }}.apk
 
       # ============================================================
       # VERIFY APK PACKAGE + SIGNATURE + SHA-256

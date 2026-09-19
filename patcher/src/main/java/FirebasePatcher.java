@@ -642,8 +642,8 @@ public class FirebasePatcher {
 
         for (Instruction instruction : instructions) {
 
-            if (!(instruction
-                    instanceof org.jf.dexlib2.iface.instruction.ReferenceInstruction)) {
+            if (!(instruction instanceof
+                    org.jf.dexlib2.iface.instruction.ReferenceInstruction)) {
                 continue;
             }
 
@@ -652,26 +652,67 @@ public class FirebasePatcher {
                             instruction)
                             .getReference();
 
-            if (reference instanceof MethodReference) {
+            if (!(reference instanceof MethodReference)) {
+                continue;
+            }
 
-                String name =
-                        ((MethodReference) reference)
-                                .getName();
+            MethodReference method =
+                    (MethodReference) reference;
 
-                if (GET_CERT_BYTES.equals(name)) {
-                    foundCertificateBytes = true;
-                }
+            String definingClass =
+                    method.getDefiningClass();
 
-                if (BYTES_TO_HEX.equals(name)) {
-                    foundHexConversion = true;
-                }
+            String name =
+                    method.getName();
+
+            List<? extends CharSequence> parameters =
+                    method.getParameterTypes();
+
+            String returnType =
+                    method.getReturnType();
+
+            if (definingClass.equals(
+                    "Lcom/google/android/gms/common/util/AndroidUtilsLight;"
+            )
+                    && name.equals(
+                    "getPackageCertificateHashBytes"
+            )
+                    && parameters.size() == 2
+                    && "Landroid/content/Context;".contentEquals(
+                    parameters.get(0)
+            )
+                    && "Ljava/lang/String;".contentEquals(
+                    parameters.get(1)
+            )
+                    && "[B".equals(returnType)) {
+
+                foundCertificateBytes = true;
+            }
+
+            if (definingClass.equals(
+                    "Lcom/google/android/gms/common/util/Hex;"
+            )
+                    && name.equals(
+                    "bytesToStringUppercase"
+            )
+                    && parameters.size() == 2
+                    && "[B".equals(
+                    parameters.get(0)
+            )
+                    && "Z".equals(
+                    parameters.get(1)
+            )
+                    && "Ljava/lang/String;".equals(
+                    returnType
+            )) {
+
+                foundHexConversion = true;
             }
         }
 
         return foundCertificateBytes
                 && foundHexConversion;
     }
-
     private static int findCertificateHeaderString(
             List<Instruction> instructions
     ) {

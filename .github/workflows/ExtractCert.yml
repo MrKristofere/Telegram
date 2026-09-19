@@ -2,13 +2,19 @@ name: Extract Telegram certificate
 
 on:
   workflow_dispatch:
+    inputs:
+      link:
+        description: "apk link"
+        type: string
+        default: "https://github.com/MrKristofere/Telegram/releases/download/Tst/Telegram.apk"
+        required: true
 
 jobs:
   extract-cert:
     runs-on: ubuntu-latest
 
     env:
-      APK_URL: https://github.com/MrKristofere/Telegram/releases/download/Tst/Telegram.apk
+      APK_URL: ${{ inputs.link }}
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
       BUILD_TOOLS_VERSION: "36.1.0"
 

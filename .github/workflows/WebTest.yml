@@ -12,6 +12,7 @@ on:
         description: "use another pkg name"
         type: string
         default: aex.telegram
+        required: true
       appidhash:
         description: "use another APP_ID/APP_HASH"
         type: boolean
@@ -20,6 +21,11 @@ on:
         description: "use the official package name"
         type: boolean
         default: false
+      app-name:
+        description: "artifact name"
+        type: string
+        default: Telegram-Mod
+        required: true
 
 env:
   CCACHE_DIR: ~/.ccache
@@ -325,6 +331,7 @@ jobs:
           cache-read-only: false
           gradle-home-cache-excludes: |
             caches/build-cache-1
+            caches/keyrings
 
       # ============================================================
       # CONFIGURE RELEASE SIGNING
@@ -412,6 +419,17 @@ jobs:
 
           ./gradlew \
             :TMessagesProj_AppStandalone:assembleAfatStandalone
+
+      - name: Rename APK
+        run: |
+          APK=$(find TMessagesProj_AppStandalone/build/outputs -type f -name 'app.apk' -print -quit)
+
+          if [[ -z "$APK" ]]; then
+            echo "APK not found"
+            exit 1
+          fi
+
+          mv "$APK" "TMessagesProj_AppStandalone/build/outputs/${{ inputs.app-name }}.apk"
 
       # ============================================================
       # VERIFY APK PACKAGE + SIGNATURE + SHA-256

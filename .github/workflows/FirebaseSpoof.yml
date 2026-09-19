@@ -201,7 +201,7 @@ jobs:
         run: |
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
             --ks release.keystore \
-            --ks-key-alias "env:KEY_ALIAS" \
+            --ks-key-alias "$KEY_ALIAS" \
             --ks-pass "env:KEYSTORE_PASSWORD" \
             --key-pass "env:KEY_PASSWORD" \
             --out patched.apk \

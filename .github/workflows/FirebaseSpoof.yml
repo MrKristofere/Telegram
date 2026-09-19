@@ -12,6 +12,7 @@ on:
         description: "Original Firebase certificate SHA-1"
         required: true
         type: string
+        default: "9723E5838612E9C7C08CA2C6573B6026D7A51F8F"
 
 permissions:
   contents: read

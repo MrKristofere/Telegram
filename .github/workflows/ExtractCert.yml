@@ -204,7 +204,8 @@ jobs:
 
                   digest = hashlib.sha256(cert).hexdigest().upper()
 
-                  # Same certificate can occur in v2 and v3.
+                  # Один и тот же сертификат может находиться
+                  # одновременно в v2 и v3.
                   if digest in found:
                       continue
 
@@ -214,39 +215,63 @@ jobs:
                       cert
                   )
 
-                  count += 1
+                  number = len(found)
 
-                                    der = Path(
-                      f"telegram-cert-{len(found)+1}.der"
+                  der = Path(
+                      f"telegram-cert-{number}.der"
                   )
                   pem = der.with_suffix(".pem")
                   info = der.with_suffix(".txt")
                   kt = der.with_suffix(".kt.txt")
 
-                  # Save DER
+                  # --------------------------------------------------
+                  # DER
+                  # --------------------------------------------------
+
                   der.write_bytes(cert)
 
+                  # --------------------------------------------------
                   # SHA
-                  sha256 = hashlib.sha256(cert).hexdigest().upper()
-                  sha1 = hashlib.sha1(cert).hexdigest().upper()
+                  # --------------------------------------------------
 
-                  # Convert DER -> PEM
+                  sha256 = hashlib.sha256(
+                      cert
+                  ).hexdigest().upper()
+
+                  sha1 = hashlib.sha1(
+                      cert
+                  ).hexdigest().upper()
+
+                  # --------------------------------------------------
+                  # PEM
+                  # --------------------------------------------------
+
                   subprocess.run(
                       [
-                          "openssl", "x509",
-                          "-inform", "DER",
-                          "-in", str(der),
-                          "-out", str(pem)
+                          "openssl",
+                          "x509",
+                          "-inform",
+                          "DER",
+                          "-in",
+                          str(der),
+                          "-out",
+                          str(pem)
                       ],
                       check=True
                   )
 
-                  # Get full certificate information
+                  # --------------------------------------------------
+                  # Certificate information
+                  # --------------------------------------------------
+
                   cert_info = subprocess.run(
                       [
-                          "openssl", "x509",
-                          "-inform", "DER",
-                          "-in", str(der),
+                          "openssl",
+                          "x509",
+                          "-inform",
+                          "DER",
+                          "-in",
+                          str(der),
                           "-noout",
                           "-subject",
                           "-issuer",
@@ -263,9 +288,12 @@ jobs:
                       check=True
                   ).stdout
 
-                  # Save certificate information
+                  # --------------------------------------------------
+                  # TXT
+                  # --------------------------------------------------
+
                   info.write_text(
-                      f"Certificate #{len(found)+1}\n"
+                      f"Certificate #{number}\n"
                       f"Signature scheme: v{version}\n"
                       f"Offset: 0x{p:08X}\n"
                       f"End: 0x{p + len(cert):08X}\n"
@@ -278,7 +306,10 @@ jobs:
                       encoding="utf-8"
                   )
 
-                  # Generate Kotlin byteArrayOf
+                  # --------------------------------------------------
+                  # Kotlin
+                  # --------------------------------------------------
+
                   values = ", ".join(
                       f"0x{x:02x}.toByte()"
                       for x in cert
@@ -291,8 +322,12 @@ jobs:
                       encoding="utf-8"
                   )
 
+                  # --------------------------------------------------
+                  # Console
+                  # --------------------------------------------------
+
                   print(
-                      f"  FOUND certificate #{len(found)}"
+                      f"  FOUND certificate #{number}"
                   )
                   print(
                       f"    Version: v{version}"
@@ -326,7 +361,9 @@ jobs:
                   )
 
               print(
-                  f"  Certificates in v{version}: {count}"
+                  f"  Certificates in v{version}: {sum("
+                  f"1 for v, _, _ in found.values() if v == version"
+                  ")}"
               )
 
           print()

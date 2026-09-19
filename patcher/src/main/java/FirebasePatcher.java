@@ -42,6 +42,18 @@ public class FirebasePatcher {
     private static final String CERT_HEADER = "X-Android-Cert";
     private static final String ADD_REQUEST_PROPERTY = "addRequestProperty";
 
+    private static final String PACKAGE_INFO_SIGNATURES =
+            "Landroid/content/pm/PackageInfo;->signatures";
+
+    private static final String SIGNATURE_TO_BYTE_ARRAY =
+            "Landroid/content/pm/Signature;->toByteArray";
+
+    private static final String MESSAGE_DIGEST_GET_INSTANCE =
+            "Ljava/security/MessageDigest;->getInstance";
+
+    private static final String MESSAGE_DIGEST_DIGEST =
+            "Ljava/security/MessageDigest;->digest";
+
     public static void main(String[] args) throws Exception {
         if (args.length != 3) {
             System.err.println(
@@ -126,7 +138,6 @@ public class FirebasePatcher {
             );
 
             for (String dexEntryName : dexEntries) {
-                System.out.println();
                 System.out.println(
                         "Scanning " + dexEntryName
                 );
@@ -184,26 +195,27 @@ public class FirebasePatcher {
                 );
             }
 
-            if (!fingerprintPatched) {
+            if (!fingerprintPatched && !headerPatched) {
                 throw new IllegalStateException(
-                        "Fix 1 failed: Firebase certificate " +
-                        "fingerprint code was not found."
-                );
-            }
-
-            if (!headerPatched) {
-                throw new IllegalStateException(
-                        "Fix 2 failed: X-Android-Cert request " +
-                        "was not found."
+                        "Firebase targets were not found. " +
+                        "Neither certificate fingerprint nor " +
+                        "X-Android-Cert request could be patched."
                 );
             }
 
             System.out.println();
             System.out.println(
-                    "[RESULT] Firebase certificate: patched"
+                    "Certificate fingerprint: " +
+                    (fingerprintPatched
+                            ? "patched"
+                            : "not found")
             );
+
             System.out.println(
-                    "[RESULT] X-Android-Cert request: patched"
+                    "X-Android-Cert request: " +
+                    (headerPatched
+                            ? "patched"
+                            : "not found")
             );
 
             rebuildApk(
@@ -241,9 +253,7 @@ public class FirebasePatcher {
 
             boolean classChanged = false;
 
-            for (int i = 0;
-                 i < directMethods.size();
-                 i++) {
+            for (int i = 0; i < directMethods.size(); i++) {
 
                 Method method =
                         directMethods.get(i);
@@ -270,9 +280,7 @@ public class FirebasePatcher {
                 }
             }
 
-            for (int i = 0;
-                 i < virtualMethods.size();
-                 i++) {
+            for (int i = 0; i < virtualMethods.size(); i++) {
 
                 Method method =
                         virtualMethods.get(i);
@@ -337,9 +345,7 @@ public class FirebasePatcher {
                 method.getImplementation();
 
         if (implementation == null) {
-            return PatchMethodResult.unchanged(
-                    method
-            );
+            return PatchMethodResult.unchanged(method);
         }
 
         List<Instruction> instructions =
@@ -352,133 +358,109 @@ public class FirebasePatcher {
          * FIX 1
          * ============================================================
          *
-         * Current APK certificate calculation:
+         * Detect the real certificate-generation code structurally.
+         *
+         * Current APK:
          *
          * PackageInfo.signatures
-         *       |
-         *       v
+         *       ↓
+         * "SHA1"
+         *       ↓
+         * MessageDigest.getInstance()
+         *       ↓
          * Signature.toByteArray()
-         *       |
-         *       v
-         * MessageDigest.getInstance("SHA1")
-         *       |
-         *       v
+         *       ↓
          * MessageDigest.digest()
-         *       |
-         *       v
+         *       ↓
          * hex String
+         *       ↓
+         * X-Android-Cert
          *
-         * The current APK does NOT use:
+         * We do NOT replace the whole method because the method also
+         * creates and configures the HttpURLConnection.
          *
-         * getPackageCertificateHashBytes()
-         *
-         * as a separate Firebase method.
-         *
-         * Therefore we identify the calculation structurally.
-         *
-         * We do NOT replace the whole method because the same method
-         * also creates/configures HttpURLConnection.
+         * Instead we find the X-Android-Cert request inside the same
+         * certificate-generation method and override only the value
+         * register.
          */
 
-        boolean certificateGeneration =
-                isCertificateGenerationMethod(
-                        instructions
-                );
+        if (containsCertificateGeneration(instructions)
+                && findCertificateHeaderString(instructions) >= 0) {
 
-        int headerIndex =
-                findCertificateHeaderString(
-                        instructions
-                );
-
-        if (certificateGeneration
-                && headerIndex >= 0) {
+            int anchorIndex =
+                    findCertificateHeaderString(instructions);
 
             int requestPropertyIndex =
                     findAddRequestPropertyAfter(
                             instructions,
-                            headerIndex
+                            anchorIndex
                     );
 
             if (requestPropertyIndex >= 0) {
 
-                Instruction requestInstruction =
+                Instruction addRequestProperty =
                         instructions.get(
                                 requestPropertyIndex
                         );
 
-                if (!(requestInstruction
-                        instanceof FiveRegisterInstruction)) {
+                if (addRequestProperty
+                        instanceof FiveRegisterInstruction) {
 
-                    throw new IllegalStateException(
-                            "Fix 1 found X-Android-Cert but " +
-                            "addRequestProperty() is not " +
-                            "FiveRegisterInstruction in " +
-                            method.getDefiningClass() +
-                            "->" +
-                            method.getName()
-                    );
-                }
+                    int valueRegister =
+                            ((FiveRegisterInstruction)
+                                    addRequestProperty)
+                                    .getRegisterE();
 
-                int valueRegister =
-                        ((FiveRegisterInstruction)
-                                requestInstruction)
-                                .getRegisterE();
+                    if (valueRegister >= 0
+                            && valueRegister <= 255) {
 
-                if (valueRegister < 0
-                        || valueRegister > 255) {
+                        MutableMethodImplementation mutable =
+                                new MutableMethodImplementation(
+                                        implementation
+                                );
 
-                    throw new IllegalStateException(
-                            "Fix 1 value register v" +
-                            valueRegister +
-                            " cannot be used by const-string/21c"
-                    );
-                }
-
-                MutableMethodImplementation mutable =
-                        new MutableMethodImplementation(
-                                implementation
-                        );
-
-                mutable.addInstruction(
-                        requestPropertyIndex,
-                        new BuilderInstruction21c(
-                                Opcode.CONST_STRING,
-                                valueRegister,
-                                new ImmutableStringReference(
-                                        hash
+                        mutable.addInstruction(
+                                requestPropertyIndex,
+                                new BuilderInstruction21c(
+                                        Opcode.CONST_STRING,
+                                        valueRegister,
+                                        new ImmutableStringReference(
+                                                hash
+                                        )
                                 )
-                        )
-                );
-
-                Method patchedMethod =
-                        new ImmutableMethod(
-                                method.getDefiningClass(),
-                                method.getName(),
-                                method.getParameters(),
-                                method.getReturnType(),
-                                method.getAccessFlags(),
-                                method.getAnnotations(),
-                                method.getHiddenApiRestrictions(),
-                                mutable
                         );
 
-                System.out.println(
-                        "  [Fix 1] Certificate calculation found in: " +
-                        method.getDefiningClass() +
-                        "->" +
-                        method.getName()
-                );
+                        Method patchedMethod =
+                                new ImmutableMethod(
+                                        method.getDefiningClass(),
+                                        method.getName(),
+                                        method.getParameters(),
+                                        method.getReturnType(),
+                                        method.getAccessFlags(),
+                                        method.getAnnotations(),
+                                        method.getHiddenApiRestrictions(),
+                                        mutable
+                                );
 
-                System.out.println(
-                        "  [Fix 1] Forced SHA-1 into X-Android-Cert, v" +
-                        valueRegister
-                );
+                        System.out.println(
+                                "  [Fix 1] Certificate generation found in: " +
+                                method.getDefiningClass() +
+                                "->" +
+                                method.getName()
+                        );
 
-                return new PatchMethodResult(
-                        patchedMethod,
-                        true,
-                        true
-                );
+                        System.out.println(
+                                "  [Fix 1] SHA-1 forced into X-Android-Cert, v" +
+                                valueRegister
+                        );
+
+                        return new PatchMethodResult(
+                                patchedMethod,
+                                true,
+                                true
+                        );
+                    }
+                }
             }
         }
 
@@ -489,59 +471,59 @@ public class FirebasePatcher {
          *
          * Generic fallback.
          *
-         * Search:
+         * Find:
          *
          *     const-string ..., "X-Android-Cert"
          *
-         * followed by:
+         * then:
          *
          *     addRequestProperty(String, String)
          *
-         * Then replace only the value register.
+         * and force the value register to our SHA-1.
          *
-         * This does not depend on Firebase class/method names.
+         * No Firebase class name.
+         * No Firebase method name.
+         * No obfuscated class dependency.
          */
 
-        if (headerIndex >= 0) {
+        int anchorIndex =
+                findCertificateHeaderString(
+                        instructions
+                );
+
+        if (anchorIndex >= 0) {
 
             int requestPropertyIndex =
                     findAddRequestPropertyAfter(
                             instructions,
-                            headerIndex
+                            anchorIndex
                     );
 
             if (requestPropertyIndex >= 0) {
 
-                Instruction requestInstruction =
+                Instruction addRequestProperty =
                         instructions.get(
                                 requestPropertyIndex
                         );
 
-                if (!(requestInstruction
+                if (!(addRequestProperty
                         instanceof FiveRegisterInstruction)) {
 
-                    throw new IllegalStateException(
-                            "Fix 2 found X-Android-Cert but " +
-                            "addRequestProperty() is not " +
-                            "FiveRegisterInstruction in " +
-                            method.getDefiningClass() +
-                            "->" +
-                            method.getName()
+                    return PatchMethodResult.unchanged(
+                            method
                     );
                 }
 
                 int valueRegister =
                         ((FiveRegisterInstruction)
-                                requestInstruction)
+                                addRequestProperty)
                                 .getRegisterE();
 
                 if (valueRegister < 0
                         || valueRegister > 255) {
 
-                    throw new IllegalStateException(
-                            "Fix 2 value register v" +
-                            valueRegister +
-                            " cannot be used by const-string/21c"
+                    return PatchMethodResult.unchanged(
+                            method
                     );
                 }
 
@@ -581,7 +563,7 @@ public class FirebasePatcher {
                 );
 
                 System.out.println(
-                        "  [Fix 2] Patched X-Android-Cert request, v" +
+                        "  [Fix 2] Patched X-Android-Cert request, value register v" +
                         valueRegister
                 );
 
@@ -598,19 +580,18 @@ public class FirebasePatcher {
         );
     }
 
-    private static boolean isCertificateGenerationMethod(
+    private static boolean containsCertificateGeneration(
             List<Instruction> instructions
     ) {
         boolean hasPackageInfoSignatures = false;
         boolean hasSha1 = false;
-        boolean hasMessageDigestGetInstance = false;
-        boolean hasSignatureToByteArray = false;
-        boolean hasMessageDigestDigest = false;
+        boolean hasMessageDigest = false;
+        boolean hasSignatureToBytes = false;
+        boolean hasDigest = false;
 
         for (Instruction instruction : instructions) {
 
-            if (!(instruction
-                    instanceof ReferenceInstruction)) {
+            if (!(instruction instanceof ReferenceInstruction)) {
                 continue;
             }
 
@@ -619,59 +600,6 @@ public class FirebasePatcher {
                             instruction)
                             .getReference();
 
-            String referenceText =
-                    String.valueOf(reference);
-
-            /*
-             * PackageInfo.signatures is a FIELD reference.
-             */
-            if (referenceText.contains(
-                    "Landroid/content/pm/PackageInfo;->signatures:"
-            )) {
-                hasPackageInfoSignatures = true;
-            }
-
-            /*
-             * Signature.toByteArray()
-             */
-            if (referenceText.contains(
-                    "Landroid/content/pm/Signature;->toByteArray()"
-            )) {
-                hasSignatureToByteArray = true;
-            }
-
-            /*
-             * MessageDigest methods.
-             */
-            if (reference instanceof MethodReference) {
-
-                MethodReference methodReference =
-                        (MethodReference) reference;
-
-                String definingClass =
-                        methodReference.getDefiningClass();
-
-                String name =
-                        methodReference.getName();
-
-                if ("Ljava/security/MessageDigest;"
-                        .equals(definingClass)
-                        && "getInstance".equals(name)) {
-
-                    hasMessageDigestGetInstance = true;
-                }
-
-                if ("Ljava/security/MessageDigest;"
-                        .equals(definingClass)
-                        && "digest".equals(name)) {
-
-                    hasMessageDigestDigest = true;
-                }
-            }
-
-            /*
-             * SHA1 string.
-             */
             if (reference instanceof StringReference) {
 
                 String value =
@@ -682,28 +610,117 @@ public class FirebasePatcher {
                 if ("SHA1".equals(value)) {
                     hasSha1 = true;
                 }
+
+                continue;
             }
+
+            if (!(reference instanceof MethodReference)) {
+                continue;
+            }
+
+            MethodReference methodReference =
+                    (MethodReference) reference;
+
+            String definingClass =
+                    methodReference.getDefiningClass();
+
+            String name =
+                    methodReference.getName();
+
+            String returnType =
+                    methodReference.getReturnType();
+
+            if (definingClass.equals(
+                    "Ljava/security/MessageDigest;"
+            ) && name.equals("getInstance")) {
+
+                hasMessageDigest = true;
+            }
+
+            if (definingClass.equals(
+                    "Landroid/content/pm/Signature;"
+            ) && name.equals("toByteArray")) {
+
+                hasSignatureToBytes = true;
+            }
+
+            if (definingClass.equals(
+                    "Ljava/security/MessageDigest;"
+            ) && name.equals("digest")) {
+
+                hasDigest = true;
+            }
+
+            if (returnType.equals(
+                    "[B"
+            )) {
+                String fullReference =
+                        definingClass +
+                        "->" +
+                        name;
+
+                if (fullReference.startsWith(
+                        "Landroid/content/pm/PackageInfo;->signatures"
+                )) {
+                    hasPackageInfoSignatures = true;
+                }
+            }
+        }
+
+        /*
+         * The PackageInfo.signatures field is a FIELD reference,
+         * not a MethodReference. Check it separately below.
+         */
+        if (!hasPackageInfoSignatures) {
+            hasPackageInfoSignatures =
+                    containsPackageInfoSignaturesField(
+                            instructions
+                    );
         }
 
         return hasPackageInfoSignatures
                 && hasSha1
-                && hasMessageDigestGetInstance
-                && hasSignatureToByteArray
-                && hasMessageDigestDigest;
+                && hasMessageDigest
+                && hasSignatureToBytes
+                && hasDigest;
+    }
+
+    private static boolean containsPackageInfoSignaturesField(
+            List<Instruction> instructions
+    ) {
+        for (Instruction instruction : instructions) {
+
+            if (!(instruction instanceof ReferenceInstruction)) {
+                continue;
+            }
+
+            Reference reference =
+                    ((ReferenceInstruction)
+                            instruction)
+                            .getReference();
+
+            String text =
+                    String.valueOf(reference);
+
+            if (text.contains(
+                    "Landroid/content/pm/PackageInfo;->signatures"
+            )) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static int findCertificateHeaderString(
             List<Instruction> instructions
     ) {
-        for (int i = 0;
-             i < instructions.size();
-             i++) {
+        for (int i = 0; i < instructions.size(); i++) {
 
             Instruction instruction =
                     instructions.get(i);
 
-            if (!(instruction
-                    instanceof ReferenceInstruction)) {
+            if (!(instruction instanceof ReferenceInstruction)) {
                 continue;
             }
 
@@ -740,8 +757,7 @@ public class FirebasePatcher {
             Instruction instruction =
                     instructions.get(i);
 
-            if (!(instruction
-                    instanceof ReferenceInstruction)) {
+            if (!(instruction instanceof ReferenceInstruction)) {
                 continue;
             }
 
@@ -763,21 +779,24 @@ public class FirebasePatcher {
                 continue;
             }
 
-            List<? extends CharSequence> parameters =
-                    methodReference.getParameterTypes();
-
-            if (parameters.size() != 2) {
+            if (methodReference
+                    .getParameterTypes()
+                    .size() != 2) {
                 continue;
             }
 
-            if (!"Ljava/lang/String;".contentEquals(
-                    parameters.get(0)
+            if (!"Ljava/lang/String;".equals(
+                    methodReference
+                            .getParameterTypes()
+                            .get(0)
             )) {
                 continue;
             }
 
-            if (!"Ljava/lang/String;".contentEquals(
-                    parameters.get(1)
+            if (!"Ljava/lang/String;".equals(
+                    methodReference
+                            .getParameterTypes()
+                            .get(1)
             )) {
                 continue;
             }
@@ -848,6 +867,10 @@ public class FirebasePatcher {
                 String name =
                         entry.getName();
 
+                /*
+                 * Remove old APK signatures.
+                 * apksigner will sign the rebuilt APK.
+                 */
                 if (isSignatureFile(name)) {
                     continue;
                 }
@@ -934,9 +957,7 @@ public class FirebasePatcher {
                     .forEach(
                             p -> {
                                 try {
-                                    Files.deleteIfExists(
-                                            p
-                                    );
+                                    Files.deleteIfExists(p);
                                 } catch (IOException ignored) {
                                 }
                             }

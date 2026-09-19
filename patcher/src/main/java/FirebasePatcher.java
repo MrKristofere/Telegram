@@ -268,6 +268,16 @@ public class FirebasePatcher {
                 virtualMethods.add(patched);
             }
 
+            private static List<Method> toMethodList(
+            Iterable<? extends Method> methods
+            ) {
+                List<Method> result = new ArrayList<>();
+                for (Method method : methods) {
+                    result.add(method);
+                 }
+                 return result;
+            }
+
             if (!directMethods.equals(
                     toMethodList(classDef.getDirectMethods()))
                     || !virtualMethods.equals(

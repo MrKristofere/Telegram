@@ -6,7 +6,7 @@ on:
       link:
         description: "apk link"
         type: string
-        default: "https://github.com/MrKristofere/Telegram/releases/download/Tst/Telegram.apk"
+        default: ""
         required: true
 
 jobs:

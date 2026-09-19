@@ -211,14 +211,14 @@ jobs:
         run: |
           set -euo pipefail
 
+          rm -rf deep-certs
           mkdir -p deep-certs
-          rm -f deep-scan-report.txt
 
           python3 <<'PY'
           from pathlib import Path
           import struct
           import hashlib
-          import re
+          import subprocess
 
           APK = Path("telegram.apk")
           data = APK.read_bytes()
@@ -229,352 +229,573 @@ jobs:
           V3_ID = 0xf05368c0
 
           print("=" * 70)
-          print("DEEP APK SIGNATURE SCAN")
+          print("DEEP APK SIGNATURE BLOCK SCAN")
           print("=" * 70)
 
           print(f"APK size: {len(data)} bytes")
 
           # ----------------------------------------------------------
-          # Locate ZIP End Of Central Directory
+          # Helpers
           # ----------------------------------------------------------
+
+          def read_u32(buf, offset):
+              if offset + 4 > len(buf):
+                  raise ValueError("u32 outside buffer")
+
+              return struct.unpack_from("<I", buf, offset)[0]
+
+
+          def read_u64(buf, offset):
+              if offset + 8 > len(buf):
+                  raise ValueError("u64 outside buffer")
+
+              return struct.unpack_from("<Q", buf, offset)[0]
+
+
+          def read_length_prefixed(buf, offset):
+              """
+              Android APK signature structures use:
+                  uint32 length
+                  byte[length] value
+              """
+
+              length = read_u32(buf, offset)
+
+              start = offset + 4
+              end = start + length
+
+              if end > len(buf):
+                  raise ValueError(
+                      f"length-prefixed field outside buffer: "
+                      f"start={start}, length={length}"
+                  )
+
+              return buf[start:end], end
+
+
+          # ----------------------------------------------------------
+          # Find ZIP EOCD
+          # ----------------------------------------------------------
+
           eocd = data.rfind(b"PK\x05\x06")
 
           if eocd < 0:
-              print("ERROR: ZIP End Of Central Directory not found.")
-              raise SystemExit(0)
+              print("ERROR: ZIP EOCD not found.")
+              raise SystemExit(1)
 
           print(f"EOCD offset: 0x{eocd:x}")
 
           if eocd + 22 > len(data):
-              print("ERROR: Invalid EOCD.")
-              raise SystemExit(0)
+              print("ERROR: truncated EOCD.")
+              raise SystemExit(1)
 
-          central_dir_offset = struct.unpack_from(
-              "<I",
+          # ZIP EOCD:
+          #
+          # +16 = offset of central directory
+          # +12 = size of central directory
+          #
+
+          central_dir_offset = read_u32(
               data,
               eocd + 16
-          )[0]
+          )
 
-          central_dir_size = struct.unpack_from(
-              "<I",
+          central_dir_size = read_u32(
               data,
               eocd + 12
-          )[0]
+          )
 
           print(
-              f"Central directory offset from EOCD: "
+              f"Central directory offset: "
               f"0x{central_dir_offset:x}"
           )
 
           print(
               f"Central directory size: "
-              f"0x{central_dir_size:x}"
+              f"{central_dir_size}"
           )
 
           # ----------------------------------------------------------
-          # Locate APK Signing Block.
+          # Find APK Signing Block footer
           #
-          # The signing block is immediately before the central
-          # directory. Its last 24 bytes contain:
+          # Footer:
           #
           #   uint64 size
-          #   uint64 size
-          #   "APK Sig Block 42"
+          #   16 bytes "APK Sig Block 42"
+          #
+          # It is immediately before Central Directory.
           # ----------------------------------------------------------
-          footer = central_dir_offset
 
-          if footer < 24:
+          footer_start = central_dir_offset - 24
+
+          if footer_start < 0:
               print("No room for APK Signing Block.")
-              raise SystemExit(0)
+              raise SystemExit(10)
 
-          footer_start = footer - 24
-
-          footer_size = struct.unpack_from(
-              "<Q",
+          footer_size = read_u64(
               data,
               footer_start
-          )[0]
+          )
 
           footer_magic = data[
               footer_start + 8:
               footer_start + 24
           ]
 
-          print(f"Signing block footer size: {footer_size}")
-          print(f"Signing block magic: {footer_magic!r}")
+          print(
+              f"Signing block footer size: "
+              f"{footer_size}"
+          )
+
+          print(
+              f"Signing block magic: "
+              f"{footer_magic!r}"
+          )
 
           if footer_magic != MAGIC:
-              print()
-              print("Standard APK Signing Block was not found.")
-              print("Trying raw DER certificate fallback scan.")
+              print(
+                  "Standard APK Signing Block was not found."
+              )
               raise SystemExit(10)
 
-          block_start = footer_start + 8 - footer_size
+          # ----------------------------------------------------------
+          # Signing Block start
+          #
+          # First field is size-of-block excluding this uint64.
+          # ----------------------------------------------------------
+
+          block_start = (
+              footer_start
+              - footer_size
+              + 8
+          )
 
           if block_start < 0:
-              print("Invalid APK Signing Block start.")
+              print("Invalid Signing Block start.")
               raise SystemExit(1)
 
-          block_size_at_start = struct.unpack_from(
-              "<Q",
+          block_size = read_u64(
               data,
               block_start
-          )[0]
+          )
 
-          print(f"Signing block start: 0x{block_start:x}")
-          print(f"Signing block size: {block_size_at_start}")
+          print(
+              f"Signing block start: "
+              f"0x{block_start:x}"
+          )
 
-          if block_size_at_start != footer_size:
-              print("WARNING: start/end signing block sizes differ.")
+          print(
+              f"Signing block size: "
+              f"{block_size}"
+          )
 
-          pairs_start = block_start + 8
-          pairs_end = footer_start
-
-          print(f"Pairs: 0x{pairs_start:x} - 0x{pairs_end:x}")
-
-          found_blocks = []
+          if block_size != footer_size:
+              print(
+                  "WARNING: Signing Block size fields differ."
+              )
 
           # ----------------------------------------------------------
           # Parse ID/value pairs
           # ----------------------------------------------------------
-          pos = pairs_start
 
-          while pos < pairs_end:
-              if pos + 8 > pairs_end:
-                  print("Truncated ID/value pair.")
+          pairs_start = block_start + 8
+          pairs_end = footer_start
+
+          position = pairs_start
+
+          v2_blocks = []
+          v3_blocks = []
+
+          while position < pairs_end:
+
+              if position + 8 > pairs_end:
+                  print("Truncated pair length.")
                   break
 
-              pair_size = struct.unpack_from(
-                  "<Q",
+              pair_size = read_u64(
                   data,
-                  pos
-              )[0]
+                  position
+              )
 
               if pair_size < 4:
                   print(
-                      f"Invalid pair size {pair_size} "
-                      f"at 0x{pos:x}"
+                      f"Invalid pair size: {pair_size}"
                   )
                   break
 
-              pair_end = pos + 8 + pair_size
+              pair_end = (
+                  position
+                  + 8
+                  + pair_size
+              )
 
               if pair_end > pairs_end:
                   print(
-                      "Pair extends outside Signing Block: "
-                      f"0x{pos:x}"
+                      "Pair extends beyond Signing Block."
                   )
                   break
 
-              pair_id = struct.unpack_from(
-                  "<I",
+              pair_id = read_u32(
                   data,
-                  pos + 8
-              )[0]
+                  position + 8
+              )
 
-              value_start = pos + 12
+              value_start = position + 12
               value_end = pair_end
 
-              value = data[value_start:value_end]
+              value = data[
+                  value_start:value_end
+              ]
 
               print()
               print(
-                  f"PAIR ID=0x{pair_id:08x} "
-                  f"size={len(value)} "
-                  f"offset=0x{value_start:x}"
+                  f"ID: 0x{pair_id:08x}"
               )
-
-              if pair_id in (V2_ID, V3_ID):
-                  found_blocks.append(
-                      (
-                          pair_id,
-                          value
-                      )
-                  )
-
-                  print(
-                      "  -> APK Signature Scheme "
-                      + ("v2" if pair_id == V2_ID else "v3")
-                  )
-
-              pos = pair_end
-
-          print()
-          print(
-              f"Known signature blocks found: "
-              f"{len(found_blocks)}"
-          )
-
-          # ----------------------------------------------------------
-          # DER certificate extraction
-          #
-          # X.509 certificates are DER SEQUENCE values.
-          # We use strict OpenSSL validation afterwards.
-          # ----------------------------------------------------------
-          def extract_der_candidates(blob):
-              candidates = []
-
-              for m in re.finditer(
-                  b"\x30\x82",
-                  blob
-              ):
-                  start = m.start()
-
-                  if start + 4 > len(blob):
-                      continue
-
-                  length = int.from_bytes(
-                      blob[start + 2:start + 4],
-                      "big"
-                  )
-
-                  total = 4 + length
-                  end = start + total
-
-                  if end > len(blob):
-                      continue
-
-                  candidate = blob[start:end]
-
-                  # Certificate DER almost always starts with:
-                  # 30 82 ... and contains ASN.1 structures.
-                  if len(candidate) < 128:
-                      continue
-
-                  candidates.append(candidate)
-
-              # Also support DER with 0x81 length.
-              for m in re.finditer(
-                  b"\x30\x81",
-                  blob
-              ):
-                  start = m.start()
-
-                  if start + 3 > len(blob):
-                      continue
-
-                  length = blob[start + 2]
-
-                  total = 3 + length
-                  end = start + total
-
-                  if end > len(blob):
-                      continue
-
-                  candidate = blob[start:end]
-
-                  if len(candidate) < 128:
-                      continue
-
-                  candidates.append(candidate)
-
-              # Deduplicate.
-              unique = []
-              seen = set()
-
-              for candidate in candidates:
-                  digest = hashlib.sha256(candidate).hexdigest()
-
-                  if digest not in seen:
-                      seen.add(digest)
-                      unique.append(candidate)
-
-              return unique
-
-          # ----------------------------------------------------------
-          # Save certificate candidates.
-          # OpenSSL decides whether candidate is actually X.509.
-          # ----------------------------------------------------------
-          import subprocess
-
-          cert_counter = 0
-
-          def save_candidates(blob, source):
-              nonlocal cert_counter
-
-              candidates = extract_der_candidates(blob)
 
               print(
-                  f"{source}: DER candidates = "
-                  f"{len(candidates)}"
+                  f"Value size: {len(value)}"
               )
 
-              for candidate in candidates:
-                  temp = Path("deep-certs") / (
-                      f".candidate-{cert_counter}.der"
-                  )
-
-                  temp.write_bytes(candidate)
-
-                  result = subprocess.run(
-                      [
-                          "openssl",
-                          "x509",
-                          "-inform",
-                          "DER",
-                          "-in",
-                          str(temp),
-                          "-noout",
-                      ],
-                      stdout=subprocess.PIPE,
-                      stderr=subprocess.PIPE,
-                  )
-
-                  if result.returncode != 0:
-                      temp.unlink(missing_ok=True)
-                      continue
-
-                  cert_counter += 1
-
-                  final = Path("deep-certs") / (
-                      f"deep-cert-{cert_counter}.der"
-                  )
-
-                  temp.rename(final)
-
-                  print(
-                      f"  VALID X.509: {final} "
-                      f"({len(candidate)} bytes)"
-                  )
-
-          for pair_id, value in found_blocks:
-              version = (
-                  "v2"
-                  if pair_id == V2_ID
-                  else "v3"
+              print(
+                  f"Value offset: "
+                  f"0x{value_start:x}"
               )
 
-              save_candidates(
-                  value,
-                  f"APK Signature Scheme {version}"
-              )
+              if pair_id == V2_ID:
+                  print("Detected APK Signature Scheme v2")
+                  v2_blocks.append(value)
+
+              elif pair_id == V3_ID:
+                  print("Detected APK Signature Scheme v3")
+                  v3_blocks.append(value)
+
+              position = pair_end
 
           print()
           print(
-              f"Valid certificates from Signing Block: "
+              f"v2 blocks: {len(v2_blocks)}"
+          )
+
+          print(
+              f"v3 blocks: {len(v3_blocks)}"
+          )
+
+          # ----------------------------------------------------------
+          # Extract certificates from v2/v3 block
+          #
+          # v2:
+          #
+          #   signers
+          #     signer
+          #       signed data
+          #         digests
+          #         certificates
+          #
+          # v3:
+          #
+          #   signers
+          #     signer
+          #       signed data
+          #         digests
+          #         certificates
+          #         minSDK
+          #         maxSDK
+          # ----------------------------------------------------------
+
+          cert_hashes = set()
+          cert_counter = 0
+
+          def save_certificate(cert_der, source):
+              global cert_counter
+
+              if len(cert_der) < 64:
+                  return
+
+              # Validate with OpenSSL.
+              temp = Path(
+                  "deep-certs/.candidate.der"
+              )
+
+              temp.write_bytes(cert_der)
+
+              result = subprocess.run(
+                  [
+                      "openssl",
+                      "x509",
+                      "-inform",
+                      "DER",
+                      "-in",
+                      str(temp),
+                      "-noout",
+                  ],
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+              )
+
+              temp.unlink(missing_ok=True)
+
+              if result.returncode != 0:
+                  return
+
+              digest = hashlib.sha256(
+                  cert_der
+              ).hexdigest()
+
+              if digest in cert_hashes:
+                  print(
+                      f"Duplicate certificate ignored: "
+                      f"{digest}"
+                  )
+                  return
+
+              cert_hashes.add(digest)
+
+              cert_counter += 1
+
+              output = Path(
+                  "deep-certs"
+              ) / f"deep-cert-{cert_counter}.der"
+
+              output.write_bytes(cert_der)
+
+              print()
+              print(
+                  "VALID X.509 CERTIFICATE"
+              )
+
+              print(
+                  f"Source: {source}"
+              )
+
+              print(
+                  f"File: {output}"
+              )
+
+              print(
+                  f"Size: {len(cert_der)}"
+              )
+
+              print(
+                  f"SHA-256: {digest}"
+              )
+
+
+          def parse_v2_v3_signature_block(
+              block,
+              version
+          ):
+              print()
+              print("=" * 70)
+              print(
+                  f"PARSING APK SIGNATURE SCHEME {version}"
+              )
+              print("=" * 70)
+
+              # Top-level:
+              #
+              # length-prefixed signers
+
+              try:
+                  signers, end = read_length_prefixed(
+                      block,
+                      0
+                  )
+
+              except Exception as exc:
+                  print(
+                      f"Unable to read signers: {exc}"
+                  )
+                  return
+
+              print(
+                  f"Signers container size: "
+                  f"{len(signers)}"
+              )
+
+              position = 0
+              signer_index = 0
+
+              while position < len(signers):
+
+                  signer_index += 1
+
+                  try:
+                      signer, next_position = (
+                          read_length_prefixed(
+                              signers,
+                              position
+                          )
+                      )
+
+                  except Exception as exc:
+                      print(
+                          f"Signer #{signer_index} "
+                          f"parse error: {exc}"
+                      )
+                      break
+
+                  position = next_position
+
+                  print()
+                  print(
+                      f"Signer #{signer_index}"
+                  )
+
+                  # signer begins with:
+                  #
+                  # length-prefixed signedData
+
+                  try:
+                      signed_data, signer_pos = (
+                          read_length_prefixed(
+                              signer,
+                              0
+                          )
+                      )
+
+                  except Exception as exc:
+                      print(
+                          f"Unable to read signedData: "
+                          f"{exc}"
+                      )
+                      continue
+
+                  print(
+                      f"Signed data size: "
+                      f"{len(signed_data)}"
+                  )
+
+                  # signedData:
+                  #
+                  # length-prefixed digests
+                  # length-prefixed certificates
+                  #
+
+                  try:
+                      digests, sd_pos = (
+                          read_length_prefixed(
+                              signed_data,
+                              0
+                          )
+                      )
+
+                      certificates, sd_pos = (
+                          read_length_prefixed(
+                              signed_data,
+                              sd_pos
+                          )
+                      )
+
+                  except Exception as exc:
+                      print(
+                          f"Unable to read certificates: "
+                          f"{exc}"
+                      )
+                      continue
+
+                  print(
+                      f"Certificates container size: "
+                      f"{len(certificates)}"
+                  )
+
+                  # --------------------------------------------------
+                  # Certificate sequence
+                  #
+                  # It is a sequence of:
+                  #
+                  #   uint32 length
+                  #   DER certificate
+                  # --------------------------------------------------
+
+                  cert_position = 0
+                  certificate_index = 0
+
+                  while (
+                      cert_position
+                      < len(certificates)
+                  ):
+                      certificate_index += 1
+
+                      try:
+                          certificate, next_cert = (
+                              read_length_prefixed(
+                                  certificates,
+                                  cert_position
+                              )
+                          )
+
+                      except Exception as exc:
+                          print(
+                              f"Certificate #{certificate_index} "
+                              f"parse error: {exc}"
+                          )
+                          break
+
+                      cert_position = next_cert
+
+                      save_certificate(
+                          certificate,
+                          (
+                              f"APK Signature Scheme "
+                              f"{version}, "
+                              f"signer #{signer_index}, "
+                              f"certificate "
+                              f"#{certificate_index}"
+                          )
+                      )
+
+
+          # ----------------------------------------------------------
+          # Parse v2
+          # ----------------------------------------------------------
+
+          for block in v2_blocks:
+              parse_v2_v3_signature_block(
+                  block,
+                  "v2"
+              )
+
+          # ----------------------------------------------------------
+          # Parse v3
+          # ----------------------------------------------------------
+
+          for block in v3_blocks:
+              parse_v2_v3_signature_block(
+                  block,
+                  "v3"
+              )
+
+          # ----------------------------------------------------------
+          # Report
+          # ----------------------------------------------------------
+
+          print()
+          print("=" * 70)
+          print(
+              f"Certificates extracted from Signing Block: "
               f"{cert_counter}"
           )
+          print("=" * 70)
 
-          Path("deep-scan-report.txt").write_text(
-              "Deep APK Signing Block scan completed.\n"
-              f"APK size: {len(data)}\n"
-              f"Signing block found: yes\n"
-              f"v2/v3 blocks found: {len(found_blocks)}\n"
-              f"Valid certificates: {cert_counter}\n"
+          Path(
+              "deep-scan-report.txt"
+          ).write_text(
+              "\n".join(
+                  [
+                      "APK Signing Block scan",
+                      f"APK size: {len(data)}",
+                      f"v2 blocks: {len(v2_blocks)}",
+                      f"v3 blocks: {len(v3_blocks)}",
+                      (
+                          "certificates extracted: "
+                          f"{cert_counter}"
+                      ),
+                  ]
+              )
+              + "\n"
           )
 
-          raise SystemExit(0)
           PY
-
-          status=$?
-
-          # Exit code 10 means no standard Signing Block.
-          if [ "$status" -eq 10 ]; then
-            echo "No standard Signing Block. Continuing with raw scan."
-          elif [ "$status" -ne 0 ]; then
-            exit "$status"
-          fi
-
       # ============================================================
       # Raw fallback scan
       #

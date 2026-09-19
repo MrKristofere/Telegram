@@ -416,7 +416,7 @@ jobs:
 
           ./gradlew \
             :TMessagesProj_AppStandalone:assembleAfatStandalone
-          mv TMessagesProj_AppStandalone/build/outputs/apk/afat/release/app.apk ${{ inputs.app-name }}.apk
+          mv TMessagesProj_AppStandalone/build/outputs/**/app.apk ${{ inputs.app-name }}.apk
 
       # ============================================================
       # VERIFY APK PACKAGE + SIGNATURE + SHA-256

@@ -119,39 +119,61 @@ jobs:
       # Download package
       # ============================================================
 
-      - name: Download package
-        shell: bash
+      - name: Parse APK URL
+        id: source
         env:
-          PACKAGE_URL: ${{ inputs.package_url }}
+          APK_URL: ${{ inputs.package_url }}
         run: |
           set -euo pipefail
 
-          if [[ -z "$PACKAGE_URL" ]]; then
-            echo "::error::package_url is empty."
-            exit 1
+          echo "Source:"
+          echo "$APK_URL"
+
+          if [[ "$APK_URL" =~ ^https://github\.com/([^/]+)/([^/]+)/actions/runs/([0-9]+)/artifacts/([0-9]+)/?$ ]]; then
+            echo "type=github-artifact" >> "$GITHUB_OUTPUT"
+            echo "repository=${BASH_REMATCH[1]}/${BASH_REMATCH[2]}" >> "$GITHUB_OUTPUT"
+            echo "run_id=${BASH_REMATCH[3]}" >> "$GITHUB_OUTPUT"
+            echo "artifact_id=${BASH_REMATCH[4]}" >> "$GITHUB_OUTPUT"
+
+            echo "GitHub Actions artifact detected"
+            echo "Repository: ${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+            echo "Run ID: ${BASH_REMATCH[3]}"
+            echo "Artifact ID: ${BASH_REMATCH[4]}"
+          else
+            echo "type=direct" >> "$GITHUB_OUTPUT"
+            echo "url=$APK_URL" >> "$GITHUB_OUTPUT"
+
+            echo "Direct URL detected"
           fi
 
-          echo "Downloading package..."
+      - name: Download GitHub Artifact
+        if: steps.source.outputs.type == 'github-artifact'
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ steps.source.outputs.artifact_id }}
+          repository: ${{ steps.source.outputs.repository }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: downloaded
 
-          curl -fL \
-            --retry 5 \
-            --retry-delay 3 \
+      - name: Download Direct APK
+        if: steps.source.outputs.type == 'direct'
+        env:
+          APK_URL: ${{ steps.source.outputs.url }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p downloaded
+
+          curl \
+            --location \
+            --fail-with-body \
+            --retry 3 \
+            --retry-delay 4 \
             --connect-timeout 30 \
-            --max-time 900 \
-            -o work/input/package \
-            "$PACKAGE_URL"
-
-          if [[ ! -s work/input/package ]]; then
-            echo "::error::Downloaded package is empty."
-            exit 1
-          fi
-
-          echo
-          echo "Downloaded file:"
-          file work/input/package
-
-          echo
-          ls -lh work/input/package
+            --max-time 600 \
+            --output work/input/package \
+            "$APK_URL"
 
       # ============================================================
       # Extract APKs

@@ -1226,8 +1226,6 @@ jobs:
         with:
           name: telegram-certificate
           path: |
-            telegram.apk
-
             telegram-cert.pem
             telegram-cert.der
             telegram-cert.kt.txt

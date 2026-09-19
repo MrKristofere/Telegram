@@ -269,7 +269,7 @@ public class FirebasePatcher {
             }
 
             private static List<Method> toMethodList(
-            Iterable<? extends Method> methods
+                    Iterable<? extends Method> methods
             ) {
                 List<Method> result = new ArrayList<>();
                 for (Method method : methods) {

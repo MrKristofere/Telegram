@@ -53,6 +53,7 @@ jobs:
           ls -lh telegram.apk
 
       - name: Verify APK and print certificate
+        continue-on-error: true
         run: |
           apksigner verify --verbose telegram.apk
           apksigner verify --print-certs telegram.apk

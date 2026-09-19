@@ -1,29 +1,43 @@
 import org.jf.dexlib2.DexFileFactory;
-import org.jf.dexlib2.Opcodes;
-import org.jf.dexlib2.builder.MutableMethodImplementation;
-import org.jf.dexlib2.builder.instruction.BuilderInstruction11x;
-import org.jf.dexlib2.builder.instruction.BuilderInstruction21c;
+import org.jf.dexlib2.Opcode;
 import org.jf.dexlib2.iface.ClassDef;
 import org.jf.dexlib2.iface.DexFile;
 import org.jf.dexlib2.iface.Method;
 import org.jf.dexlib2.iface.MethodImplementation;
 import org.jf.dexlib2.iface.MultiDexContainer;
-import org.jf.dexlib2.iface.instruction.Instruction;
 import org.jf.dexlib2.iface.instruction.FiveRegisterInstruction;
+import org.jf.dexlib2.iface.instruction.Instruction;
 import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
 import org.jf.dexlib2.iface.reference.MethodReference;
 import org.jf.dexlib2.iface.reference.StringReference;
+import org.jf.dexlib2.builder.MutableMethodImplementation;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction11x;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction21c;
 import org.jf.dexlib2.immutable.ImmutableClassDef;
 import org.jf.dexlib2.immutable.ImmutableDexFile;
 import org.jf.dexlib2.immutable.ImmutableMethod;
 import org.jf.dexlib2.immutable.reference.ImmutableStringReference;
 import org.jf.dexlib2.writer.pool.DexPool;
-import org.jf.dexlib2.Opcode;
 
-import java.io.*;
-import java.nio.file.*;
-import java.util.*;
-import java.util.zip.*;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 
 public class FirebasePatcher {
 
@@ -140,6 +154,9 @@ public class FirebasePatcher {
                 PatchResult result =
                         patchDex(dexFile, hash);
 
+                /*
+                 * Only rewrite a DEX if something inside it was changed.
+                 */
                 if (!result.changed) {
                     continue;
                 }
@@ -165,8 +182,11 @@ public class FirebasePatcher {
                         Files.readAllBytes(tempDex)
                 );
 
-                fingerprintPatched |= result.fingerprintPatched;
-                headerPatched |= result.headerPatched;
+                fingerprintPatched |=
+                        result.fingerprintPatched;
+
+                headerPatched |=
+                        result.headerPatched;
 
                 System.out.println(
                         "  modified: " + dexEntryName
@@ -199,7 +219,6 @@ public class FirebasePatcher {
             );
 
         } finally {
-
             deleteRecursively(tempDirectory);
         }
     }
@@ -209,6 +228,11 @@ public class FirebasePatcher {
             String hash
     ) {
 
+        /*
+         * IMPORTANT:
+         * Keep ALL classes from the original DEX.
+         * Only replace the classes that were actually modified.
+         */
         Set<ClassDef> modifiedClasses =
                 new LinkedHashSet<>();
 
@@ -219,6 +243,8 @@ public class FirebasePatcher {
 
             boolean isFirebaseClass =
                     FIREBASE_CLASS.equals(classDef.getType());
+
+            boolean classChanged = false;
 
             List<Method> directMethods =
                     new ArrayList<>();
@@ -236,12 +262,15 @@ public class FirebasePatcher {
                         );
 
                 if (patched != method) {
-                    fingerprintPatched |=
-                            FINGERPRINT_METHOD.equals(method.getName());
-                    headerPatched |=
-                            containsCertificateHeader(
-                                    method
-                            );
+                    classChanged = true;
+
+                    if (FINGERPRINT_METHOD.equals(method.getName())) {
+                        fingerprintPatched = true;
+                    }
+
+                    if (containsCertificateHeader(method)) {
+                        headerPatched = true;
+                    }
                 }
 
                 directMethods.add(patched);
@@ -257,31 +286,21 @@ public class FirebasePatcher {
                         );
 
                 if (patched != method) {
-                    fingerprintPatched |=
-                            FINGERPRINT_METHOD.equals(method.getName());
-                    headerPatched |=
-                            containsCertificateHeader(
-                                    method
-                            );
+                    classChanged = true;
+
+                    if (FINGERPRINT_METHOD.equals(method.getName())) {
+                        fingerprintPatched = true;
+                    }
+
+                    if (containsCertificateHeader(method)) {
+                        headerPatched = true;
+                    }
                 }
 
                 virtualMethods.add(patched);
             }
 
-            private static List<Method> toMethodList(
-                    Iterable<? extends Method> methods
-            ) {
-                List<Method> result = new ArrayList<>();
-                for (Method method : methods) {
-                    result.add(method);
-                 }
-                 return result;
-            }
-
-            if (!directMethods.equals(
-                    toMethodList(classDef.getDirectMethods()))
-                    || !virtualMethods.equals(
-                    toMethodList(classDef.getVirtualMethods()))) {
+            if (classChanged) {
 
                 modifiedClasses.add(
                         new ImmutableClassDef(
@@ -299,6 +318,10 @@ public class FirebasePatcher {
                 );
 
             } else {
+
+                /*
+                 * Preserve untouched classes exactly as they were.
+                 */
                 modifiedClasses.add(
                         ImmutableClassDef.of(classDef)
                 );
@@ -332,7 +355,7 @@ public class FirebasePatcher {
          * FirebaseInstallationServiceClient
          * -> getFingerprintHashForPackage()
          *
-         * Replace its implementation with:
+         * Replace implementation with:
          *
          * const-string v0, "SHA1"
          * return-object v0
@@ -382,23 +405,15 @@ public class FirebasePatcher {
         /*
          * Fix 2:
          *
-         * Find:
+         * Find "X-Android-Cert" and the following
+         * addRequestProperty(...).
          *
-         * "X-Android-Cert"
-         *
-         * and the following:
-         *
-         * addRequestProperty(...)
-         *
-         * Then insert:
-         *
-         * const-string vE, "SHA1"
-         *
-         * immediately before addRequestProperty().
+         * Replace the value register immediately before
+         * addRequestProperty() with our SHA-1.
          */
         if (CONNECTION_METHOD.equals(method.getName())) {
 
-            List<? extends Instruction> instructions =
+            List<Instruction> instructions =
                     toList(implementation.getInstructions());
 
             int headerIndex = -1;
@@ -595,7 +610,7 @@ public class FirebasePatcher {
 
                 /*
                  * Remove old APK signing files.
-                 * The APK will be signed again with our keystore.
+                 * The APK will be signed again later.
                  */
                 if (isSignatureFile(name)) {
                     continue;
@@ -604,9 +619,6 @@ public class FirebasePatcher {
                 ZipEntry newEntry =
                         new ZipEntry(name);
 
-                /*
-                 * Preserve basic metadata where possible.
-                 */
                 newEntry.setTime(
                         entry.getTime()
                 );
@@ -666,16 +678,20 @@ public class FirebasePatcher {
             return;
         }
 
-        try (var stream =
-                     Files.walk(path)) {
+        try (
+                var stream =
+                        Files.walk(path)
+        ) {
 
             stream
                     .sorted(Comparator.reverseOrder())
                     .forEach(p -> {
+
                         try {
                             Files.deleteIfExists(p);
                         } catch (IOException ignored) {
                         }
+
                     });
         }
     }
@@ -693,12 +709,17 @@ public class FirebasePatcher {
                 boolean headerPatched,
                 boolean changed
         ) {
+
             this.classes = classes;
+
             this.fingerprintPatched =
                     fingerprintPatched;
+
             this.headerPatched =
                     headerPatched;
-            this.changed = changed;
+
+            this.changed =
+                    changed;
         }
     }
 }

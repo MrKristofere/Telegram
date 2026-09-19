@@ -232,14 +232,14 @@ public class FirebasePatcher {
 
             System.out.println();
             System.out.println(
-                    "[RESULT] Fix 1: " +
+                    "[RESULT] getFingerprintHashForPackage(): " +
                     (fingerprintPatched
                             ? "patched"
                             : "NOT PATCHED")
             );
 
             System.out.println(
-                    "[RESULT] Fix 2: " +
+                    "[RESULT] HttpURLConnection (X-Android-Cert): " +
                     (headerPatched
                             ? "patched"
                             : "NOT PATCHED")

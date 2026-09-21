@@ -45,6 +45,7 @@ jobs:
             -   name: Set up AWS Corretto 21
                 uses: actions/setup-java@v6
                 with:
+                    ref: Graher
                     java-version: '21'
                     distribution: 'corretto'
                     architecture: x64

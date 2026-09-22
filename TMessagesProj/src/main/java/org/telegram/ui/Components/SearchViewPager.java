@@ -213,6 +213,10 @@ public class SearchViewPager extends ViewPagerFixed implements FilteredSearchVie
 
             @Override
             protected void openSponsoredOptions(ProfileSearchCell cell, TLRPC.TL_sponsoredPeer sponsoredPeer) {
+                if (fragment.getMessagesController().isSponsoredDisabled()) {
+                    removeAllAds();
+                    return;
+                }
                 AndroidUtilities.hideKeyboard(fragment.getParentActivity().getCurrentFocus());
                 final ItemOptions o = ItemOptions.makeOptions(fragment, cell, true);
                 if (!TextUtils.isEmpty(sponsoredPeer.sponsor_info) || !TextUtils.isEmpty(sponsoredPeer.additional_info)) {
@@ -250,7 +254,7 @@ public class SearchViewPager extends ViewPagerFixed implements FilteredSearchVie
                     })
                     .addGap()
                     .add(R.drawable.msg_cancel, getString(R.string.RemoveAds), () -> {
-                        if (UserConfig.getInstance(currentAccount).isPremium()) {
+                        if (true) {
                             fragment.getMessagesController().disableAds(true);
                             removeAllAds();
                             BulletinFactory.of(fragment)

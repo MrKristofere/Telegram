@@ -21610,6 +21610,9 @@ public class MessagesController extends BaseController implements NotificationCe
     }
 
     public SponsoredMessagesInfo getSponsoredMessages(long dialogId) {
+        if (isSponsoredDisabled()) {
+            return null;
+        }
         SponsoredMessagesInfo info = sponsoredMessages.get(dialogId);
         if (info != null && (info.loading || Math.abs(SystemClock.elapsedRealtime() - info.loadTime) <= 5 * 60 * 1000)) {
             return info;
@@ -21694,6 +21697,10 @@ public class MessagesController extends BaseController implements NotificationCe
                 posts_between = null;
             }
             AndroidUtilities.runOnUIThread(() -> {
+            	if (isSponsoredDisabled()) {
+                    sponsoredMessages.remove(dialogId);
+                    return;
+                }
                 if (result == null) {
                     sponsoredMessages.remove(dialogId);
                 } else {

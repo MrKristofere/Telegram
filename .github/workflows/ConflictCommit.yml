@@ -269,7 +269,6 @@ jobs:
               FOUND=1
               break
             fi
-          done
 
               # ------------------------------------------------
               # Explicitly excluded conflict.

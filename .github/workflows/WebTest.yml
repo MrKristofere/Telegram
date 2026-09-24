@@ -32,7 +32,7 @@ env:
   CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
   CCACHE_HARDLINK: "true"
   CCACHE_NOHASHDIR: "true"
-  CCACHE_MAXSIZE: "10G"
+  CCACHE_MAXSIZE: "3G"
 
 permissions:
   contents: read
@@ -315,11 +315,9 @@ jobs:
             TMessagesProj/.cxx
             TMessagesProj/build/intermediates/cxx
             TMessagesProj/build/intermediates/cmake
-            TMessagesProj/build/intermediates/ndkBuild
-          key: ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-${{ hashFiles('TMessagesProj/jni/**', 'TMessagesProj/**/CMakeLists.txt') }}
+          key: ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-${{ hashFiles('TMessagesProj/build.gradle', 'TMessagesProj_App/build.gradle', 'TMessagesProj_AppStandalone/build.gradle') }}-${{ hashFiles('TMessagesProj/jni/**', 'TMessagesProj/**/CMakeLists.txt') }}
           restore-keys: |
-            ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-
-            ${{ runner.os }}-ndk-
+            ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-${{ hashFiles('TMessagesProj/build.gradle', 'TMessagesProj_App/build.gradle', 'TMessagesProj_AppStandalone/build.gradle') }}-
 
       # ============================================================
       # SETUP GRADLE

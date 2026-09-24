@@ -114,116 +114,158 @@ jobs:
             # SHA:path,path
             # --------------------------------------------------
 
-            EXCLUDED=""
+          EXCLUDED=""
 
-            for rule in $EXCLUDE_PATHS; do
+          for rule in $EXCLUDE_PATHS; do
+            RULE_SHA="${rule%%:*}"
 
-              RULE_SHA="${rule%%:*}"
+            if [ "$RULE_SHA" = "$commit" ]; then
+              EXCLUDED="${rule#*:}"
+              break
+            fi
+          done
 
-              if [ "$RULE_SHA" = "$commit" ]; then
-                EXCLUDED="${rule#*:}"
+          echo "Excluded paths for $commit:"
+          echo "$EXCLUDED"
 
-                echo "Excluded paths:"
-                echo "$EXCLUDED"
+          # --------------------------------------------------
+          # Build path exclusions.
+          # --------------------------------------------------
 
-                break
-              fi
+          EXCLUDE_ARGS=()
 
+          if [ -n "$EXCLUDED" ]; then
+            OLDIFS="$IFS"
+            IFS=','
+
+            for path in $EXCLUDED; do
+              # Remove invisible Unicode direction marks.
+              path="$(printf '%s' "$path" | tr -d '\u200e\u200f\u202a\u202b\u202c\u202d\u202e')"
+
+              # Normalize path.
+              path="${path#./}"
+              path="${path#/}"
+
+              echo "Excluding path: [$path]"
+
+              EXCLUDE_ARGS+=(":(exclude)$path")
             done
 
+            IFS="$OLDIFS"
+          fi
+
+          # --------------------------------------------------
+          # Apply commit WITHOUT excluded files.
+          # --------------------------------------------------
+
+          PATCH_FILE="$(mktemp)"
+
+          if [ "${#EXCLUDE_ARGS[@]}" -gt 0 ]; then
+            git diff \
+              --binary \
+              "$commit^" "$commit" \
+              -- . "${EXCLUDE_ARGS[@]}" \
+              > "$PATCH_FILE"
+          else
+            git diff \
+              --binary \
+              "$commit^" "$commit" \
+              > "$PATCH_FILE"
+          fi
+
+          # --------------------------------------------------
+          # Apply filtered patch.
+          # --------------------------------------------------
+
+          if git apply --3way --index "$PATCH_FILE"; then
+
+            echo "Commit applied with exclusions."
+
+            rm -f "$PATCH_FILE"
+
             # --------------------------------------------------
-            # Apply commit without creating commit.
+            # Verify that excluded files are NOT in the staged diff.
             # --------------------------------------------------
 
-            if git cherry-pick --no-commit "$commit"; then
+            EXCLUDED_FOUND=0
 
-              echo "Cherry-pick completed without conflicts."
+            if [ -n "$EXCLUDED" ]; then
+              OLDIFS="$IFS"
+              IFS=','
 
-              # ------------------------------------------------
-              # Explicit exclusions even if there was no conflict.
-              # ------------------------------------------------
+              for path in $EXCLUDED; do
+                path="$(printf '%s' "$path" | tr -d '\u200e\u200f\u202a\u202b\u202c\u202d\u202e')"
+                path="${path#./}"
+                path="${path#/}"
 
-              if [ -n "$EXCLUDED" ]; then
-
-                OLDIFS="$IFS"
-                IFS=','
-
-                for path in $EXCLUDED; do
-
-                  echo "Excluding: $path"
-
-                  # If file exists in HEAD, restore target version.
-                  if git cat-file -e "HEAD:$path" 2>/dev/null; then
-
-                    git restore \
-                      --source=HEAD \
-                      --staged \
-                      --worktree \
-                      -- "$path"
-
-                  else
-
-                    # File does not exist in target branch.
-                    # Make sure the imported version is removed.
-                    git rm \
-                      -f \
-                      --ignore-unmatch \
-                      -- "$path" || true
-
-                    rm -f -- "$path" || true
-
-                  fi
-
-                done
-
-                IFS="$OLDIFS"
-              fi
-
-              git add -A
-
-              # ------------------------------------------------
-              # Nothing remains.
-              # ------------------------------------------------
-
-              if git diff --cached --quiet; then
-
-                echo "SKIPPED: $commit"
-
-                git reset --hard HEAD
-
-                echo "$commit | nothing to apply after exclusions" >> /tmp/skipped.log
-
-                continue
-              fi
-
-              # ------------------------------------------------
-              # Create new commit.
-              # ------------------------------------------------
-
-              if git commit \
-                --author="${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>" \
-                --file=/tmp/commit_message
-              then
-
-                if [ -n "$EXCLUDED" ]; then
-                  echo "MODIFIED: $commit"
-                  echo "$commit | applied with exclusions: $EXCLUDED" >> /tmp/modified.log
+                if git diff --cached --name-only -- "$path" | grep -Fxq "$path"; then
+                  echo "ERROR: Excluded path is still staged: $path"
+                  EXCLUDED_FOUND=1
                 else
-                  echo "APPLIED: $commit"
-                  echo "$commit | applied" >> /tmp/applied.log
+                  echo "Verified exclusion: $path"
                 fi
+              done
 
-              else
+              IFS="$OLDIFS"
+            fi
 
-                echo "SKIPPED: $commit"
-
-                git reset --hard HEAD
-
-                echo "$commit | failed to create commit" >> /tmp/skipped.log
-              fi
-
+            if [ "$EXCLUDED_FOUND" -ne 0 ]; then
+              echo "ERROR: Excluded files are present in the staged diff."
+              git reset --hard HEAD
+              echo "$commit | excluded paths verification failed" >> /tmp/skipped.log
               continue
             fi
+
+            # --------------------------------------------------
+            # Nothing remains after exclusions.
+            # --------------------------------------------------
+
+            if git diff --cached --quiet; then
+              echo "SKIPPED: $commit"
+              git reset --hard HEAD
+              echo "$commit | all changes were excluded" >> /tmp/skipped.log
+              continue
+            fi
+
+            # --------------------------------------------------
+            # Create new commit.
+            # --------------------------------------------------
+
+            if git commit \
+              --author="${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>" \
+              --file=/tmp/commit_message
+            then
+              if [ -n "$EXCLUDED" ]; then
+                echo "MODIFIED: $commit"
+                echo "$commit | applied with exclusions: $EXCLUDED" >> /tmp/modified.log
+              else
+                echo "APPLIED: $commit"
+                echo "$commit | applied" >> /tmp/applied.log
+              fi
+            else
+              echo "SKIPPED: $commit"
+              git reset --hard HEAD
+              echo "$commit | failed to create commit" >> /tmp/skipped.log
+            fi
+
+            continue
+
+          else
+
+            rm -f "$PATCH_FILE"
+
+            echo "Patch could not be applied cleanly."
+            echo "Conflict detected."
+
+            git status --short
+
+            git reset --hard HEAD
+
+            echo "$commit | patch application failed" >> /tmp/skipped.log
+
+            continue
+
+          fi
 
             # --------------------------------------------------
             # Conflict detected.

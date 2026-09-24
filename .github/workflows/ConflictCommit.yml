@@ -1,4 +1,5 @@
 name: Conflict Commit Cherry-pick
+
 on:
   workflow_dispatch:
     inputs:
@@ -90,7 +91,6 @@ jobs:
               git fetch source "$commit" 2>/dev/null || true
 
               if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
-
                 echo "SKIPPED: $commit"
                 echo "$commit | commit not found or cannot be fetched" >> /tmp/skipped.log
 
@@ -114,307 +114,373 @@ jobs:
             # SHA:path,path
             # --------------------------------------------------
 
-          EXCLUDED=""
+            EXCLUDED=""
 
-          for rule in $EXCLUDE_PATHS; do
-            RULE_SHA="${rule%%:*}"
+            for rule in $EXCLUDE_PATHS; do
 
-            if [ "$RULE_SHA" = "$commit" ]; then
-              EXCLUDED="${rule#*:}"
-              break
-            fi
-          done
+              RULE_SHA="${rule%%:*}"
 
-          echo "Excluded paths for $commit:"
-          echo "$EXCLUDED"
+              if [ "$RULE_SHA" = "$commit" ]; then
+                EXCLUDED="${rule#*:}"
 
-          # --------------------------------------------------
-          # Build path exclusions.
-          # --------------------------------------------------
+                echo "Excluded paths:"
+                echo "$EXCLUDED"
 
-          EXCLUDE_ARGS=()
+                break
+              fi
 
-          if [ -n "$EXCLUDED" ]; then
-            OLDIFS="$IFS"
-            IFS=','
-
-            for path in $EXCLUDED; do
-              # Remove invisible Unicode direction marks.
-              path="$(printf '%s' "$path" | tr -d '\u200e\u200f\u202a\u202b\u202c\u202d\u202e')"
-
-              # Normalize path.
-              path="${path#./}"
-              path="${path#/}"
-
-              echo "Excluding path: [$path]"
-
-              EXCLUDE_ARGS+=(":(exclude)$path")
             done
 
-            IFS="$OLDIFS"
-          fi
+            # --------------------------------------------------
+            # Apply commit.
+            #
+            # If exclusions exist, build a patch without those
+            # paths and apply only the remaining changes.
+            # --------------------------------------------------
 
-          # --------------------------------------------------
-          # Apply commit WITHOUT excluded files.
-          # --------------------------------------------------
+            if [ -n "$EXCLUDED" ]; then
 
-          PATCH_FILE="$(mktemp)"
+              echo "Applying commit with exclusions..."
 
-          if [ "${#EXCLUDE_ARGS[@]}" -gt 0 ]; then
-            git diff \
-              --binary \
-              "$commit^" "$commit" \
-              -- . "${EXCLUDE_ARGS[@]}" \
-              > "$PATCH_FILE"
-          else
-            git diff \
-              --binary \
-              "$commit^" "$commit" \
-              > "$PATCH_FILE"
-          fi
+              EXCLUDE_ARGS=()
 
-          # --------------------------------------------------
-          # Apply filtered patch.
-          # --------------------------------------------------
+              OLDIFS="$IFS"
+              IFS=','
 
-          if git apply --3way --index "$PATCH_FILE"; then
+              for path in $EXCLUDED; do
 
-            echo "Commit applied with exclusions."
+                # Remove invisible Unicode direction marks.
+                path="$(printf '%s' "$path" | tr -d '\u200e\u200f\u202a\u202b\u202c\u202d\u202e')"
 
-            rm -f "$PATCH_FILE"
+                # Normalize path.
+                path="${path#./}"
+                path="${path#/}"
+
+                echo "Excluding: [$path]"
+
+                EXCLUDE_ARGS+=(":(exclude)$path")
+
+              done
+
+              IFS="$OLDIFS"
+
+              # ------------------------------------------------
+              # Create filtered patch.
+              # ------------------------------------------------
+
+              PATCH_FILE="$(mktemp)"
+
+              git diff \
+                --binary \
+                "$commit^" "$commit" \
+                -- . "${EXCLUDE_ARGS[@]}" \
+                > "$PATCH_FILE"
+
+              # ------------------------------------------------
+              # Apply filtered patch.
+              # ------------------------------------------------
+
+              if git apply --3way --index "$PATCH_FILE"; then
+
+                echo "Filtered patch applied successfully."
+
+                rm -f "$PATCH_FILE"
+
+              else
+
+                echo "Filtered patch could not be applied cleanly."
+
+                rm -f "$PATCH_FILE"
+
+                # Reset anything left by git apply.
+                git reset --hard HEAD
+
+                # ------------------------------------------------
+                # Fall back to normal cherry-pick so the existing
+                # conflict-resolution logic can handle conflicts.
+                # ------------------------------------------------
+
+                if git cherry-pick --no-commit "$commit"; then
+
+                  echo "Fallback cherry-pick completed without conflicts."
+
+                else
+
+                  echo "Conflict detected."
+
+                  CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
+
+                  echo "Conflicted files:"
+                  echo "$CONFLICTED_FILES"
+
+                  UNEXPECTED_CONFLICT=0
+                  RESOLVED_FILES=""
+
+                  # ----------------------------------------------
+                  # Process conflicted files.
+                  # ----------------------------------------------
+
+                  while IFS= read -r file; do
+
+                    [ -z "$file" ] && continue
+
+                    FOUND=0
+
+                    OLDIFS="$IFS"
+                    IFS=','
+
+                    for excluded_path in $EXCLUDED; do
+
+                      excluded_path="$(printf '%s' "$excluded_path" | tr -d '\u200e\u200f\u202a\u202b\u202c\u202d\u202e')"
+                      excluded_path="${excluded_path#./}"
+                      excluded_path="${excluded_path#/}"
+
+                      normalized_file="${file#./}"
+                      normalized_file="${normalized_file#/}"
+
+                      if [ "$normalized_file" = "$excluded_path" ]; then
+                        FOUND=1
+                        break
+                      fi
+
+                    done
+
+                    IFS="$OLDIFS"
+
+                    # --------------------------------------------
+                    # Explicitly excluded conflict.
+                    # --------------------------------------------
+
+                    if [ "$FOUND" -eq 1 ]; then
+
+                      echo "Resolving excluded conflict: $file"
+
+                      if git cat-file -e "HEAD:$file" 2>/dev/null; then
+
+                        echo "Target contains $file."
+                        echo "Keeping target version."
+
+                        git restore \
+                          --source=HEAD \
+                          --staged \
+                          --worktree \
+                          -- "$file"
+
+                      else
+
+                        echo "Target deleted $file."
+                        echo "Keeping deletion."
+
+                        git rm \
+                          -f \
+                          --ignore-unmatch \
+                          -- "$file" || true
+
+                        rm -f -- "$file" || true
+
+                      fi
+
+                      if [ -n "$RESOLVED_FILES" ]; then
+                        RESOLVED_FILES="$RESOLVED_FILES, $file"
+                      else
+                        RESOLVED_FILES="$file"
+                      fi
+
+                    else
+
+                      echo "Unexpected conflict: $file"
+                      UNEXPECTED_CONFLICT=1
+
+                    fi
+
+                  done <<< "$CONFLICTED_FILES"
+
+                  # ----------------------------------------------
+                  # Unexpected conflict.
+                  # ----------------------------------------------
+
+                  if [ "$UNEXPECTED_CONFLICT" -eq 1 ]; then
+
+                    echo "Skipping $commit because of unspecified conflict."
+
+                    git reset --hard HEAD
+
+                    echo "$commit | unspecified conflict: $CONFLICTED_FILES" >> /tmp/skipped.log
+
+                    continue
+
+                  fi
+
+                  # ----------------------------------------------
+                  # All conflicts explicitly handled.
+                  # ----------------------------------------------
+
+                  echo "All conflicts were explicitly handled."
+
+                  git add -A
+
+                  # ----------------------------------------------
+                  # Make sure no unmerged paths remain.
+                  # ----------------------------------------------
+
+                  if git diff --name-only --diff-filter=U | grep -q .; then
+
+                    echo "ERROR: Unresolved conflicts remain."
+
+                    git reset --hard HEAD
+
+                    echo "$commit | unresolved conflicts remain after exclusions" >> /tmp/skipped.log
+
+                    continue
+
+                  fi
+
+                fi
+
+              fi
+
+            else
+
+              # --------------------------------------------------
+              # No exclusions.
+              # Use normal cherry-pick.
+              # --------------------------------------------------
+
+              if git cherry-pick --no-commit "$commit"; then
+
+                echo "Cherry-pick completed without conflicts."
+
+              else
+
+                echo "Conflict detected."
+
+                CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
+
+                echo "Conflicted files:"
+                echo "$CONFLICTED_FILES"
+
+                UNEXPECTED_CONFLICT=1
+
+                git reset --hard HEAD
+
+                echo "$commit | unspecified conflict: $CONFLICTED_FILES" >> /tmp/skipped.log
+
+                continue
+
+              fi
+
+            fi
 
             # --------------------------------------------------
-            # Verify that excluded files are NOT in the staged diff.
+            # Verify excluded paths.
+            #
+            # This is the important safety check:
+            # if an excluded file somehow appears in the staged
+            # diff, do NOT create the commit.
             # --------------------------------------------------
 
             EXCLUDED_FOUND=0
 
             if [ -n "$EXCLUDED" ]; then
+
               OLDIFS="$IFS"
               IFS=','
 
               for path in $EXCLUDED; do
+
+                path="$(printf '%s' "$path" | tr -d '\u200e\u200f\u202a\u202b\u202c\u202d\u202e')"
+                path="${path#./}"
+                path="${path#/}"
+
+                echo "Verifying exclusion: [$path]"
+
+                if git diff --cached --name-only -- "$path" | grep -Fxq "$path"; then
+
+                  echo "ERROR: Excluded path is still staged: $path"
+
+                  EXCLUDED_FOUND=1
+
+                else
+
+                  echo "Verified exclusion: $path"
+
+                fi
+
+              done
+
+              IFS="$OLDIFS"
+
+            fi
+
+            # --------------------------------------------------
+            # Never create a commit if an excluded file remains.
+            # --------------------------------------------------
+
+            if [ "$EXCLUDED_FOUND" -ne 0 ]; then
+
+              echo "ERROR: Excluded files are present in the staged diff."
+              echo "Skipping $commit."
+
+              git reset --hard HEAD
+
+              echo "$commit | excluded paths verification failed" >> /tmp/skipped.log
+
+              continue
+
+            fi
+
+            # --------------------------------------------------
+            # Stage everything.
+            # --------------------------------------------------
+
+            git add -A
+
+            # --------------------------------------------------
+            # Verify exclusions again after git add -A.
+            # --------------------------------------------------
+
+            EXCLUDED_FOUND=0
+
+            if [ -n "$EXCLUDED" ]; then
+
+              OLDIFS="$IFS"
+              IFS=','
+
+              for path in $EXCLUDED; do
+
                 path="$(printf '%s' "$path" | tr -d '\u200e\u200f\u202a\u202b\u202c\u202d\u202e')"
                 path="${path#./}"
                 path="${path#/}"
 
                 if git diff --cached --name-only -- "$path" | grep -Fxq "$path"; then
-                  echo "ERROR: Excluded path is still staged: $path"
+
+                  echo "ERROR: Excluded path is still staged after git add -A: $path"
+
                   EXCLUDED_FOUND=1
+
                 else
-                  echo "Verified exclusion: $path"
+
+                  echo "Verified after staging: $path"
+
                 fi
+
               done
 
               IFS="$OLDIFS"
+
             fi
 
             if [ "$EXCLUDED_FOUND" -ne 0 ]; then
-              echo "ERROR: Excluded files are present in the staged diff."
-              git reset --hard HEAD
-              echo "$commit | excluded paths verification failed" >> /tmp/skipped.log
-              continue
-            fi
 
-            # --------------------------------------------------
-            # Nothing remains after exclusions.
-            # --------------------------------------------------
-
-            if git diff --cached --quiet; then
-              echo "SKIPPED: $commit"
-              git reset --hard HEAD
-              echo "$commit | all changes were excluded" >> /tmp/skipped.log
-              continue
-            fi
-
-            # --------------------------------------------------
-            # Create new commit.
-            # --------------------------------------------------
-
-            if git commit \
-              --author="${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>" \
-              --file=/tmp/commit_message
-            then
-              if [ -n "$EXCLUDED" ]; then
-                echo "MODIFIED: $commit"
-                echo "$commit | applied with exclusions: $EXCLUDED" >> /tmp/modified.log
-              else
-                echo "APPLIED: $commit"
-                echo "$commit | applied" >> /tmp/applied.log
-              fi
-            else
-              echo "SKIPPED: $commit"
-              git reset --hard HEAD
-              echo "$commit | failed to create commit" >> /tmp/skipped.log
-            fi
-
-            continue
-
-          else
-
-            rm -f "$PATCH_FILE"
-
-            echo "Patch could not be applied cleanly."
-            echo "Conflict detected."
-
-            git status --short
-
-            git reset --hard HEAD
-
-            echo "$commit | patch application failed" >> /tmp/skipped.log
-
-            continue
-
-          fi
-
-            # --------------------------------------------------
-            # Conflict detected.
-            # --------------------------------------------------
-
-            echo "Conflict detected."
-
-            CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
-
-            echo "Conflicted files:"
-            echo "$CONFLICTED_FILES"
-
-            UNEXPECTED_CONFLICT=0
-            RESOLVED_FILES=""
-
-            # --------------------------------------------------
-            # Process conflicted files.
-            # --------------------------------------------------
-
-            while IFS= read -r file; do
-
-              [ -z "$file" ] && continue
-
-              FOUND=0
-
-              if [ -n "$EXCLUDED" ]; then
-
-                OLDIFS="$IFS"
-                IFS=','
-
-                for excluded_path in $EXCLUDED; do
-
-                  # Remove invisible Unicode characters
-                  excluded_path="$(printf '%s' "$excluded_path" | sed 's/\xe2\x80\x8e//g; s/\xe2\x80\x8f//g')"
-
-                  # Normalize paths
-                  excluded_path="${excluded_path#./}"
-                  excluded_path="${excluded_path#/}"
-
-                  normalized_file="${file#./}"
-                  normalized_file="${normalized_file#/}"
-
-                  if [ "$normalized_file" = "$excluded_path" ]; then
-                    FOUND=1
-                    break
-                  fi
-
-                done
-
-                IFS="$OLDIFS"
-              fi
-
-              # ------------------------------------------------
-              # Explicitly excluded conflict.
-              # ------------------------------------------------
-
-              if [ "$FOUND" -eq 1 ]; then
-
-                echo "Resolving excluded conflict: $file"
-
-                # ------------------------------------------------
-                # If target branch has this file:
-                # restore target version.
-                #
-                # If target branch deleted this file:
-                # remove it completely.
-                # ------------------------------------------------
-
-                if git cat-file -e "HEAD:$file" 2>/dev/null; then
-
-                  echo "Target contains $file."
-                  echo "Keeping target version."
-
-                  git restore \
-                    --source=HEAD \
-                    --staged \
-                    --worktree \
-                    -- "$file"
-
-                else
-
-                  echo "Target deleted $file."
-                  echo "Keeping deletion."
-
-                  git rm \
-                    -f \
-                    --ignore-unmatch \
-                    -- "$file" || true
-
-                  rm -f -- "$file" || true
-
-                fi
-
-                if [ -n "$RESOLVED_FILES" ]; then
-                  RESOLVED_FILES="$RESOLVED_FILES, $file"
-                else
-                  RESOLVED_FILES="$file"
-                fi
-
-              else
-
-                # ------------------------------------------------
-                # Conflict was not specified by user.
-                # ------------------------------------------------
-
-                echo "Unexpected conflict: $file"
-
-                UNEXPECTED_CONFLICT=1
-
-              fi
-
-            done <<< "$CONFLICTED_FILES"
-
-            # --------------------------------------------------
-            # Unexpected conflict.
-            # --------------------------------------------------
-
-            if [ "$UNEXPECTED_CONFLICT" -eq 1 ]; then
-
-              echo "Skipping $commit because of unspecified conflict."
+              echo "ERROR: Excluded files are still present."
+              echo "Skipping $commit."
 
               git reset --hard HEAD
 
-              echo "$commit | unspecified conflict: $CONFLICTED_FILES" >> /tmp/skipped.log
+              echo "$commit | excluded paths remained after staging" >> /tmp/skipped.log
 
               continue
-            fi
 
-            # --------------------------------------------------
-            # All conflicts were explicitly handled.
-            # --------------------------------------------------
-
-            echo "All conflicts were explicitly handled."
-
-            git add -A
-
-            # --------------------------------------------------
-            # Make sure no unmerged paths remain.
-            # --------------------------------------------------
-
-            if git diff --name-only --diff-filter=U | grep -q .; then
-
-              echo "ERROR: Unresolved conflicts remain."
-
-              git reset --hard HEAD
-
-              echo "$commit | unresolved conflicts remain after exclusions" >> /tmp/skipped.log
-
-              continue
             fi
 
             # --------------------------------------------------
@@ -427,13 +493,14 @@ jobs:
 
               git reset --hard HEAD
 
-              echo "$commit | all changes were excluded" >> /tmp/skipped.log
+              echo "$commit | nothing to apply after exclusions" >> /tmp/skipped.log
 
               continue
+
             fi
 
             # --------------------------------------------------
-            # Create modified commit.
+            # Create commit.
             # --------------------------------------------------
 
             if git commit \
@@ -441,9 +508,17 @@ jobs:
               --file=/tmp/commit_message
             then
 
-              echo "MODIFIED: $commit"
+              if [ -n "$EXCLUDED" ]; then
 
-              echo "$commit | applied with excluded paths: $RESOLVED_FILES" >> /tmp/modified.log
+                echo "MODIFIED: $commit"
+                echo "$commit | applied with exclusions: $EXCLUDED" >> /tmp/modified.log
+
+              else
+
+                echo "APPLIED: $commit"
+                echo "$commit | applied" >> /tmp/applied.log
+
+              fi
 
             else
 
@@ -451,7 +526,8 @@ jobs:
 
               git reset --hard HEAD
 
-              echo "$commit | failed to create modified commit" >> /tmp/skipped.log
+              echo "$commit | failed to create commit" >> /tmp/skipped.log
+
             fi
 
           done

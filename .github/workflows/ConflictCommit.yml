@@ -256,7 +256,17 @@ jobs:
 
                 for excluded_path in $EXCLUDED; do
 
-                  if [ "$file" = "$excluded_path" ]; then
+                  # Remove invisible Unicode characters
+                  excluded_path="$(printf '%s' "$excluded_path" | sed 's/\xe2\x80\x8e//g; s/\xe2\x80\x8f//g')"
+
+                  # Normalize paths
+                  excluded_path="${excluded_path#./}"
+                  excluded_path="${excluded_path#/}"
+
+                  normalized_file="${file#./}"
+                  normalized_file="${normalized_file#/}"
+
+                  if [ "$normalized_file" = "$excluded_path" ]; then
                     FOUND=1
                     break
                   fi

@@ -8,7 +8,7 @@ on:
         type: string
         default: master
         required: true
-      architecture:
+      arch:
         description: "Android architecture"
         required: true
         type: choice
@@ -50,9 +50,13 @@ permissions:
 
 jobs:
   architecture:
-    uses: ./.github/workflows/Architecture.yml
+    uses: ./.github/workflows/ABI-Arch-Select.yml
     with:
-      architecture: ${{ inputs.architecture }}
+      architecture: ${{ inputs.arch }}
+      strategy:
+      fail-fast: false
+      max-parallel: 2
+
   build:
     runs-on: ubuntu-latest
 

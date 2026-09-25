@@ -1,0 +1,141 @@
+name: Android Architecture Configuration
+
+on:
+  workflow_call:
+    inputs:
+      architecture:
+        description: "Android architecture"
+        required: true
+        type: string
+
+    outputs:
+      mode:
+        description: "Build mode"
+        value: ${{ jobs.architecture.outputs.mode }}
+
+      abi_filters:
+        description: "ABI filters for Gradle"
+        value: ${{ jobs.architecture.outputs.abi_filters }}
+
+      matrix:
+        description: "Build matrix JSON"
+        value: ${{ jobs.architecture.outputs.matrix }}
+
+      is_matrix:
+        description: "Whether the build must use matrix"
+        value: ${{ jobs.architecture.outputs.is_matrix }}
+
+jobs:
+  architecture:
+    runs-on: ubuntu-latest
+
+    outputs:
+      mode: ${{ steps.config.outputs.mode }}
+      abi_filters: ${{ steps.config.outputs.abi_filters }}
+      matrix: ${{ steps.config.outputs.matrix }}
+      is_matrix: ${{ steps.config.outputs.is_matrix }}
+
+    steps:
+      - name: Configure architecture
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${{ inputs.architecture }}" in
+
+            "ARM64-v8a")
+              MODE="single"
+              ABI_FILTERS="arm64-v8a"
+              IS_MATRIX="false"
+
+              MATRIX='{
+                "include": [
+                  {
+                    "abi": "arm64-v8a",
+                    "name": "arm64-v8a"
+                  }
+                ]
+              }'
+              ;;
+
+            "armeabi-v7a")
+              MODE="single"
+              ABI_FILTERS="armeabi-v7a"
+              IS_MATRIX="false"
+
+              MATRIX='{
+                "include": [
+                  {
+                    "abi": "armeabi-v7a",
+                    "name": "armeabi-v7a"
+                  }
+                ]
+              }'
+              ;;
+
+            "ARM64-v8a & armeabi-v7a")
+              MODE="matrix"
+              ABI_FILTERS=""
+              IS_MATRIX="true"
+
+              MATRIX='{
+                "include": [
+                  {
+                    "abi": "arm64-v8a",
+                    "name": "arm64-v8a"
+                  },
+                  {
+                    "abi": "armeabi-v7a",
+                    "name": "armeabi-v7a"
+                  }
+                ]
+              }'
+              ;;
+
+            "ARM64-v8a & armeabi-v7a (split)")
+              MODE="split"
+              ABI_FILTERS="arm64-v8a,armeabi-v7a"
+              IS_MATRIX="false"
+
+              MATRIX='{
+                "include": [
+                  {
+                    "abi": "arm64-v8a,armeabi-v7a",
+                    "name": "arm64-v8a-armeabi-v7a"
+                  }
+                ]
+              }'
+              ;;
+
+            "Universal")
+              MODE="universal"
+              ABI_FILTERS=""
+              IS_MATRIX="false"
+
+              MATRIX='{
+                "include": [
+                  {
+                    "abi": "universal",
+                    "name": "universal"
+                  }
+                ]
+              }'
+              ;;
+
+            *)
+              echo "::error::Unknown architecture: ${{ inputs.architecture }}"
+              exit 1
+              ;;
+          esac
+
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "abi_filters=$ABI_FILTERS" >> "$GITHUB_OUTPUT"
+          echo "is_matrix=$IS_MATRIX" >> "$GITHUB_OUTPUT"
+
+          echo "matrix=$(echo "$MATRIX" | jq -c .)" >> "$GITHUB_OUTPUT"
+
+          echo "Architecture: ${{ inputs.architecture }}"
+          echo "Mode: $MODE"
+          echo "ABI filters: ${ABI_FILTERS:-<all>}"
+          echo "Matrix: $(echo "$MATRIX" | jq -c .)"

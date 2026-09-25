@@ -8,17 +8,6 @@ on:
         type: string
         default: master
         required: true
-      arch:
-        description: "Android architecture"
-        required: true
-        type: choice
-        default: ARM64-v8a
-        options:
-          - ARM64-v8a
-          - armeabi-v7a
-          - ARM64-v8a & armeabi-v7a
-          - Universal
-          - ARM64-v8a & armeabi-v7a (split)
       pkg-name:
         description: "use another pkg name"
         type: string
@@ -49,17 +38,8 @@ permissions:
   contents: read
 
 jobs:
-  architecture:
-    uses: ./.github/workflows/ABI-Arch-Select.yml
-    with:
-      architecture: ${{ inputs.arch }}
-      strategy:
-      fail-fast: false
-      max-parallel: 2
-
   build:
     runs-on: ubuntu-latest
-
     steps:
 
       # ============================================================

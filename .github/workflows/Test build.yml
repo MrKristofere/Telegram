@@ -17,8 +17,8 @@ on:
           - ARM64-v8a
           - armeabi-v7a
           - ARM64-v8a & armeabi-v7a
-          - Universal
           - ARM64-v8a & armeabi-v7a (split)
+          - Universal
       pkg-name:
         description: "use another pkg name"
         type: string

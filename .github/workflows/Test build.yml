@@ -1,4 +1,4 @@
-name: Test Test build Web
+name: Build Test Web
 
 on:
   workflow_dispatch:
@@ -8,37 +8,125 @@ on:
         type: string
         default: master
         required: true
+      architecture:
+        description: "Android architecture"
+        required: true
+        type: choice
+        default: ARM64-v8a
+        options:
+          - ARM64-v8a
+          - armeabi-v7a
+          - ARM64-v8a & armeabi-v7a
+          - Universal
+          - ARM64-v8a & armeabi-v7a (split)
+      pkg-name:
+        description: "use another pkg name"
+        type: string
+        default: aex.telegram
+        required: true
+      appidhash:
+        description: "use another APP_ID/APP_HASH"
+        type: boolean
+        default: false
+      useoff:
+        description: "use the official package name"
+        type: boolean
+        default: false
+      app-name:
+        description: "artifact name"
+        type: string
+        default: Telegram-Mod
+        required: true
 
 env:
   CCACHE_DIR: ~/.ccache
   CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
   CCACHE_HARDLINK: "true"
   CCACHE_NOHASHDIR: "true"
-  CCACHE_MAXSIZE: "10G"
+  CCACHE_MAXSIZE: "3G"
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  prepare-architecture:
     runs-on: ubuntu-latest
+
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+
+    steps:
+      - name: Prepare architecture matrix
+        id: matrix
+        shell: bash
+        env:
+          ARCHITECTURE: ${{ inputs.architecture }}
+        run: |
+          set -euo pipefail
+
+          case "$ARCHITECTURE" in
+
+            "ARM64-v8a")
+              MATRIX='{"include":[{"abi":"arm64-v8a","name":"arm64-v8a"}]}'
+              ;;
+
+            "armeabi-v7a")
+              MATRIX='{"include":[{"abi":"armeabi-v7a","name":"armeabi-v7a"}]}'
+              ;;
+
+            "ARM64-v8a & armeabi-v7a")
+              MATRIX='{"include":[
+                {"abi":"arm64-v8a","name":"arm64-v8a"},
+                {"abi":"armeabi-v7a","name":"armeabi-v7a"}
+              ]}'
+              ;;
+
+            "ARM64-v8a & armeabi-v7a (split)")
+              MATRIX='{"include":[
+                {
+                  "abi":"arm64-v8a,armeabi-v7a",
+                  "name":"arm64-v8a-armeabi-v7a"
+                }
+              ]}'
+              ;;
+
+            "Universal")
+              MATRIX='{"include":[
+                {
+                  "abi":"universal",
+                  "name":"universal"
+                }
+              ]}'
+              ;;
+
+            *)
+              echo "::error::Unsupported architecture: $ARCHITECTURE"
+              exit 1
+              ;;
+          esac
+
+          echo "matrix=$(echo "$MATRIX" | jq -c .)" >> "$GITHUB_OUTPUT"
+  build:
+    needs: prepare-architecture
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.prepare-architecture.outputs.matrix) }}
 
     steps:
 
       # ============================================================
-      # FREE DISK SPACE
+      # SWAP SPACE
       # ============================================================
 
-      - name: Free up disk space
-        uses: jlumbroso/free-disk-space@main
+      - name: Set swap space
+        if: false
+        uses: pierotofy/set-swap-space@master
         with:
-          tool-cache: true
-          android: false
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: false
-          swap-storage: true
+          swap-size-gb: 20
 
       # ============================================================
       # CHECKOUT
@@ -50,6 +138,12 @@ jobs:
           ref: ${{ inputs.branch }}
           submodules: recursive
 
+      - name: Configure Android architecture
+        uses: ./.github/actions/configure-architecture
+        with:
+          architecture: ${{ inputs.architecture }}
+          abi: ${{ matrix.abi }}
+    
       # ============================================================
       # ISOLATE GRADLE USER HOME
       # ============================================================
@@ -71,6 +165,7 @@ jobs:
       # ============================================================
 
       - name: Configure package
+        if: ${{ !inputs.useoff }}
         run: |
           set -euo pipefail
 
@@ -78,7 +173,7 @@ jobs:
           grep '^APP_PACKAGE=' gradle.properties
 
           sed -i \
-            's/^APP_PACKAGE=.*/APP_PACKAGE=ft.telegram.messenger/' \
+            's/^APP_PACKAGE=.*/APP_PACKAGE=${{ inputs.pkg-name }}/' \
             gradle.properties
 
           echo "Configured APP_PACKAGE:"
@@ -89,51 +184,65 @@ jobs:
       # ============================================================
 
       - name: Configure Firebase for custom package
+        if: ${{ !inputs.useoff }}
         run: |
           set -euo pipefail
 
-          FILE="TMessagesProj_AppStandalone/google-services.json"
-
-          cp "$FILE" "${FILE}.original"
-
           python3 <<'PY'
           import json
+          import shutil
 
-          path = "TMessagesProj_AppStandalone/google-services.json"
-
-          with open(path, "r", encoding="utf-8") as f:
-              data = json.load(f)
+          files = [
+              "TMessagesProj_AppStandalone/google-services.json",
+              "TMessagesProj/google-services.json",
+          ]
 
           target = "org.telegram.messenger.web"
-          replacement = "ft.telegram.messenger.web"
+          replacement = "${{ inputs.pkg-name }}.web"
 
-          found = False
+          for path in files:
+              print(f"Configuring Firebase: {path}")
 
-          for client in data.get("client", []):
-              package_name = (
-                  client
-                  .get("client_info", {})
-                  .get("android_client_info", {})
-                  .get("package_name")
-              )
+              # Keep original file for cleanup/debugging.
+              shutil.copy2(path, f"{path}.original")
 
-              if package_name == target:
-                  client["client_info"]["android_client_info"]["package_name"] = replacement
-                  found = True
-                  print(f"Changed Firebase package: {target} -> {replacement}")
+              with open(path, "r", encoding="utf-8") as f:
+                  data = json.load(f)
 
-          if not found:
-              raise SystemExit(
-                  f"Firebase client '{target}' was not found in {path}"
-              )
+              found = False
 
-          with open(path, "w", encoding="utf-8") as f:
-              json.dump(data, f, indent=2)
-              f.write("\n")
+              for client in data.get("client", []):
+                  package_name = (
+                      client
+                      .get("client_info", {})
+                      .get("android_client_info", {})
+                      .get("package_name")
+                  )
+
+                  if package_name == target:
+                      client["client_info"]["android_client_info"]["package_name"] = replacement
+                      found = True
+
+                      print(
+                          f"Changed Firebase package in {path}: "
+                          f"{target} -> {replacement}"
+                      )
+
+              if not found:
+                  raise SystemExit(
+                      f"Firebase client '{target}' was not found in {path}"
+                  )
+
+              with open(path, "w", encoding="utf-8") as f:
+                  json.dump(data, f, indent=2)
+                  f.write("\n")
+
           PY
 
           echo "Firebase package entries:"
-          grep -n "package_name" "$FILE"
+          grep -n "package_name" \
+            TMessagesProj_AppStandalone/google-services.json \
+            TMessagesProj/google-services.json
 
       # ============================================================
       # GRADLE OPTIMIZATIONS
@@ -143,7 +252,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          sed -i '/^org.gradle.caching=/d' gradle.properties
+          sed -i \
+            -e '/^org.gradle.caching=/d' \
+            gradle.properties
 
           printf '%s\n' 'org.gradle.caching=true' >> gradle.properties
 
@@ -171,7 +282,7 @@ jobs:
       # ============================================================
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           java-version: '21'
           distribution: 'temurin'
@@ -216,7 +327,7 @@ jobs:
       # ============================================================
 
       - name: Fill BuildVars
-        if: false
+        if: ${{ inputs.appidhash }}
         run: |
           set -euo pipefail
 
@@ -272,7 +383,7 @@ jobs:
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2.23
         with:
-          key: android-ndk-${{ steps.sdk.outputs.ndk }}
+          key: ${{ runner.os }}-android-ndk-${{ steps.sdk.outputs.ndk }}
 
       # ============================================================
       # NATIVE CACHE
@@ -285,11 +396,9 @@ jobs:
             TMessagesProj/.cxx
             TMessagesProj/build/intermediates/cxx
             TMessagesProj/build/intermediates/cmake
-            TMessagesProj/build/intermediates/ndkBuild
-          key: ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-${{ hashFiles('TMessagesProj/jni/**', 'TMessagesProj/**/CMakeLists.txt') }}
+          key: ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-${{ hashFiles('TMessagesProj/build.gradle', 'TMessagesProj_App/build.gradle', 'TMessagesProj_AppStandalone/build.gradle') }}-${{ hashFiles('TMessagesProj/jni/**', 'TMessagesProj/**/CMakeLists.txt') }}
           restore-keys: |
-            ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-
-            ${{ runner.os }}-ndk-
+            ${{ runner.os }}-ndk-${{ steps.sdk.outputs.ndk }}-${{ hashFiles('TMessagesProj/build.gradle', 'TMessagesProj_App/build.gradle', 'TMessagesProj_AppStandalone/build.gradle') }}-
 
       # ============================================================
       # SETUP GRADLE
@@ -301,6 +410,7 @@ jobs:
           cache-read-only: false
           gradle-home-cache-excludes: |
             caches/build-cache-1
+            caches/keyrings
 
       # ============================================================
       # CONFIGURE RELEASE SIGNING
@@ -387,8 +497,18 @@ jobs:
           set -euo pipefail
 
           ./gradlew \
-            --build-cache \
             :TMessagesProj_AppStandalone:assembleAfatStandalone
+
+      - name: Rename APK
+        run: |
+          APK=$(find TMessagesProj_AppStandalone/build/outputs -type f -name 'app.apk' -print -quit)
+
+          if [[ -z "$APK" ]]; then
+            echo "APK not found"
+            exit 1
+          fi
+
+          mv "$APK" "TMessagesProj_AppStandalone/build/outputs/${{ inputs.app-name }}.apk"
 
       # ============================================================
       # VERIFY APK PACKAGE + SIGNATURE + SHA-256
@@ -505,7 +625,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
-          name: telegram-standalone-ft-web
+          name: telegram-standalone-web-${{ matrix.name }}
           path: TMessagesProj_AppStandalone/build/outputs/**/*.apk
           if-no-files-found: error
           archive: false
@@ -521,6 +641,8 @@ jobs:
 
           rm -f TMessagesProj/config/release.keystore
           rm -f "$GRADLE_USER_HOME/gradle.properties"
+
           rm -f TMessagesProj_AppStandalone/google-services.json.original
+          rm -f TMessagesProj/google-services.json.original
 
           echo "Signing files cleaned up."

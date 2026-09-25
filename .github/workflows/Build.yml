@@ -40,6 +40,7 @@ jobs:
     steps:
     
       - name: Free up disk space
+        if: false
         uses: jlumbroso/free-disk-space@main
         with:
           preinstalled-runtimes: true

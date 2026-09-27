@@ -24,20 +24,20 @@ on:
       app-name:
         description: "artifact name"
         type: string
-        default: Telegram-Mod
+        default: Telegram-mod
         required: true
       disable-minify:
         description: "Disable minify (R8)"
         type: boolean
         default: false
       disable-optimize:
-        description: "Disable optimize (R8)"
+        description: "Disable optimize R8"
         type: boolean
-        default: false
+        default: true
       disable-obfuscate:
-        description: "Disable obfuscate (R8)"
+        description: "Disable obfuscate R8"
         type: boolean
-        default: false
+        default: true
 
 env:
   CCACHE_DIR: ~/.ccache

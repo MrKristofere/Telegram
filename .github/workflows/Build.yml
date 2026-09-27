@@ -26,6 +26,18 @@ on:
         description: "use another APP_ID/APP_HASH"
         type: boolean
         default: false
+      disable-minify:
+        description: "Disable minify (R8)"
+        type: boolean
+        default: false
+      disable-optimize:
+        description: "Disable optimize (R8)"
+        type: boolean
+        default: true
+      disable-obfuscate:
+        description: "Disable obfuscate (R8)"
+        type: boolean
+        default: true
 
 env:
   CCACHE_DIR: ~/.ccache
@@ -127,6 +139,24 @@ jobs:
 
           sed -i -E 's/public static String APP_HASH = "[^"]*";/public static String APP_HASH = "eb06d4abfb49dc3eeb1aeb98ae0f581e";/' \
             TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+
+      - name: Disable minify (R8)
+        if: ${{ inputs.disable-minify }}
+        run: |
+          sed -i \
+            -e 's/minifyEnabled true/minifyEnabled false/' \
+            -e 's/shrinkResources true/shrinkResources false/' \
+             TMessagesProj_AppStandalone/build.gradle
+
+      - name: Disable optimize R8
+        if: ${{ inputs.disable-optimize && !inputs.disable-minify }}
+        run: |
+          sed -i 's/^#-dontoptimize/-dontoptimize/' TMessagesProj/proguard-rules.pro
+
+      - name: Disable obfuscate R8
+        if: ${{ inputs.disable-obfuscate && !inputs.disable-minify }}
+        run: |
+          sed -i 's/^#-dontobfuscate/-dontobfuscate/' TMessagesProj/proguard-rules.pro
 
       - name: Make gradlew executable
         run: chmod +x gradlew

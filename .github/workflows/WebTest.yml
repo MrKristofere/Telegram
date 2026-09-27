@@ -30,6 +30,10 @@ on:
         description: "Disable minify (R8)"
         type: boolean
         default: false
+      disable-multidex:
+        description: "Disable multiDex"
+        type: boolean
+        default: false
 
 env:
   CCACHE_DIR: ~/.ccache
@@ -269,6 +273,13 @@ jobs:
           sed -i \
             -e 's/minifyEnabled true/minifyEnabled false/' \
             -e 's/shrinkResources true/shrinkResources false/' \
+             TMessagesProj_AppStandalone/build.gradle
+
+      - name: Disable multiDex
+        if: ${{ inputs.disable-multidex }}
+        run: |
+          sed -i \
+            -e 's/multiDexEnabled true/multiDexEnabled false/' \
              TMessagesProj_AppStandalone/build.gradle
 
       # ============================================================

@@ -844,25 +844,35 @@ public class PremiumPreviewFragment extends BaseFragment implements Notification
                 return;
             }
             if (position == showAdsRow) {
-                TLRPC.UserFull userFull = getMessagesController().getUserFull(getUserConfig().getClientUserId());
-                if (userFull == null) return;
-
                 TextCell cell = (TextCell) view;
                 cell.setChecked(!cell.isChecked());
-                userFull.sponsored_enabled = cell.isChecked();
+                boolean enabled = cell.isChecked();
 
-                TL_account.toggleSponsoredMessages req = new TL_account.toggleSponsoredMessages();
-                req.enabled = userFull.sponsored_enabled;
-                getConnectionsManager().sendRequest(req, (res, err) -> AndroidUtilities.runOnUIThread(() -> {
-                    if (err != null) {
-                        BulletinFactory.showError(err);
-                    } else if (!(res instanceof TLRPC.TL_boolTrue)) {
-                        BulletinFactory.of(PremiumPreviewFragment.this).createErrorBulletin(getString(R.string.UnknownError)).show();
-                    }
-                }));
+                if (!getUserConfig().isPremium()) {
+                    getUserConfig()
+                            .getPreferences()
+                            .edit()
+                            .putBoolean("custom_sponsored_disabled", !enabled)
+                            .apply();
+                } else {
+                    TLRPC.UserFull userFull = getMessagesController().getUserFull(getUserConfig().getClientUserId());
+                    if (userFull == null) return;
 
-                getMessagesStorage().updateUserInfo(userFull, false);
-                return;
+                    userFull.sponsored_enabled = enabled;
+
+                    TL_account.toggleSponsoredMessages req = new TL_account.toggleSponsoredMessages();
+                    req.enabled = enabled;
+                    getConnectionsManager().sendRequest(req, (res, err) -> AndroidUtilities.runOnUIThread(() -> {
+                        if (err != null) {
+                            BulletinFactory.showError(err);
+                        } else if (!(res instanceof TLRPC.TL_boolTrue)) {
+                            BulletinFactory.of(PremiumPreviewFragment.this).createErrorBulletin(getString(R.string.UnknownError)).show();
+                        }
+                    }));
+
+                    getMessagesStorage().updateUserInfo(userFull, false);
+                    return;
+                }
             }
             if (view instanceof PremiumFeatureCell) {
                 PremiumFeatureCell cell = (PremiumFeatureCell) view;
@@ -1676,8 +1686,16 @@ public class PremiumPreviewFragment extends BaseFragment implements Notification
             } else if (position == showAdsHeaderRow) {
                 ((HeaderCell) holder.itemView).setText(getString(R.string.ShowAdsTitle));
             } else if (position == showAdsRow) {
-                TLRPC.UserFull userFull = getMessagesController().getUserFull(getUserConfig().getClientUserId());
-                ((TextCell) holder.itemView).setTextAndCheck(getString(R.string.ShowAds), userFull == null || userFull.sponsored_enabled, false);
+                boolean adsEnabled;
+                if (!getUserConfig().isPremium()) {
+                    adsEnabled = !getUserConfig()
+                            .getPreferences()
+                            .getBoolean("custom_sponsored_disabled", true);
+                } else {
+                    TLRPC.UserFull userFull = getMessagesController().getUserFull(getUserConfig().getClientUserId());
+                    adsEnabled = userFull == null || userFull.sponsored_enabled;
+                }
+                ((TextCell) holder.itemView).setTextAndCheck(getString(R.string.ShowAds), adsEnabled, false);
             }
         }
 

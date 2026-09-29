@@ -1435,7 +1435,7 @@ public class PremiumPreviewFragment extends BaseFragment implements Notification
         statusRow = rowCount++;
         lastPaddingRow = rowCount++;
 
-        if (type == FEATURES_BUSINESS && getUserConfig().isPremium()) {
+        if (type == FEATURES_BUSINESS) {
             showAdsHeaderRow = rowCount++;
             showAdsRow = rowCount++;
             showAdsInfoRow = rowCount++;

@@ -195,7 +195,7 @@ public static VideoAds make(
     private void load() {
         if (loading || loaded) return;
 
-        if (UserConfig.getInstance(currentAccount).isPremium() && MessagesController.getInstance(currentAccount).isSponsoredDisabled()) {
+        if (MessagesController.getInstance(currentAccount).isSponsoredDisabled()) {
             return;
         }
 
@@ -210,6 +210,12 @@ public static VideoAds make(
 
             if (res instanceof TLRPC.TL_messages_sponsoredMessages) {
                 final TLRPC.TL_messages_sponsoredMessages r = (TLRPC.TL_messages_sponsoredMessages) res;
+                if (MessagesController.getInstance(currentAccount).isSponsoredDisabled()) {
+                    ads.clear();
+                    loaded = false;
+                    loading = false;
+                    return;
+                }
                 MessagesController.getInstance(currentAccount).putUsers(r.users, false);
                 MessagesController.getInstance(currentAccount).putChats(r.chats, false);
                 ads.addAll(r.messages);
@@ -264,6 +270,10 @@ public static VideoAds make(
     private float currentMenuTranslationY;
 
     private void show() {
+        if (MessagesController.getInstance(currentAccount).isSponsoredDisabled()) {
+            ads.clear();
+            return;
+        }
         if (ads.isEmpty()) return;
         final TLRPC.TL_sponsoredMessage ad = ads.get(0);
         final long showTime = System.currentTimeMillis() - currentBulletinPassedTime;
@@ -331,7 +341,7 @@ public static VideoAds make(
                     bulletin.hide();
                 }
             } else {
-                if (UserConfig.getInstance(currentAccount).isPremium()) {
+                if (true) {
                     if (bulletin != null) {
                         bulletin.hide();
                         bulletin = null;
@@ -504,9 +514,9 @@ public static VideoAds make(
                 }
                 o.add(R.drawable.msg_channel, getString(R.string.SponsoredMessageSponsorReportable), () -> o.openSwipeback(info));
             }
-            if (!UserConfig.getInstance(currentAccount).isPremium() && !MessagesController.getInstance(currentAccount).premiumFeaturesBlocked() && !ad.can_report) {
+            if (!ad.can_report) {
                 o.add(R.drawable.msg_block2, getString(R.string.HideAd), () -> {
-                    if (UserConfig.getInstance(currentAccount).isPremium()) {
+                    if (true) {
                         o.dismiss();
                         if (bulletin != null) {
                             bulletin.setCanHide(true);
@@ -528,10 +538,10 @@ public static VideoAds make(
                 o.add(R.drawable.msg_block2, getString(R.string.ReportAd), () -> {
                     ReportBottomSheet.openSponsored(currentAccount, context, dialogId, ad, bulletinFactory, new DarkBlueThemeResourcesProvider(), this::showPremium, o::dismiss);
                 });
-                if (!MessagesController.getInstance(currentAccount).premiumFeaturesBlocked()) {
+                if (true) {
                     o.addGap();
                     o.add(R.drawable.msg_cancel, getString(R.string.RemoveAds), () -> {
-                        if (UserConfig.getInstance(currentAccount).isPremium()) {
+                        if (true) {
                             o.dismiss();
                             if (bulletin != null) {
                                 bulletin.setCanHide(true);

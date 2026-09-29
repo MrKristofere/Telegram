@@ -495,6 +495,12 @@ void Datacenter::resetAddressAndPortNum() {
     storeCurrentAddressAndPortNum();
 }
 
+void Datacenter::clearTempAddresses() {
+    addressesIpv4Temp.clear();
+    currentPortNumIpv4Temp = 0;
+    currentAddressNumIpv4Temp = 0;
+}
+
 void Datacenter::replaceAddresses(std::vector<TcpAddress> &newAddresses, uint32_t flags) {
     isCdnDatacenter = (flags & 8) != 0;
     TcpAddress *currentTcpAddress = getCurrentAddress(flags);

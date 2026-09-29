@@ -49,6 +49,7 @@ public:
     void getSessions(std::vector<int64_t> &sessions);
     void recreateSessions(HandshakeType type);
     void resetAddressAndPortNum();
+    void clearTempAddresses();
     bool isHandshakingAny();
     bool isHandshaking(bool media);
     bool isHandshaking(HandshakeType type);

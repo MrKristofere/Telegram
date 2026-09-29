@@ -844,6 +844,16 @@ void ConnectionsManager::onConnectionDataReceived(Connection *connection, Native
                 }
             } else if (code == -404 && (datacenter->isCdnDatacenter || PFS_ENABLED)) {
                 if (!datacenter->isHandshaking(connection->isMediaConnection) || datacenter->isCdnDatacenter) {
+                    // the addresses taken from the dns config after a timeout are used for every
+                    // connection of the datacenter for as long as it has no temp key, and are never
+                    // let go of while the app runs. Once they have been fetched, a temp key the
+                    // server has forgotten sends the handshake to them, and where they cannot be
+                    // reached the handshake never ends: the app stays connecting until it is
+                    // stopped, though the address this answer came through works. It came through
+                    // one of the usual addresses, so those are the ones to make the new key on
+                    if (connection->getConnectionType() != ConnectionTypeTemp) {
+                        datacenter->clearTempAddresses();
+                    }
                     datacenter->clearAuthKey(connection->isMediaConnection ? HandshakeTypeMediaTemp : HandshakeTypeTemp);
                     datacenter->beginHandshake(connection->isMediaConnection ? HandshakeTypeMediaTemp : HandshakeTypeTemp, true);
                     if (LOGS_ENABLED) DEBUG_D("connection(%p, account%u, dc%u, type %d) reset auth key due to -404 error", connection, instanceNum, datacenter->getDatacenterId(), connection->getConnectionType());

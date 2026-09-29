@@ -646,17 +646,6 @@ public class FileRefController extends BaseController {
                     getConnectionsManager().sendRequest(req, (response, error) -> broadcastWaitersData(favStickersWaiter, response, error));
                 }
                 favStickersWaiter.add(new Waiter(locationKey, parentKey));
-            } else if ("update".equals(string)) {
-                TLRPC.TL_help_getAppUpdate req = new TLRPC.TL_help_getAppUpdate();
-                try {
-                    req.source = ApplicationLoader.applicationContext.getPackageManager().getInstallerPackageName(ApplicationLoader.applicationContext.getPackageName());
-                } catch (Exception ignore) {
-
-                }
-                if (req.source == null) {
-                    req.source = "";
-                }
-                getConnectionsManager().sendRequest(req, (response, error) -> onRequestComplete(locationKey, parentKey, response, error, true, false));
             } else if (string.startsWith("avatar_")) {
                 long id = Utilities.parseLong(string);
                 if (id > 0) {
@@ -1264,40 +1253,6 @@ public class FileRefController extends BaseController {
                     }
                     bots.bots = newBotsList;
                     getMediaDataController().processLoadedMenuBots(bots, bots.hash, (int) (System.currentTimeMillis() / 1000), false);
-                }
-            } else if (response instanceof TLRPC.TL_help_appUpdate) {
-                TLRPC.TL_help_appUpdate appUpdate = (TLRPC.TL_help_appUpdate) response;
-                try {
-                    SharedConfig.pendingAppUpdate = appUpdate;
-                    SharedConfig.saveConfig();
-                } catch (Exception e) {
-                    FileLog.e(e);
-                }
-                try {
-                    NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateAvailable);
-                } catch (Exception e) {
-                    FileLog.e(e);
-                }
-                try {
-                    if (appUpdate.document != null) {
-                        result = appUpdate.document.file_reference;
-                        TLRPC.TL_inputDocumentFileLocation location = new TLRPC.TL_inputDocumentFileLocation();
-                        location.id = appUpdate.document.id;
-                        location.access_hash = appUpdate.document.access_hash;
-                        location.file_reference = appUpdate.document.file_reference;
-                        location.thumb_size = "";
-                        locationReplacement = new TLRPC.InputFileLocation[1];
-                        locationReplacement[0] = location;
-                    }
-                } catch (Exception e) {
-                    result = null;
-                    FileLog.e(e);
-                }
-                if (result == null) {
-                    result = getFileReference(appUpdate.document, null, requester.location, needReplacement, locationReplacement);
-                }
-                if (result == null) {
-                    result = getFileReference(appUpdate.sticker, null, requester.location, needReplacement, locationReplacement);
                 }
             } else if (response instanceof TLRPC.TL_messages_webPage) {
                 TLRPC.TL_messages_webPage res = (TLRPC.TL_messages_webPage) response;

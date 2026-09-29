@@ -368,7 +368,7 @@ public class AlertsCreator {
             } else if (error.text.startsWith("FLOOD_WAIT")) {
                 showSimpleAlert(fragment, LocaleController.getString(R.string.FloodWait));
             } else if ("APP_VERSION_OUTDATED".equals(error.text)) {
-                showUpdateAppAlert(fragment.getParentActivity(), LocaleController.getString(R.string.UpdateAppAlert), true);
+
             } else {
                 showSimpleAlert(fragment, LocaleController.getString(R.string.ErrorOccurred) + "\n" + error.text);
             }

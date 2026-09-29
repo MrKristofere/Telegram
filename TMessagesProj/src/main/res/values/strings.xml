@@ -11235,4 +11235,7 @@
     <string name="RoundVideoComposition">Composition</string>
     <string name="RoundVideoCompositionEnabled">Round video styling</string>
     <string name="RoundVideoCompositionInfo">Disable styling to record a plain square without outside-circle blur, dimming or Telegram overlays.</string>
+
+
+    <string name="HideProxySponsorChannel">Hide proxy sponsor</string>
 </resources>

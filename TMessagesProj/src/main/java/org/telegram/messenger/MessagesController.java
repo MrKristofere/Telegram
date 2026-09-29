@@ -1606,6 +1606,9 @@ public class MessagesController extends BaseController implements NotificationCe
         keepAliveService = mainPreferences.getBoolean("keepAliveService", false);
         backgroundConnection = mainPreferences.getBoolean("backgroundConnection", false);
         promoDialogId = mainPreferences.getLong("proxy_dialog", 0);
+        if (SharedConfig.hideProxySponsor) {
+            promoDialogId = 0;
+        }
         nextPromoInfoCheckTime = mainPreferences.getInt("nextPromoInfoCheckTime", 0);
         promoDialogType = mainPreferences.getInt("promo_dialog_type", 0);
         promoPsaMessage = mainPreferences.getString("promo_psa_message", null);
@@ -10860,6 +10863,9 @@ public class MessagesController extends BaseController implements NotificationCe
     private long lastCheckPromoInfoTime;
 
     private void checkPromoInfoInternal(boolean reset) {
+        if (SharedConfig.hideProxySponsor) {
+            return;
+        }
         if (reset && checkingPromoInfo) {
             checkingPromoInfo = false;
         }
@@ -11144,6 +11150,32 @@ public class MessagesController extends BaseController implements NotificationCe
             nextPromoInfoCheckTime = getConnectionsManager().getCurrentTime() + 60 * 60;
             getGlobalMainSettings().edit().putLong("proxy_dialog", promoDialogId).remove("proxyDialogAddress").putInt("nextPromoInfoCheckTime", nextPromoInfoCheckTime).commit();
             AndroidUtilities.runOnUIThread(this::removePromoDialog);
+        }
+    }
+
+    public void updateProxySponsorVisibility() {
+        if (SharedConfig.hideProxySponsor) {
+            lastCheckPromoId++;
+
+            if (checkingPromoInfoRequestId != 0) {
+                getConnectionsManager().cancelRequest(checkingPromoInfoRequestId, true);
+                checkingPromoInfoRequestId = 0;
+            }
+
+            checkingPromoInfo = false;
+            promoDialogId = 0;
+            proxyDialogAddress = null;
+
+            getGlobalMainSettings()
+                    .edit()
+                    .remove("proxy_dialog")
+                    .remove("proxyDialogAddress")
+                    .commit();
+
+            AndroidUtilities.runOnUIThread(this::removePromoDialog);
+        } else {
+            nextPromoInfoCheckTime = 0;
+            checkPromoInfo(true);
         }
     }
 

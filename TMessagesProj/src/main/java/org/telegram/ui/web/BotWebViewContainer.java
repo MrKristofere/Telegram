@@ -240,6 +240,7 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
     private BottomSheet cameraBottomSheet;
     private boolean hasQRPending;
     private String lastQrText;
+    private NotificationCenter.NotificationCenterDelegate qrPermissionDelegate;
 
     private BotBiometry biometry;
     private BotLocation location;
@@ -1110,6 +1111,11 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
         NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.didSetNewTheme);
         NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.onActivityResultReceived);
         NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.onRequestPermissionResultReceived);
+        // the permission request was never answered, its observer still holds this view
+        if (qrPermissionDelegate != null) {
+            NotificationCenter.getGlobalInstance().removeObserver(qrPermissionDelegate, NotificationCenter.onRequestPermissionResultReceived);
+            qrPermissionDelegate = null;
+        }
 
         Bulletin.removeDelegate(this);
     }
@@ -1651,7 +1657,7 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
                     hasQRPending = true;
 
                     if (Build.VERSION.SDK_INT >= 23 && parentActivity.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-                        NotificationCenter.getGlobalInstance().addObserver(new NotificationCenter.NotificationCenterDelegate() {
+                        qrPermissionDelegate = new NotificationCenter.NotificationCenterDelegate() {
                             @Override
                             public void didReceivedNotification(int id, int account, Object... args) {
                                 if (id == NotificationCenter.onRequestPermissionResultReceived) {
@@ -1661,6 +1667,7 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
 
                                     if (requestCode == REQUEST_CODE_QR_CAMERA_PERMISSION) {
                                         NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.onRequestPermissionResultReceived);
+                                        qrPermissionDelegate = null;
 
                                         if (grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                                             openQrScanActivity();
@@ -1670,7 +1677,8 @@ public abstract class BotWebViewContainer extends FrameLayout implements Notific
                                     }
                                 }
                             }
-                        }, NotificationCenter.onRequestPermissionResultReceived);
+                        };
+                        NotificationCenter.getGlobalInstance().addObserver(qrPermissionDelegate, NotificationCenter.onRequestPermissionResultReceived);
                         parentActivity.requestPermissions(new String[]{Manifest.permission.CAMERA}, REQUEST_CODE_QR_CAMERA_PERMISSION);
                         return;
                     }

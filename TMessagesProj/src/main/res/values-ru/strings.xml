@@ -271,4 +271,7 @@
     <string name="QRLoginStep3">Наведите телефон на этот экран, чтобы подтвердить вход</string>
     <string name="QRLoginSubtitle">Откройте Telegram на другом устройстве и отсканируйте этот QR-код, чтобы войти в аккаунт.</string>
     <string name="QRLoginTitle">Вход по QR-коду</string>
+    <string name="VoipShareScreenTitle">Транслировать экран</string>
+    <string name="VoipShareScreenAudio">Транслировать звук устройства</string>
+    <string name="VoipShareScreenAudioInfo">Включение этой опции позволит вам транслировать ещё и звук вашего устройства.</string>
 </resources>

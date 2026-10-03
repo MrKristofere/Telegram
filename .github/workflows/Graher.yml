@@ -110,7 +110,7 @@ jobs:
                     sed -i "s/RELEASE_KEY_ALIAS=androidkey/RELEASE_KEY_ALIAS=$GRAHER_RELEASE_KEY_ALIAS/g" ${{ github.workspace }}/gradle.properties
                     sed -i "s/RELEASE_KEY_PASSWORD=android/RELEASE_KEY_PASSWORD=$GRAHER_RELEASE_KEY_PASSWORD/g" ${{ github.workspace }}/gradle.properties
             -   name: Build APK
-                run: gradle :TMessagesProj_App:assembleRelease
+                run: gradle :TMessagesProj_AppStandalone:assembleStandalone
             -   name: ccache stats
                 if: ${{always()}}
                 run: |
@@ -127,12 +127,12 @@ jobs:
             -   name: Verify APK exists
                 id: locate_apk
                 run: |
-                    APK_PATH="${{ github.workspace }}/TMessagesProj_App/build/outputs/apk/afat/standalone/app.apk"
+                    APK_PATH="${{ github.workspace }}/TMessagesProj_AppStandalone/build/outputs/apk/afat/standalone/app.apk"
                     if [ ! -f "$APK_PATH" ]; then
-                       find ${{ github.workspace }}/TMessagesProj_App/build/outputs -type f >&2
+                       find ${{ github.workspace }}/TMessagesProj_AppStandalone/build/outputs -type f >&2
                        exit 1
                     fi
-                    GRAHERAPK="${{ github.workspace }}/TMessagesProj_App/build/outputs/apk/afat/standalone/Telegraher.${{inputs.graher-version}}.apk"
+                    GRAHERAPK="${{ github.workspace }}/TMessagesProj_AppStandalone/build/outputs/apk/afat/standalone/Telegraher.${{inputs.graher-version}}.apk"
                     mv "$APK_PATH" "$GRAHERAPK"
                     echo "apk_path=$GRAHERAPK" >> "$GITHUB_OUTPUT"
                     echo "apk_sha256=$(sha256sum "$GRAHERAPK" | awk '{print $1}')" >> "$GITHUB_OUTPUT"

@@ -17,7 +17,7 @@ on:
         description: "Commit SHA, tag, or branch"
         required: true
         type: string
-        default: "62b56a07ca7e30e39f7fd00a6728d6bbd716ca1c"
+        default: "f2908b14133bbffbf7ab04f641ecb5bfaf533242"
 
       latest_branch:
         description: "Branch when source_type=latest"

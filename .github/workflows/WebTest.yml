@@ -14,9 +14,9 @@ on:
         default: aex.telegram
         required: true
       appidhash:
-        description: "use another APP_ID/APP_HASH"
+        description: "use old APP_ID/APP_HASH"
         type: boolean
-        default: false
+        default: true
       useoff:
         description: "use the official package name"
         type: boolean

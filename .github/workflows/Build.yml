@@ -21,11 +21,11 @@ on:
           - Release
           - Debug
           - Standalone
-        default: Debug
+        default: Release
       appidhash:
-        description: "use another APP_ID/APP_HASH"
+        description: "use old APP_ID/APP_HASH"
         type: boolean
-        default: false
+        default: true
       disable-minify:
         description: "Disable minify (R8)"
         type: boolean

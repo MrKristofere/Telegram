@@ -20,7 +20,7 @@ on:
       pkg-name:
         description: "use another pkg name"
         type: string
-        default: aex.telegram
+        default: aex.telegram.web
         required: true
       appidhash:
         description: "use old APP_ID/APP_HASH"

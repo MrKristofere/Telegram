@@ -184,14 +184,17 @@ jobs:
           case "${{ inputs.build-type }}" in
             "Web"|"Web (Debug)")
               ORIGINAL_PACKAGE="org.telegram.messenger.web"
+              CUSTOM_PACKAGE="${{ inputs.pkg-name }}.web"
               ;;
 
             "Google Play")
               ORIGINAL_PACKAGE="org.telegram.messenger"
+              CUSTOM_PACKAGE="${{ inputs.pkg-name }}"
               ;;
 
             "Google Play (Debug)")
               ORIGINAL_PACKAGE="org.telegram.messenger.beta"
+              CUSTOM_PACKAGE="${{ inputs.pkg-name }}"
               ;;
 
             *)
@@ -202,11 +205,14 @@ jobs:
 
           echo "Build type: ${{ inputs.build-type }}"
           echo "Original package: $ORIGINAL_PACKAGE"
-          echo "Custom package: ${{ inputs.pkg-name }}"
+          echo "Custom package: $CUSTOM_PACKAGE"
 
           sed -i \
-            "s/${ORIGINAL_PACKAGE}/${{ inputs.pkg-name }}/g" \
-            "${{ steps.build.outputs.module }}/google-services.json" \
+            "s/${ORIGINAL_PACKAGE}/${CUSTOM_PACKAGE}/g" \
+            "${{ steps.build.outputs.module }}/google-services.json"
+
+          sed -i \
+            "s/${ORIGINAL_PACKAGE}/${CUSTOM_PACKAGE}/g" \
             "TMessagesProj/google-services.json"
 
       # ============================================================

@@ -612,7 +612,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
-          name: telegram-artifact
+          name: ${{ steps.build.outputs.artifact_name }}
           path: ${{ steps.build.outputs.module }}/build/outputs/**/*.apk
           if-no-files-found: error
           archive: false

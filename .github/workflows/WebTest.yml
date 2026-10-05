@@ -8,6 +8,15 @@ on:
         type: string
         default: master
         required: true
+      build-type: 
+        description: "Application build type"
+        type: choice
+        options:
+          - Web
+          - Google Play
+          - Web (Debug)
+          - Google Play (Debug)
+        default: Web
       pkg-name:
         description: "use another pkg name"
         type: string
@@ -74,6 +83,56 @@ jobs:
           ref: ${{ inputs.branch }}
           submodules: recursive
 
+      - name: Configure build type
+        id: build
+        run: |
+          set -euo pipefail
+
+          case "${{ inputs.build-type }}" in
+            "Web")
+              MODULE="TMessagesProj_AppStandalone"
+              TASK="assembleAfatStandalone"
+              OUTPUT_DIR="TMessagesProj_AppStandalone/build/outputs"
+              ARTIFACT_NAME="telegram-standalone-web"
+              ;;
+
+            "Web (Debug)")
+              MODULE="TMessagesProj_AppStandalone"
+              TASK="assembleAfatDebug"
+              OUTPUT_DIR="TMessagesProj_AppStandalone/build/outputs"
+              ARTIFACT_NAME="telegram-standalone-web-debug"
+              ;;
+
+            "Google Play")
+              MODULE="TMessagesProj_App"
+              TASK="assembleAfatRelease"
+              OUTPUT_DIR="TMessagesProj_App/build/outputs"
+              ARTIFACT_NAME="telegram-google-play"
+              ;;
+
+            "Google Play (Debug)")
+              MODULE="TMessagesProj_App"
+              TASK="assembleAfatDebug"
+              OUTPUT_DIR="TMessagesProj_App/build/outputs"
+              ARTIFACT_NAME="telegram-google-play-debug"
+              ;;
+
+            *)
+              echo "Unknown build type: ${{ inputs.build-type }}"
+              exit 1
+              ;;
+          esac
+
+          echo "module=$MODULE" >> "$GITHUB_OUTPUT"
+          echo "task=$TASK" >> "$GITHUB_OUTPUT"
+          echo "output_dir=$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+
+          echo "Build type: ${{ inputs.build-type }}"
+          echo "Module: $MODULE"
+          echo "Task: $TASK"
+          echo "Output: $OUTPUT_DIR"
+
       # ============================================================
       # ISOLATE GRADLE USER HOME
       # ============================================================
@@ -123,7 +182,7 @@ jobs:
           import shutil
 
           files = [
-              "TMessagesProj_AppStandalone/google-services.json",
+              "${{ steps.build.outputs.module }}/google-services.json",
               "TMessagesProj/google-services.json",
           ]
 
@@ -171,7 +230,7 @@ jobs:
 
           echo "Firebase package entries:"
           grep -n "package_name" \
-            TMessagesProj_AppStandalone/google-services.json \
+            ${{ steps.build.outputs.module }}/google-services.json \
             TMessagesProj/google-services.json
 
       # ============================================================
@@ -199,7 +258,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          BUILD_GRADLE="TMessagesProj_AppStandalone/build.gradle"
+          BUILD_GRADLE="${{ steps.build.outputs.module }}/build.gradle"
 
           echo "build_tools=$(grep -oP "buildToolsVersion ['\"]\\K[^'\"]+" "$BUILD_GRADLE")" >> "$GITHUB_OUTPUT"
 
@@ -281,7 +340,7 @@ jobs:
           sed -i \
             -e 's/minifyEnabled true/minifyEnabled false/' \
             -e 's/shrinkResources true/shrinkResources false/' \
-             TMessagesProj_AppStandalone/build.gradle
+             ${{ steps.build.outputs.module }}/build.gradle
 
       - name: Disable optimize R8
         if: ${{ inputs.disable-optimize && !inputs.disable-minify }}
@@ -449,18 +508,18 @@ jobs:
           set -euo pipefail
 
           ./gradlew \
-            :TMessagesProj_AppStandalone:assembleAfatStandalone
+            :${{ steps.build.outputs.module }}:${{ steps.build.outputs.task }}
 
       - name: Rename APK
         run: |
-          APK=$(find TMessagesProj_AppStandalone/build/outputs -type f -name 'app.apk' -print -quit)
+          APK=$(find ${{ steps.build.outputs.module }}/build/outputs -type f -name 'app.apk' -print -quit)
 
           if [[ -z "$APK" ]]; then
             echo "APK not found"
             exit 1
           fi
 
-          mv "$APK" "TMessagesProj_AppStandalone/build/outputs/${{ inputs.app-name }}.apk"
+          mv "$APK" "${{ steps.build.outputs.module }}/build/outputs/${{ inputs.app-name }}.apk"
 
       # ============================================================
       # VERIFY APK PACKAGE + SIGNATURE + SHA-256
@@ -479,7 +538,7 @@ jobs:
 
           KEYSTORE="TMessagesProj/config/release.keystore"
 
-          APK=$(find TMessagesProj_AppStandalone/build/outputs \
+          APK=$(find ${{ steps.build.outputs.module }}/build/outputs \
             -type f \
             -name "*.apk" \
             | head -n 1)
@@ -577,8 +636,8 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
-          name: telegram-standalone-web
-          path: TMessagesProj_AppStandalone/build/outputs/**/*.apk
+          name: telegram-artifact
+          path: ${{ steps.build.outputs.module }}/build/outputs/**/*.apk
           if-no-files-found: error
           archive: false
 
@@ -594,7 +653,7 @@ jobs:
           rm -f TMessagesProj/config/release.keystore
           rm -f "$GRADLE_USER_HOME/gradle.properties"
 
-          rm -f TMessagesProj_AppStandalone/google-services.json.original
+          rm -f ${{ steps.build.outputs.module }}/google-services.json.original
           rm -f TMessagesProj/google-services.json.original
 
           echo "Signing files cleaned up."

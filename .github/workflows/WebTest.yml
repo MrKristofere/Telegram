@@ -185,68 +185,75 @@ jobs:
           import json
           import shutil
 
-          files = [
-              "${{ steps.build.outputs.module }}/google-services.json",
-              "TMessagesProj/google-services.json",
-          ]
-
+          path = "${{ steps.build.outputs.module }}/google-services.json"
           pkg_name = "${{ inputs.pkg-name }}"
+          build_type = "${{ inputs.build-type }}"
 
-          packages = {
-              "org.telegram.messenger": pkg_name,
-              "org.telegram.messenger.beta": f"{pkg_name}.beta",
-              "org.telegram.messenger.web": f"{pkg_name}.web",
-          }
+          if build_type in ("Web", "Web (Debug)"):
+              original_package = "org.telegram.messenger.web"
+              custom_package = f"{pkg_name}.web"
 
-          for path in files:
-              print(f"Configuring Firebase: {path}")
+          elif build_type == "Google Play":
+              original_package = "org.telegram.messenger"
+              custom_package = pkg_name
 
-              shutil.copy2(path, f"{path}.original")
+          elif build_type == "Google Play (Debug)":
+              original_package = "org.telegram.messenger.beta"
+              custom_package = f"{pkg_name}.beta"
 
-              with open(path, "r", encoding="utf-8") as f:
-                  data = json.load(f)
+          else:
+              raise SystemExit(
+                  f"Unknown build type: {build_type}"
+              )
 
-              found = set()
+          print(f"Configuring Firebase: {path}")
+          print(f"Build type: {build_type}")
+          print(f"Original package: {original_package}")
+          print(f"Custom package: {custom_package}")
 
-              for client in data.get("client", []):
-                  package_name = (
-                      client
-                      .get("client_info", {})
-                      .get("android_client_info", {})
-                      .get("package_name")
+          shutil.copy2(path, f"{path}.original")
+
+          with open(path, "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          found = False
+
+          for client in data.get("client", []):
+              package_name = (
+                  client
+                  .get("client_info", {})
+                  .get("android_client_info", {})
+                  .get("package_name")
+              )
+
+              if package_name == original_package:
+                  client["client_info"]["android_client_info"]["package_name"] = custom_package
+                  found = True
+
+                  print(
+                      f"Changed Firebase package: "
+                      f"{package_name} -> {custom_package}"
                   )
 
-                  if package_name in packages:
-                      replacement = packages[package_name]
+          if not found:
+              raise SystemExit(
+                  f"Firebase client '{original_package}' "
+                  f"not found in {path}"
+              )
 
-                      client["client_info"]["android_client_info"]["package_name"] = replacement
-
-                      found.add(package_name)
-
-                      print(
-                          f"Changed Firebase package in {path}: "
-                          f"{package_name} -> {replacement}"
-                      )
-
-              missing = set(packages) - found
-
-              if missing:
-                  raise SystemExit(
-                      f"Firebase clients not found in {path}: "
-                      f"{', '.join(sorted(missing))}"
-                  )
-
-              with open(path, "w", encoding="utf-8") as f:
-                  json.dump(data, f, indent=2)
-                  f.write("\n")
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(data, f, indent=2)
+              f.write("\n")
 
           PY
 
           echo "Firebase package entries:"
-
           grep -n "package_name" \
-            ${{ steps.build.outputs.module }}/google-services.json \
-            TMessagesProj/google-services.json
+            "${{ steps.build.outputs.module }}/google-services.json"
+
+          echo "TMessagesProj/google-services.json remains unchanged:"
+          grep -n "package_name" \
+            "TMessagesProj/google-services.json"
 
       # ============================================================
       # GRADLE OPTIMIZATIONS

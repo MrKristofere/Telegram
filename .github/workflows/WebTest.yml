@@ -181,39 +181,72 @@ jobs:
         run: |
           set -euo pipefail
 
-          case "${{ inputs.build-type }}" in
-            "Web"|"Web (Debug)")
-              ORIGINAL_PACKAGE="org.telegram.messenger.web"
-              CUSTOM_PACKAGE="${{ inputs.pkg-name }}.web"
-              ;;
+          python3 <<'PY'
+          import json
+          import shutil
 
-            "Google Play")
-              ORIGINAL_PACKAGE="org.telegram.messenger"
-              CUSTOM_PACKAGE="${{ inputs.pkg-name }}"
-              ;;
+          files = [
+              "${{ steps.build.outputs.module }}/google-services.json",
+              "TMessagesProj/google-services.json",
+          ]
 
-            "Google Play (Debug)")
-              ORIGINAL_PACKAGE="org.telegram.messenger.beta"
-              CUSTOM_PACKAGE="${{ inputs.pkg-name }}"
-              ;;
+          pkg_name = "${{ inputs.pkg-name }}"
 
-            *)
-              echo "Unknown build type: ${{ inputs.build-type }}"
-              exit 1
-              ;;
-          esac
+          packages = {
+              "org.telegram.messenger": pkg_name,
+              "org.telegram.messenger.beta": f"{pkg_name}.beta",
+              "org.telegram.messenger.web": f"{pkg_name}.web",
+          }
 
-          echo "Build type: ${{ inputs.build-type }}"
-          echo "Original package: $ORIGINAL_PACKAGE"
-          echo "Custom package: $CUSTOM_PACKAGE"
+          for path in files:
+              print(f"Configuring Firebase: {path}")
 
-          sed -i \
-            "s/${ORIGINAL_PACKAGE}/${CUSTOM_PACKAGE}/g" \
-            "${{ steps.build.outputs.module }}/google-services.json"
+              shutil.copy2(path, f"{path}.original")
 
-          sed -i \
-            "s/${ORIGINAL_PACKAGE}/${CUSTOM_PACKAGE}/g" \
-            "TMessagesProj/google-services.json"
+              with open(path, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+
+              found = set()
+
+              for client in data.get("client", []):
+                  package_name = (
+                      client
+                      .get("client_info", {})
+                      .get("android_client_info", {})
+                      .get("package_name")
+                  )
+
+                  if package_name in packages:
+                      replacement = packages[package_name]
+
+                      client["client_info"]["android_client_info"]["package_name"] = replacement
+
+                      found.add(package_name)
+
+                      print(
+                          f"Changed Firebase package in {path}: "
+                          f"{package_name} -> {replacement}"
+                      )
+
+              missing = set(packages) - found
+
+              if missing:
+                  raise SystemExit(
+                      f"Firebase clients not found in {path}: "
+                      f"{', '.join(sorted(missing))}"
+                  )
+
+              with open(path, "w", encoding="utf-8") as f:
+                  json.dump(data, f, indent=2)
+                  f.write("\n")
+
+          PY
+
+          echo "Firebase package entries:"
+
+          grep -n "package_name" \
+            ${{ steps.build.outputs.module }}/google-services.json \
+            TMessagesProj/google-services.json
 
       # ============================================================
       # GRADLE OPTIMIZATIONS

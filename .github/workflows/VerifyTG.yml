@@ -7,6 +7,10 @@ on:
         description: "DrKLO/Telegram commit, tag or branch"
         required: true
         default: "master"
+      verify-build:
+        description: "Compare with the original"
+        type: boolean
+        default: false
 
 jobs:
   verify:
@@ -66,6 +70,7 @@ jobs:
           } > work/telegram-build-metadata.txt
 
       - name: Download official APK
+        if: ${{ inputs.verify-build }}
         run: |
           set -euo pipefail
 
@@ -134,6 +139,7 @@ jobs:
           sha256sum work/telegram_built.apk
 
       - name: Compare APKs
+        if: ${{ inputs.verify-build }}
         working-directory: work/telegram
         run: |
           set -euo pipefail
@@ -143,7 +149,7 @@ jobs:
             ../telegram_built.apk
 
       - name: Verify
-        if: success()
+        if: ${{ success() && inputs.verify-build }}
         run: |
           echo "REPRODUCIBLE BUILD VERIFIED"
 
@@ -157,6 +163,7 @@ jobs:
           retention-days: 30
 
       - name: Upload APK official
+        if: ${{ inputs.verify-build }}
         uses: actions/upload-artifact@v7
         with:
           name: telegram-apk
@@ -166,7 +173,6 @@ jobs:
           retention-days: 30
 
       - name: Upload build metadata
-        if: always()
         uses: actions/upload-artifact@v7
         with:
           path: work/telegram-build-metadata.txt

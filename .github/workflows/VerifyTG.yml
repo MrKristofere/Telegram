@@ -134,19 +134,19 @@ jobs:
 
           test -n "$APK"
 
-          cp "$APK" work/telegram_built.apk
+          mv "$APK" work/telegram_built.apk
 
           sha256sum work/telegram_built.apk
 
       - name: Compare APKs
         if: ${{ inputs.verify-build }}
-        working-directory: work/telegram
+        working-directory: work
         run: |
           set -euo pipefail
 
           python3 apkdiff.py \
-            ../telegram_official.apk \
-            ../telegram_built.apk
+            telegram_official.apk \
+            telegram_built.apk
 
       - name: Verify
         if: ${{ success() && inputs.verify-build }}
@@ -158,7 +158,7 @@ jobs:
         with:
           name: telegram-apk
           archive: false
-          path: work/telegram/TMessagesProj/build/outputs/apk/telegram_built.apk
+          path: work/telegram_built.apk
           if-no-files-found: error
           retention-days: 30
 
@@ -168,7 +168,7 @@ jobs:
         with:
           name: telegram-apk
           archive: false
-          path: work/telegram/TMessagesProj/build/outputs/apk/telegram_official.apk
+          path: work/telegram_official.apk
           if-no-files-found: error
           retention-days: 30
 

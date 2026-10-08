@@ -109,7 +109,7 @@ jobs:
                 :TMessagesProj_AppStandalone:assembleAfatStandalone
 
               cp -R \
-                /home/gradle/TMessagesProj_App/build/outputs/apk/. \
+                /home/gradle/TMessagesProj_AppStandalone/build/outputs/apk/. \
                 /home/source/TMessagesProj/build/outputs/apk/
             '
 

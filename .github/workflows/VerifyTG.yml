@@ -1,4 +1,4 @@
-name: Verify Telegram Build
+name: Telegram Reproduction Build
 
 on:
   workflow_dispatch:

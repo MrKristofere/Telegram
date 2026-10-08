@@ -13,18 +13,37 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout verifier
-        uses: actions/checkout@v7
 
       - name: Checkout Telegram source
         run: |
           set -euo pipefail
 
-          git clone --recursive https://github.com/DrKLO/Telegram.git work/telegram
-          cd work/telegram
+          REPO="https://github.com/DrKLO/Telegram.git"
+          DIR="work/telegram"
+          REF="${{ inputs.source }}"
 
-          git checkout "${{ inputs.source }}"
-          git submodule update --init --recursive
+          mkdir -p work
+
+          git init "$DIR"
+
+          cd "$DIR"
+
+          git remote add origin "$REPO"
+
+          git fetch \
+            --depth 1 \
+            --no-tags \
+            origin \
+            "$REF"
+
+          git checkout --detach FETCH_HEAD
+
+          git submodule sync --recursive
+
+          git submodule update \
+            --init \
+            --recursive \
+            --depth 1
 
       - name: Create build metadata
         if: always()
@@ -50,9 +69,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          curl -fL https://telegram.org/dl/android/apk \
-            -o work/telegram_official.apk
+          mkdir -p work
 
+          curl \
+            --fail \
+            --location \
+            --retry 10 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            --continue-at - \
+            --output work/telegram_official.apk \
+            https://telegram.org/dl/android/apk
+
+          test -s work/telegram_official.apk
           sha256sum work/telegram_official.apk
 
       - name: Build official Docker image

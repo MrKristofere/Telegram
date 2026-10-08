@@ -532,7 +532,7 @@ jobs:
       # BUILD SIGNED APK
       # ============================================================
 
-      - name: Build Standalone APK
+      - name: Build APK
         run: |
           set -euo pipefail
 

@@ -47,6 +47,10 @@ on:
         description: "Disable obfuscate R8"
         type: boolean
         default: true
+      test-sign:
+        description: "Use test signature"
+        type: boolean
+        default: false
 
 env:
   CCACHE_DIR: ~/.ccache
@@ -379,6 +383,7 @@ jobs:
       # ============================================================
 
       - name: Restore release keystore
+        if: ${{ !inputs.test-sign }}
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
         run: |
@@ -450,6 +455,7 @@ jobs:
       # ============================================================
 
       - name: Configure release signing
+        if: ${{ !inputs.test-sign }}
         env:
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
@@ -497,6 +503,7 @@ jobs:
       # ============================================================
 
       - name: Verify release keystore
+        if: ${{ !inputs.test-sign }}
         env:
           RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
@@ -548,6 +555,7 @@ jobs:
       # ============================================================
 
       - name: Verify APK signature + certificate
+        if: ${{ !inputs.test-sign }}
         continue-on-error: true
         env:
           RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}

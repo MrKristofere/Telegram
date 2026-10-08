@@ -1,4 +1,4 @@
-name: Telegram Reproduction Build
+name: Telegram Reproducible Build
 
 on:
   workflow_dispatch:

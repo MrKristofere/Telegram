@@ -134,12 +134,13 @@ jobs:
           sha256sum work/telegram_built.apk
 
       - name: Compare APKs
+        working-directory: work/telegram
         run: |
           set -euo pipefail
 
           python3 apkdiff.py \
-            work/telegram_official.apk \
-            work/telegram_built.apk
+            ../telegram_official.apk \
+            ../telegram_built.apk
 
       - name: Verify
         if: success()

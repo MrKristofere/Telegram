@@ -18,16 +18,20 @@ on:
           - Google Play (Debug)
         default: Web
       pkg-name:
-        description: "use another pkg name"
+        description: "Set package name"
         type: string
         default: aex.telegram
         required: true
       appidhash:
-        description: "use old APP_ID/APP_HASH"
+        description: "Use old APP_ID/APP_HASH"
         type: boolean
         default: true
       useoff:
-        description: "use the official package name"
+        description: "Use the official package name"
+        type: boolean
+        default: false
+      test-sign:
+        description: "Use test signature"
         type: boolean
         default: false
       app-name:
@@ -47,10 +51,6 @@ on:
         description: "Disable obfuscate R8"
         type: boolean
         default: true
-      test-sign:
-        description: "Use test signature"
-        type: boolean
-        default: false
 
 env:
   CCACHE_DIR: ~/.ccache

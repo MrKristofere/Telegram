@@ -134,7 +134,7 @@ jobs:
 
           test -n "$APK"
 
-          mv "$APK" work/telegram_built.apk
+          sudo mv "$APK" work/telegram_built.apk
 
           sha256sum work/telegram_built.apk
 

@@ -1,0 +1,133 @@
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatEditActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ChatEditActivity.java
+index ed5f22c5e4e..8910b33a46f 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ChatEditActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatEditActivity.java
+@@ -763,7 +763,7 @@ protected void onDraw(Canvas canvas) {
+         } else {
+             nameTextView.setHint(getString("GroupName", R.string.GroupName));
+         }
+-        nameTextView.setEnabled(currentChat != null || ChatObject.canChangeChatInfo(currentChat));
++        nameTextView.setEnabled(ChatObject.canChangeChatInfo(currentChat));
+         nameTextView.setFocusable(nameTextView.isEnabled());
+         nameTextView.getEditText().addTextChangedListener(new TextWatcher() {
+@@ -1377,7 +1377,7 @@ public void afterTextChanged(Editable editable) {
+         if (currentChat != null) {
+-            if (!ChatObject.hasAdminRights(currentChat)) {
++            if (false && !ChatObject.hasAdminRights(currentChat)) {
+                 infoContainer.setVisibility(View.GONE);
+                 settingsTopSectionCell.setVisibility(View.GONE);
+             }
+@@ -2043,8 +2043,8 @@ private boolean checkDiscard(boolean invoked) {
+     private int getAdminCount() {
+-        if (info == null) {
+-            return 1;
++        if (info == null || info.participants == null) {
++            return info == null ? 1 : 0;
+         }
+         int count = 0;
+         for (int a = 0, N = info.participants.participants.size(); a < N; a++) {
+@@ -2053,10 +2053,32 @@ private boolean checkDiscard(boolean invoked) {
+                     chatParticipant instanceof TLRPC.TL_chatParticipantCreator) {
+                 count++;
+             }
++            if (chatParticipant instanceof TLRPC.TL_chatChannelParticipant) {
++                TLRPC.ChannelParticipant channelParticipant = ((TLRPC.TL_chatChannelParticipant) chatParticipant).channelParticipant;
++                if (channelParticipant instanceof TLRPC.TL_channelParticipantAdmin || channelParticipant instanceof TLRPC.TL_channelParticipantCreator) {
++                    count++;
++                }
++            }
+         }
+         return count;
+     }
++
++    private int realAdminCount;
++    private void getChannelAdminCountFromServer() {
++        TLRPC.TL_channels_getParticipants req = new TLRPC.TL_channels_getParticipants();
++        req.channel = getMessagesController().getInputChannel(chatId);
++        req.filter = new TLRPC.TL_channelParticipantsAdmins();
++        int reqId = getConnectionsManager().sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
++            if (adminCell == null || response == null) {
++                return;
++            }
++            TLRPC.TL_channels_channelParticipants res = (TLRPC.TL_channels_channelParticipants) response;
++            realAdminCount = res.count;
++            adminCell.setTextAndValueAndIcon(LocaleController.getString(R.string.ChannelAdministrators), String.format("%d", res.count), R.drawable.msg_admins, true);
++        }));
++        getConnectionsManager().bindRequestToGuid(reqId, classGuid);
++    }
+@@ -2407,7 +2429,7 @@ private void updateFields(boolean updateChat, boolean animated) {
+-                        int totalCount = forum ? 16 : 15;
++                        int totalCount = forum ? 19 : 18;
+@@ -2437,7 +2459,11 @@ private void updateFields(boolean updateChat, boolean animated) {
+-                adminCell.setTextAndValueAndIcon(getString("ChannelAdministrators", R.string.ChannelAdministrators), String.format("%d", ChatObject.isChannel(currentChat) ? info.admins_count : getAdminCount()), R.drawable.msg_admins, true);
++                adminCell.setTextAndValueAndIcon(getString("ChannelAdministrators", R.string.ChannelAdministrators), String.format("%d", ChatObject.hasAdminRights(currentChat) && ChatObject.isChannel(currentChat) ? info.admins_count : getAdminCount()), R.drawable.msg_admins, true);
++                if (!ChatObject.hasAdminRights(currentChat) && ChatObject.isChannel(currentChat) && info.participants != null && info.participants.participants != null && info.participants.participants.size() != info.participants_count && realAdminCount == 0) {
++                    adminCell.setTextAndIcon(getString("ChannelAdministrators", R.string.ChannelAdministrators), R.drawable.msg_admins, true);
++                    getChannelAdminCountFromServer();
++                }
+@@ -2472,6 +2498,8 @@ private void updateFields(boolean updateChat, boolean animated) {
+         if (suggestedCell != null) {
+             updateSuggestedCell(animated);
+         }
++
++        if (logCell != null && !ChatObject.hasAdminRights(currentChat)) logCell.setVisibility(View.GONE);
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatRightsEditActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ChatRightsEditActivity.java
+index e0fa0043efd..c5ac9119133 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ChatRightsEditActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatRightsEditActivity.java
+@@ -653,7 +653,7 @@ public void onScrollStateChanged(RecyclerView recyclerView, int newState) {
+         listView.setOnItemClickListener((view, position) -> {
+-            if (!canEdit && (!currentChat.creator || currentType != TYPE_ADMIN || position != anonymousRow)) {
++            if (!canEdit && position != 0 && (!currentChat.creator || currentType != TYPE_ADMIN || position != anonymousRow)) {
+                 return;
+             }
+@@ -1882,7 +1882,7 @@ public boolean isEnabled(RecyclerView.ViewHolder holder) {
+             if (!canEdit) {
+-                return false;
++                return type == VIEW_TYPE_USER_CELL && holder.getAdapterPosition() == 0;
+             }
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatUsersActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ChatUsersActivity.java
+index 728f53edca1..08d9bdcfc77 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ChatUsersActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatUsersActivity.java
+@@ -458,7 +458,7 @@ private void updateRows() {
+-            if (!isCommunity && (!ChatObject.isChannel(currentChat) && currentChat.creator || currentChat.megagroup && !currentChat.gigagroup && ChatObject.canBlockUsers(currentChat))) {
++            if (!isCommunity && (!ChatObject.isChannel(currentChat) && currentChat.creator || currentChat.megagroup && !currentChat.gigagroup /* && ChatObject.canBlockUsers(currentChat) */)) {
+@@ -469,7 +469,7 @@ private void updateRows() {
+-            if (ChatObject.isChannel(currentChat) && !isCommunity) {
++            if (ChatObject.isChannel(currentChat) && !isCommunity && ChatObject.hasAdminRights(currentChat)) {
+@@ -1925,7 +1925,7 @@ private boolean createMenuForParticipant(final TLObject participant, boolean res
+-            if (resultOnly || !result) {
++            if (resultOnly || !result && joined == 0) {
+                 return result;
+             }
+@@ -2141,6 +2141,7 @@ private boolean checkDiscard(boolean invoked) {
+         if (transfer) return true;
++        if (!ChatObject.hasAdminRights(currentChat)) return true;
+         String newBannedRights = ChatObject.getBannedRightsString(defaultBannedRights);
+@@ -3285,7 +3311,7 @@ public boolean isEnabled(RecyclerView.ViewHolder holder, int viewType) {
+             if (viewType == VIEW_TYPE_INNER_CHECK) {
+-                return true;
++                return ChatObject.canBlockUsers(currentChat);
+             }
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Components/SlideChooseView.java b/TMessagesProj/src/main/java/org/telegram/ui/Components/SlideChooseView.java
+index 9ab2fdaca38..604be821953 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/Components/SlideChooseView.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/Components/SlideChooseView.java
+@@ -57,6 +57,8 @@ public class SlideChooseView extends View {
+     private boolean touchWasClose = false;
++    public boolean touchEnabled = true;
+@@ -138,6 +140,7 @@ public void setDashedFrom(int from) {
+     @Override
+     public boolean onTouchEvent(MotionEvent event) {
++        if (!touchEnabled) return false;
+         float x = event.getX();
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
+index 1220c6f2a22..0ba4c84acab 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
+@@ -12210,7 +12210,7 @@ private void createActionBarMenu(boolean animated) {
+-                    if (ChatObject.hasAdminRights(chat) || chat.megagroup && ChatObject.canChangeChatInfo(chat)) {
++                    if (ChatObject.hasAdminRights(chat) || chat.megagroup /* && ChatObject.canChangeChatInfo(chat) */) {
+                         editItemVisible = true;
+                     }
